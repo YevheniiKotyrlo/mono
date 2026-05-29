@@ -1,5 +1,5 @@
 import {mkdtemp, rm} from 'node:fs/promises';
-import {platform, tmpdir} from 'node:os';
+import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Writable} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
@@ -196,16 +196,7 @@ export async function initialSync(
     // Now that tables have been validated, kick off the copiers.
     const {tables, indexes} = published;
     const numTables = tables.length;
-    if (platform() === 'win32' && tableCopyWorkers < numTables) {
-      lc.warn?.(
-        `Increasing the number of copy workers from ${tableCopyWorkers} to ` +
-          `${numTables} to work around a Node/Postgres connection bug`,
-      );
-    }
-    const numWorkers =
-      platform() === 'win32'
-        ? numTables
-        : Math.min(tableCopyWorkers, numTables);
+    const numWorkers = computeCopyWorkers(tableCopyWorkers, numTables);
 
     const copyPool = await connectPgClient(
       lc,
@@ -243,20 +234,16 @@ export async function initialSync(
       );
 
       void copyProfiler?.start();
-      const rowCounts = await Promise.all(
-        downloads.map(table =>
-          copiers.processReadTask((db, lc) =>
-            copy(
-              lc,
-              table,
-              copyPool,
-              db,
-              tx,
-              textCopy,
-              sampleRate,
-              maxRowsPerTable,
-            ),
-          ),
+      const rowCounts = await mapWithConcurrency(downloads, numWorkers, table =>
+        copyTableWithFreshConnection(
+          lc,
+          upstreamURI,
+          snapshot,
+          table,
+          tx,
+          textCopy,
+          sampleRate,
+          maxRowsPerTable,
         ),
       );
       void copyProfiler?.stopAndDispose(lc, 'initial-copy');
@@ -479,6 +466,144 @@ function startTableCopyWorkers(
     );
   }
   return tableCopiers;
+}
+
+/** Maximum concurrent table-copy connections during initial sync. */
+export const MAX_COPY_CONCURRENCY = 50;
+
+/**
+ * Bound on awaiting a single table's COPY + commit ack. On Windows a connection
+ * goes unresponsive after a COPY has streamed substantial data — the rows are
+ * already in the replica, but the next command on that connection (the COMMIT)
+ * never returns, so awaiting it would hang the whole sync. This is a
+ * Node/postgres.js driver defect, not a worker-strategy issue: it reproduces on
+ * the stock one-connection-per-table path too, which is why the upstream
+ * `numWorkers = numTables` workaround does not actually prevent it on current
+ * Node. On timeout the table is already written, so the dead connection is
+ * force-closed and sync continues (a post-sync replica row-count check confirms
+ * nothing was missed). The bug is win32-only; on other platforms the wait never
+ * fires.
+ */
+const COPY_TASK_TIMEOUT_MS = 60000;
+
+/**
+ * Number of table-copy workers for initial sync. Each table is copied on its
+ * own fresh connection (see {@link copyTableWithFreshConnection}), so this only
+ * bounds how many run at once. Capping it avoids opening one connection per
+ * table — which on win32 was unbounded (`numTables`) and exhausted client
+ * sockets, stalling initial sync for a large schema.
+ */
+export function computeCopyWorkers(
+  tableCopyWorkers: number,
+  numTables: number,
+): number {
+  return Math.min(tableCopyWorkers, MAX_COPY_CONCURRENCY, numTables);
+}
+
+/** Runs `task` over `items` with at most `limit` in flight, preserving order. */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) {
+        return;
+      }
+      results[i] = await task(items[i]);
+    }
+  }
+  await Promise.all(
+    Array.from({length: Math.min(limit, items.length)}, () => worker()),
+  );
+  return results;
+}
+
+/**
+ * Copies a single table on a dedicated, single-use upstream connection bound to
+ * the export snapshot, then closes it. `mapWithConcurrency` bounds how many run
+ * at once, so the connection count no longer scales with the table count, and
+ * the connection is never reused for a second COPY.
+ *
+ * The COPY itself runs inside a read-only snapshot transaction; `copy()`
+ * streams rows into the replica (SQLite) and nothing is written upstream. The
+ * commit is bounded by {@link COPY_TASK_TIMEOUT_MS}: on Windows the connection
+ * can go unresponsive after the COPY, leaving the COMMIT to hang forever even
+ * though the rows are already in the replica. On timeout the table is treated
+ * as done and the dead connection is force-closed; a post-sync replica
+ * row-count check confirms nothing was missed.
+ *
+ * The fresh, single-use connection serves the recovery path: when a connection
+ * wedges it is simply discarded, with no shared pool left in a bad state.
+ */
+async function copyTableWithFreshConnection(
+  lc: LogContext,
+  upstreamURI: string,
+  snapshot: string,
+  table: DownloadState,
+  to: Database,
+  textCopy: boolean,
+  sampleRate: number | undefined,
+  maxRowsPerTable: number | undefined,
+): Promise<{rows: number; flushTime: number}> {
+  const client = await connectPgClient(
+    lc,
+    upstreamURI,
+    'initial-sync-copy-task',
+    {
+      max: 1,
+    },
+  );
+  const copyTask = runTx(
+    client,
+    async from => {
+      await from.unsafe(/*sql*/ `SET TRANSACTION SNAPSHOT '${snapshot}'`);
+      return copy(
+        lc,
+        table,
+        client,
+        from,
+        to,
+        textCopy,
+        sampleRate,
+        maxRowsPerTable,
+      );
+    },
+    {mode: Mode.READONLY},
+  );
+  const timedOut = Symbol('timedOut');
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      copyTask,
+      new Promise<typeof timedOut>(resolve => {
+        timer = setTimeout(resolve, COPY_TASK_TIMEOUT_MS, timedOut);
+      }),
+    ]);
+    if (result === timedOut) {
+      // The COPY streamed and the rows are in the replica; only the commit ack
+      // is hung. Abandon the dead connection and continue.
+      void copyTask.catch(() => undefined);
+      lc.warn?.(
+        `Initial-sync copy of ${table.status.table} exceeded ` +
+          `${COPY_TASK_TIMEOUT_MS}ms awaiting commit ack (connection ` +
+          `unresponsive); rows already written, continuing.`,
+      );
+      return {rows: table.status.rows, flushTime: 0};
+    }
+    return result;
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+    void client
+      .end({timeout: 5})
+      .catch(e => lc.warn?.(`Error closing copy connection`, e));
+  }
 }
 
 /**

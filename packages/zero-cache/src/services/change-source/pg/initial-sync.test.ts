@@ -4,8 +4,11 @@ import {createSilentLogContext} from '../../../../../shared/src/logging-test-uti
 import type {PublishedTableSpec} from '../../../db/specs.ts';
 import type {PostgresDB} from '../../../types/pg.ts';
 import {
+  computeCopyWorkers,
   getInitialDownloadState,
   makeDownloadStatements,
+  mapWithConcurrency,
+  MAX_COPY_CONCURRENCY,
 } from './initial-sync.ts';
 import {createReplicationSlot} from './replication-slots.ts';
 
@@ -20,6 +23,105 @@ function spec(
     publications,
   } as unknown as PublishedTableSpec;
 }
+
+describe('computeCopyWorkers', () => {
+  test('honors the configured worker count when below the cap', () => {
+    expect(computeCopyWorkers(1, 1200)).toBe(1);
+    expect(computeCopyWorkers(3, 1200)).toBe(3);
+    expect(computeCopyWorkers(MAX_COPY_CONCURRENCY, 1200)).toBe(
+      MAX_COPY_CONCURRENCY,
+    );
+  });
+
+  test('caps a large schema — no longer one connection per table on win32', () => {
+    // The win32 defect sized the pool to numTables; the cap removes it, so the
+    // worker count never scales with the number of tables.
+    expect(computeCopyWorkers(100, 1200)).toBe(MAX_COPY_CONCURRENCY);
+    expect(computeCopyWorkers(MAX_COPY_CONCURRENCY + 50, 1200)).toBe(
+      MAX_COPY_CONCURRENCY,
+    );
+    expect(
+      computeCopyWorkers(Number.MAX_SAFE_INTEGER, 5000),
+    ).toBeLessThanOrEqual(MAX_COPY_CONCURRENCY);
+  });
+
+  test('never starts more workers than there are tables', () => {
+    expect(computeCopyWorkers(MAX_COPY_CONCURRENCY, 10)).toBe(10);
+    expect(computeCopyWorkers(3, 2)).toBe(2);
+    expect(computeCopyWorkers(1, 1)).toBe(1);
+  });
+
+  test('handles the empty-schema edge', () => {
+    expect(computeCopyWorkers(MAX_COPY_CONCURRENCY, 0)).toBe(0);
+  });
+});
+
+describe('mapWithConcurrency', () => {
+  test('preserves input order even when tasks finish out of order', async () => {
+    const results = await mapWithConcurrency([1, 2, 3, 4], 4, async value => {
+      // Earlier items finish later, exercising out-of-order completion.
+      await new Promise(resolve => setTimeout(resolve, (5 - value) * 10));
+      return value * 10;
+    });
+    expect(results).toEqual([10, 20, 30, 40]);
+  });
+
+  test('runs every item exactly once', async () => {
+    const seen: number[] = [];
+    const results = await mapWithConcurrency([1, 2, 3, 4, 5], 3, value => {
+      seen.push(value);
+      return Promise.resolve(value);
+    });
+    expect(results).toEqual([1, 2, 3, 4, 5]);
+    expect(seen.toSorted((a, b) => a - b)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  test('empty input resolves to [] without invoking the task', async () => {
+    const task = vi.fn((value: number) => Promise.resolve(value));
+    const results = await mapWithConcurrency([], 4, task);
+    expect(results).toEqual([]);
+    expect(task).not.toHaveBeenCalled();
+  });
+
+  test('never exceeds the concurrency limit', async () => {
+    const limit = 3;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    await mapWithConcurrency(
+      Array.from({length: 12}, (_, index) => index),
+      limit,
+      async () => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise(resolve => setTimeout(resolve, 5));
+        inFlight--;
+      },
+    );
+    expect(maxInFlight).toBe(limit);
+  });
+
+  test('caps in-flight work at the item count when limit exceeds it', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    await mapWithConcurrency([1, 2], 10, async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      inFlight--;
+    });
+    expect(maxInFlight).toBe(2);
+  });
+
+  test('rejects when a task rejects', async () => {
+    await expect(
+      mapWithConcurrency([1, 2, 3], 2, value =>
+        value === 2
+          ? Promise.reject(new Error('boom'))
+          : Promise.resolve(value),
+      ),
+    ).rejects.toThrow('boom');
+  });
+});
 
 describe('makeDownloadStatements', () => {
   test('default path has no TABLESAMPLE or LIMIT', () => {
