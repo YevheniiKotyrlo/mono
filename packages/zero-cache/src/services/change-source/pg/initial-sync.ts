@@ -479,10 +479,11 @@ export const MAX_COPY_CONCURRENCY = 50;
  * Node/postgres.js driver defect, not a worker-strategy issue: it reproduces on
  * the stock one-connection-per-table path too, which is why the upstream
  * `numWorkers = numTables` workaround does not actually prevent it on current
- * Node. On timeout the table is already written, so the dead connection is
- * force-closed and sync continues (a post-sync replica row-count check confirms
- * nothing was missed). The bug is win32-only; on other platforms the wait never
- * fires.
+ * Node. On timeout, if the COPY had already finished streaming (so the rows are
+ * in the replica) the table is treated as done and the dead connection is
+ * force-closed; if the COPY itself had not finished, the timeout fails loudly
+ * rather than skip rows. The bug is win32-only; on other platforms the wait
+ * never fires.
  */
 const COPY_TASK_TIMEOUT_MS = 60000;
 
@@ -534,8 +535,8 @@ export async function mapWithConcurrency<T, R>(
  * commit is bounded by {@link COPY_TASK_TIMEOUT_MS}: on Windows the connection
  * can go unresponsive after the COPY, leaving the COMMIT to hang forever even
  * though the rows are already in the replica. On timeout the table is treated
- * as done and the dead connection is force-closed; a post-sync replica
- * row-count check confirms nothing was missed.
+ * as done ONLY if the COPY had finished streaming (so the rows are written);
+ * a COPY that had not finished fails loudly instead of silently skipping rows.
  *
  * The fresh, single-use connection serves the recovery path: when a connection
  * wedges it is simply discarded, with no shared pool left in a bad state.
@@ -558,11 +559,15 @@ async function copyTableWithFreshConnection(
       max: 1,
     },
   );
+  // Set once the COPY has fully streamed into the replica, before the COMMIT
+  // (which is what hangs on Windows). Lets the timeout tell "COPY done, commit
+  // hung" (safe to continue) from "COPY itself hung" (rows incomplete — fail).
+  let streamed: {rows: number; flushTime: number} | undefined;
   const copyTask = runTx(
     client,
     async from => {
       await from.unsafe(/*sql*/ `SET TRANSACTION SNAPSHOT '${snapshot}'`);
-      return copy(
+      streamed = await copy(
         lc,
         table,
         client,
@@ -572,6 +577,7 @@ async function copyTableWithFreshConnection(
         sampleRate,
         maxRowsPerTable,
       );
+      return streamed;
     },
     {mode: Mode.READONLY},
   );
@@ -585,15 +591,23 @@ async function copyTableWithFreshConnection(
       }),
     ]);
     if (result === timedOut) {
-      // The COPY streamed and the rows are in the replica; only the commit ack
-      // is hung. Abandon the dead connection and continue.
       void copyTask.catch(() => undefined);
+      if (streamed === undefined) {
+        // The COPY itself never finished (not just the commit ack); the rows
+        // may be incomplete, so fail rather than silently skip the table.
+        throw new Error(
+          `Initial-sync copy of ${table.status.table} exceeded ` +
+            `${COPY_TASK_TIMEOUT_MS}ms before its COPY finished streaming`,
+        );
+      }
+      // The COPY finished and the rows are in the replica; only the commit ack
+      // is hung (Windows driver bug). Abandon the dead connection and continue.
       lc.warn?.(
-        `Initial-sync copy of ${table.status.table} exceeded ` +
-          `${COPY_TASK_TIMEOUT_MS}ms awaiting commit ack (connection ` +
-          `unresponsive); rows already written, continuing.`,
+        `Initial-sync copy of ${table.status.table}: commit ack did not ` +
+          `return within ${COPY_TASK_TIMEOUT_MS}ms after a completed COPY ` +
+          `(connection unresponsive); rows already streamed, continuing.`,
       );
-      return {rows: table.status.rows, flushTime: 0};
+      return streamed;
     }
     return result;
   } finally {
