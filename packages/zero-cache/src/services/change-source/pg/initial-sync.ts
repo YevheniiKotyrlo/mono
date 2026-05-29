@@ -490,9 +490,10 @@ const COPY_TASK_TIMEOUT_MS = 60000;
 /**
  * Number of table-copy workers for initial sync. Each table is copied on its
  * own fresh connection (see {@link copyTableWithFreshConnection}), so this only
- * bounds how many run at once. Capping it avoids opening one connection per
- * table — which on win32 was unbounded (`numTables`) and exhausted client
- * sockets, stalling initial sync for a large schema.
+ * bounds how many run at once. Capping it avoids opening one upstream connection
+ * per table — which on win32 was unbounded (`numTables`), making the connection
+ * count scale with the table count and forcing operators to raise
+ * `max_connections` far above the default just to sync a large schema.
  */
 export function computeCopyWorkers(
   tableCopyWorkers: number,
