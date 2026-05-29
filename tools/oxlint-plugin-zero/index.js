@@ -74,12 +74,13 @@ function hasSelectStar(source) {
 }
 
 function shouldCheck(filename, include) {
+  const normalized = filename.replaceAll('\\', '/');
   return (
-    include.some(path => filename.includes(path)) &&
-    !filename.endsWith('.test.ts') &&
-    !filename.includes('/test/') &&
-    !filename.includes('/__snapshots__/') &&
-    !filename.endsWith('_generated.ts')
+    include.some(path => normalized.includes(path)) &&
+    !normalized.endsWith('.test.ts') &&
+    !normalized.includes('/test/') &&
+    !normalized.includes('/__snapshots__/') &&
+    !normalized.endsWith('_generated.ts')
   );
 }
 
