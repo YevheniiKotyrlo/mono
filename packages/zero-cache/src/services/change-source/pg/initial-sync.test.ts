@@ -121,6 +121,38 @@ describe('mapWithConcurrency', () => {
       ),
     ).rejects.toThrow('boom');
   });
+
+  test('stops starting tasks after the first failure', async () => {
+    const started: number[] = [];
+    await expect(
+      mapWithConcurrency([1, 2, 3, 4, 5], 1, value => {
+        started.push(value);
+        return value === 2
+          ? Promise.reject(new Error('boom'))
+          : Promise.resolve(value);
+      }),
+    ).rejects.toThrow('boom');
+    // Serial (limit 1): item 1 succeeds, item 2 throws, so items 3-5 are never
+    // started — no work is launched once a failure is seen.
+    expect(started).toEqual([1, 2]);
+  });
+
+  test('awaits in-flight tasks before rejecting (no orphaned task)', async () => {
+    let siblingSettled = false;
+    await expect(
+      mapWithConcurrency([1, 2], 2, async value => {
+        if (value === 1) {
+          throw new Error('boom');
+        }
+        await new Promise(resolve => setTimeout(resolve, 20));
+        siblingSettled = true;
+        return value;
+      }),
+    ).rejects.toThrow('boom');
+    // The sibling that was already in flight when item 1 failed must be awaited
+    // to completion rather than left dangling as an unhandled rejection.
+    expect(siblingSettled).toBe(true);
+  });
 });
 
 describe('makeDownloadStatements', () => {

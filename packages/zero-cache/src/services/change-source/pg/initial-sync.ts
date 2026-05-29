@@ -225,6 +225,13 @@ export async function initialSync(
           ),
         ),
       );
+      // Download-state is complete; release the snapshot-bound read pool before
+      // the COPY phase so the two phases never hold upstream connections at the
+      // same time. Peak stays at numWorkers rather than 2x (the COPY phase opens
+      // its own fresh per-table connections). The `finally` then no-ops on the
+      // already-closed pool, while still covering a download-state failure.
+      copiers.setDone();
+      await copyPool.end().catch(e => lc.warn?.(`Error closing copyPool`, e));
       statusPublisher.publish(
         lc,
         'Initializing',
@@ -247,7 +254,6 @@ export async function initialSync(
         ),
       );
       void copyProfiler?.stopAndDispose(lc, 'initial-copy');
-      copiers.setDone();
 
       const total = rowCounts.reduce(
         (acc, curr) => ({
@@ -285,7 +291,10 @@ export async function initialSync(
           `(flush: ${total.flushTime.toFixed(3)}, index: ${index.toFixed(3)}, total: ${elapsed.toFixed(3)} ms)`,
       );
     } finally {
-      // All meaningful errors are handled at the processReadTask() call site.
+      // Safety net for the download-state-failure path: if download-state threw
+      // before the explicit close above, close the pool here. On the success
+      // path it is already closed, so this is a no-op. (processReadTask errors
+      // are surfaced at its call site.)
       void copyPool.end().catch(e => lc.warn?.(`Error closing copyPool`, e));
     }
   } catch (e) {
@@ -502,7 +511,12 @@ export function computeCopyWorkers(
   return Math.min(tableCopyWorkers, MAX_COPY_CONCURRENCY, numTables);
 }
 
-/** Runs `task` over `items` with at most `limit` in flight, preserving order. */
+/**
+ * Runs `task` over `items` with at most `limit` in flight, preserving result
+ * order. On the first task failure, no further items are started; the tasks
+ * already in flight are awaited (so none is left dangling as an unhandled
+ * rejection) and the first error is rethrown once they settle.
+ */
 export async function mapWithConcurrency<T, R>(
   items: readonly T[],
   limit: number,
@@ -510,18 +524,31 @@ export async function mapWithConcurrency<T, R>(
 ): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
+  let failed = false;
+  let firstError: unknown;
   async function worker(): Promise<void> {
-    for (;;) {
+    while (!failed) {
       const i = next++;
       if (i >= items.length) {
         return;
       }
-      results[i] = await task(items[i]);
+      try {
+        results[i] = await task(items[i]);
+      } catch (e) {
+        if (!failed) {
+          failed = true;
+          firstError = e;
+        }
+        return;
+      }
     }
   }
   await Promise.all(
     Array.from({length: Math.min(limit, items.length)}, () => worker()),
   );
+  if (failed) {
+    throw firstError;
+  }
   return results;
 }
 
