@@ -1,5 +1,20 @@
 // oxlint-disable e18e/prefer-static-regex
 import {readFileSync} from 'node:fs';
+import {isAbsolute} from 'node:path';
+
+/**
+ * True when a bundler module id points at a file rather than naming a package:
+ * a relative path, an absolute path, or a bundler-virtual id (`\0`-prefixed).
+ *
+ * `isAbsolute` rather than a leading-slash test, because on Windows an absolute
+ * id is `C:\…` or `C:/…`. A leading-slash test answers "not a file" for every
+ * first-party module there, so a bundler that decides externality from it
+ * externalizes the whole program: the output becomes pass-through stubs that
+ * re-export source paths, and the build still reports success.
+ */
+export function isFileModuleId(id: string): boolean {
+  return id.startsWith('.') || isAbsolute(id) || id.startsWith('\0');
+}
 
 const external = [
   'node:*',

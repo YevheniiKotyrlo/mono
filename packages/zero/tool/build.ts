@@ -3,12 +3,12 @@ import {spawn} from 'node:child_process';
 import {existsSync, readFileSync} from 'node:fs';
 import {chmod, copyFile, mkdir, readdir, readFile, rm} from 'node:fs/promises';
 import {builtinModules, createRequire} from 'node:module';
-import {basename, dirname, isAbsolute, resolve} from 'node:path';
+import {basename, dirname, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parse} from 'oxc-parser';
 import {type InlineConfig, build as viteBuild} from 'vite';
 import {assert} from '../../shared/src/asserts.ts';
-import {makeDefine} from '../../shared/src/build.ts';
+import {isFileModuleId, makeDefine} from '../../shared/src/build.ts';
 import * as workerUrls from '../../zero-cache/src/server/worker-urls.ts';
 
 const forBundleSizeDashboard = process.argv.includes('--bundle-sizes');
@@ -57,11 +57,11 @@ function packageName(id: string): string {
 
 function external(id: string): boolean {
   // Relative/absolute ids and bundler-virtual ids (\0-prefixed) get bundled.
-  // isAbsolute, not a leading-slash test: on Windows an absolute id is 'C:\…'
-  // or 'C:/…', so a leading-slash test classified every first-party module as
-  // external. Nothing was bundled and the build silently emitted pass-through
-  // stubs importing .ts paths, which cannot load at runtime.
-  if (id.startsWith('.') || isAbsolute(id) || id.startsWith('\0')) {
+  // The file-vs-package decision lives in shared/build.ts so it can be tested
+  // against Windows-shaped ids — it used to be a leading-slash test here, which
+  // externalized every first-party module on Windows and reduced the build to
+  // pass-through stubs while still reporting success.
+  if (isFileModuleId(id)) {
     return false;
   }
   return !inlinedModules.has(packageName(id));
