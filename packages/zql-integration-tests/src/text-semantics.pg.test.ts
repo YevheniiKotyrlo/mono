@@ -27,6 +27,7 @@ import type {JSONValue} from '../../shared/src/json.ts';
 import {createSilentLogContext} from '../../shared/src/logging-test-utils.ts';
 import {compile, extractZqlResult} from '../../z2s/src/compiler.ts';
 import {formatPgInternalConvert} from '../../z2s/src/sql.ts';
+import {testDBs} from '../../zero-cache/src/test/db.ts';
 import type {PostgresDB} from '../../zero-cache/src/types/pg.ts';
 import type {Row} from '../../zero-protocol/src/data.ts';
 import {createSchema} from '../../zero-schema/src/builder/schema-builder.ts';
@@ -133,8 +134,16 @@ beforeAll(async () => {
   queryDelegate = newQueryDelegate(lc, testLogConfig, sqlite, schema);
 });
 
-afterAll(() => {
-  sqlite.close();
+afterAll(async () => {
+  // Optional-chained and conditional because `beforeAll` can fail before assigning
+  // either: an unguarded teardown then reports a TypeError about `close` instead of
+  // the setup error that actually caused it.
+  sqlite?.close();
+  if (pg) {
+    // Dropping releases the replication slot initial sync created, as well as the
+    // connections. Leaving it means both leak for the rest of the run.
+    await testDBs.drop(pg);
+  }
 });
 
 describe('text semantics oracle corpus', () => {

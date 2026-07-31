@@ -35,7 +35,11 @@ export async function fillPgAndSync(
 
   await initialSync(
     lc,
-    {appID: 'collate_test', shardNum: 0, publications: []},
+    // Derived from the database rather than fixed: the app id names the
+    // replication slot, so a constant here gives every caller the same slot in the
+    // same Postgres instance. The second one to run then fails setup with
+    // `replication slot "…_0_a" already exists`.
+    {appID: appIdFor(dbName), shardNum: 0, publications: []},
     sqlite,
     getConnectionURI(pg),
     {tableCopyWorkers: 1},
@@ -43,4 +47,9 @@ export async function fillPgAndSync(
   );
 
   return {pg, sqlite};
+}
+
+/** A slot-safe app id: replication slot names allow only [a-z0-9_]. */
+function appIdFor(dbName: string): string {
+  return dbName.toLowerCase().replaceAll(/[^a-z0-9]+/gu, '_');
 }

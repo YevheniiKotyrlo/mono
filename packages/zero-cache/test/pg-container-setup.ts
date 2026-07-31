@@ -28,6 +28,13 @@ export function runPostgresContainer(image: string, timezone: string) {
         'max_replication_slots=100',
         '-c',
         'max_wal_senders=100',
+        // The pg projects run their files in one worker process, and a file holds
+        // on the order of 20 connections while it runs. Postgres defaults to 100,
+        // which the larger projects exceed — suites then fail in setup with
+        // "sorry, too many clients already", which reads as a test failure rather
+        // than a capacity limit. Sized well clear of what any one project needs.
+        '-c',
+        'max_connections=300',
         '-c',
         `timezone=${timezone}`,
       ])

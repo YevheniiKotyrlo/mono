@@ -19,6 +19,7 @@ import type {JSONValue} from '../../shared/src/json.ts';
 import {createSilentLogContext} from '../../shared/src/logging-test-utils.ts';
 import {compile, extractZqlResult} from '../../z2s/src/compiler.ts';
 import {formatPgInternalConvert} from '../../z2s/src/sql.ts';
+import {testDBs} from '../../zero-cache/src/test/db.ts';
 import {type PostgresDB} from '../../zero-cache/src/types/pg.ts';
 import {type Row} from '../../zero-protocol/src/data.ts';
 import {createSchema} from '../../zero-schema/src/builder/schema-builder.ts';
@@ -186,7 +187,15 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await nodePostgres.end();
+  // Each of these can be unassigned if `beforeAll` failed partway, and an
+  // unguarded teardown then reports a TypeError instead of the setup error that
+  // caused it. Dropping the database also releases the replication slot initial
+  // sync created, which otherwise outlives the file.
+  await nodePostgres?.end();
+  sqlite?.close();
+  if (pg) {
+    await testDBs.drop(pg);
+  }
 });
 
 describe('collation behavior', () => {
