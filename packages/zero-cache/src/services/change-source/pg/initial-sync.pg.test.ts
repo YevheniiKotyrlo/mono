@@ -3109,8 +3109,16 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
             a.includes(' workers to copy '),
         ),
       );
+      // Shadow sync asks for a single copy worker, and on every platform but
+      // Windows it gets one. Windows deliberately raises the count to one worker
+      // per table to work around a Node/Postgres connection bug, so assert that
+      // documented outcome — worker count equal to table count — rather than the
+      // POSIX number. Asserting only the POSIX number made this fail on Windows
+      // for behaviour the production code intends.
       expect(workersLog?.[2][0]).toMatch(
-        /^Started 1 workers to copy [2-9]\d* tables$/,
+        process.platform === 'win32'
+          ? /^Started ([2-9]\d*) workers to copy \1 tables$/
+          : /^Started 1 workers to copy [2-9]\d* tables$/,
       );
     });
 
