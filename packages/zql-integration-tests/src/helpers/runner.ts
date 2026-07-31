@@ -66,6 +66,7 @@ import {
   newQueryDelegate,
 } from '../../../zqlite/src/test/source-factory.ts';
 import '../helpers/comparePg.ts';
+import {appIdFor} from './app-id.ts';
 export {testLogConfig};
 
 export const lc = createSilentLogContext();
@@ -256,7 +257,9 @@ async function makeDatabases<TSchema extends Schema>(
 
   await initialSync(
     lc,
-    {appID: suiteName, shardNum: 0, publications: []},
+    // Same derivation as the other suites use: the app id names the replication
+    // slot, so it has to be slot-safe and distinct per database.
+    {appID: appIdFor(suiteName), shardNum: 0, publications: []},
     sqlite,
     getConnectionURI(pg),
     {tableCopyWorkers: 1},

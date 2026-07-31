@@ -68,6 +68,8 @@ services:
       - -c
       - max_wal_senders=100
       - -c
+      - max_connections=500
+      - -c
       - timezone=UTC
     tmpfs:
       # Test databases are throwaway; tmpfs keeps them fast and off disk.
@@ -85,6 +87,8 @@ services:
       - -c
       - max_wal_senders=100
       - -c
+      - max_connections=500
+      - -c
       - timezone=UTC
     tmpfs:
       - /var/lib/postgresql/data
@@ -101,6 +105,8 @@ services:
       - -c
       - max_wal_senders=100
       - -c
+      - max_connections=500
+      - -c
       - timezone=UTC+1
     tmpfs:
       - /var/lib/postgresql/data
@@ -116,6 +122,8 @@ services:
       - max_replication_slots=100
       - -c
       - max_wal_senders=100
+      - -c
+      - max_connections=500
       - -c
       - timezone=UTC+1
     tmpfs:

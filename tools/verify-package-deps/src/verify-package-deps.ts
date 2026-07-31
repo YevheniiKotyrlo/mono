@@ -20,19 +20,24 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * a perfectly good value that resolves the scan against the process's cwd.
  */
 function workspaceRootFromArgv(argv: readonly string[]): string {
-  const inline = argv.find(argument => argument.startsWith('--root='));
-  const separate = argv.indexOf('--root');
-  // Both spellings are recognised. Accepting only `--root <dir>` would make
-  // `--root=<dir>` silently fall back to the real repository — and combined with
-  // `--fix` that rewrites the manifests the operator believed they had pointed
-  // away from.
-  const value =
-    inline !== undefined
-      ? inline.slice('--root='.length)
-      : separate === -1
-        ? undefined
-        : argv[separate + 1];
-  if (inline === undefined && separate === -1) {
+  // Scanned in order so the LAST occurrence wins, whichever spelling it uses.
+  // Preferring one spelling over the other meant `--root=/repo --root /fixture`
+  // chose /repo regardless of order — and with `--fix` that rewrites the manifests
+  // the operator believed they had pointed away from, which is the whole reason
+  // this is a flag and not an environment variable.
+  let value: string | undefined;
+  let seen = false;
+  for (let i = 0; i < argv.length; i++) {
+    const argument = argv[i];
+    if (argument === '--root') {
+      seen = true;
+      value = argv[i + 1];
+    } else if (argument.startsWith('--root=')) {
+      seen = true;
+      value = argument.slice('--root='.length);
+    }
+  }
+  if (!seen) {
     return join(__dirname, '../../..');
   }
   // An empty value is rejected rather than defaulted: `join('', 'packages')` is a

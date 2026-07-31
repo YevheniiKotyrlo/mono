@@ -129,6 +129,44 @@ test('honours --root=<dir> as well as --root <dir>', () => {
   expect(status).not.toBe(0);
 });
 
+test.each([
+  [
+    'separate then inline',
+    (a: string, b: string) => ['--root', a, `--root=${b}`],
+  ],
+  [
+    'inline then separate',
+    (a: string, b: string) => [`--root=${a}`, '--root', b],
+  ],
+])('the last --root wins, %s', (_name, args) => {
+  // Preferring one spelling over the other made `--root=/repo --root /fixture`
+  // choose /repo whatever the order — and with --fix that rewrites the manifests
+  // the operator had pointed away from.
+  const ignored = makeFixture(true);
+  const chosen = makeFixture(false);
+  const result = spawnSync(
+    process.execPath,
+    [SCRIPT, ...args(ignored, chosen)],
+    {encoding: 'utf8'},
+  );
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  expect(output).toContain('packages/alpha');
+  expect(result.status).not.toBe(0);
+});
+
+test.each([['--root'], ['--root='], ['--root', '--fix']])(
+  'rejects a --root with no usable value: %s',
+  (...args: string[]) => {
+    const result = spawnSync(process.execPath, [SCRIPT, ...args], {
+      encoding: 'utf8',
+    });
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout ?? ''}${result.stderr ?? ''}`).toContain(
+      '--root requires a directory',
+    );
+  },
+);
+
 test('refuses a --root that is not a workspace', () => {
   const notAWorkspace = mkdtempSync(join(tmpdir(), 'verify-deps-notws-'));
   fixtureRoots.push(notAWorkspace);

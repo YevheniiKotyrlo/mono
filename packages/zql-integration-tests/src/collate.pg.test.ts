@@ -17,6 +17,7 @@ import {afterAll, beforeAll, describe, expect, test} from 'vitest';
 import {testLogConfig} from '../../otel/src/test-log-config.ts';
 import type {JSONValue} from '../../shared/src/json.ts';
 import {createSilentLogContext} from '../../shared/src/logging-test-utils.ts';
+import {must} from '../../shared/src/must.ts';
 import {compile, extractZqlResult} from '../../z2s/src/compiler.ts';
 import {formatPgInternalConvert} from '../../z2s/src/sql.ts';
 import {testDBs} from '../../zero-cache/src/test/db.ts';
@@ -44,15 +45,19 @@ import {
 } from '../../zqlite/src/test/source-factory.ts';
 import './helpers/comparePg.ts';
 import {fillPgAndSync} from './helpers/setup.ts';
+import {releaseAll} from './helpers/teardown.ts';
 
 import {makeSourceChangeAdd} from '../../zql/src/ivm/source.ts';
 const lc = createSilentLogContext();
 
 const DB_NAME = 'collate-test';
 
-let pg: PostgresDB;
-let nodePostgres: Client;
-let sqlite: Database;
+// Optional because `beforeAll` assigns them in order and can fail partway: the
+// teardown guards below are load-bearing, not defensive, and a non-optional type
+// would read as though they could be dropped.
+let pg: PostgresDB | undefined;
+let nodePostgres: Client | undefined;
+let sqlite: Database | undefined;
 let queryDelegate: QueryDelegate;
 let memoryQueryDelegate: QueryDelegate;
 
@@ -186,28 +191,32 @@ beforeAll(async () => {
   await nodePostgres.connect();
 });
 
-afterAll(async () => {
-  // Each of these can be unassigned if `beforeAll` failed partway, and an
-  // unguarded teardown then reports a TypeError instead of the setup error that
-  // caused it. Dropping the database also releases the replication slot initial
-  // sync created, which otherwise outlives the file.
-  await nodePostgres?.end();
-  sqlite?.close();
-  if (pg) {
-    await testDBs.drop(pg);
-  }
-});
+afterAll(() =>
+  // Each step is guarded because `beforeAll` can fail partway, leaving the later
+  // handles unassigned; an unguarded teardown then reports a TypeError instead of
+  // the setup error that caused it. `releaseAll` runs the steps independently, so
+  // a failure closing one handle cannot skip the drop — which is what releases the
+  // replication slot initial sync created, and which otherwise outlives the file.
+  releaseAll([
+    () => nodePostgres?.end(),
+    () => sqlite?.close(),
+    () => pg && testDBs.drop(pg),
+  ]),
+);
 
 describe('collation behavior', () => {
   describe('postgres.js', () => {
     t((query: string, args: unknown[]) =>
-      pg.unsafe(query, args as JSONValue[]),
+      // `must` rather than a non-null assertion: if `beforeAll` failed the cases
+      // still run, and this names the reason instead of raising a TypeError on a
+      // property of undefined.
+      must(pg).unsafe(query, args as JSONValue[]),
     );
   });
   describe('node-postgres', () => {
     t(
       async (query: string, args: unknown[]) =>
-        (await nodePostgres.query(query, args as JSONValue[])).rows,
+        (await must(nodePostgres).query(query, args as JSONValue[])).rows,
     );
   });
   function t(
