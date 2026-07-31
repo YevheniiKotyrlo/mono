@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import type {LogContext} from '@rocicorp/logger';
 import {afterAll, expect} from 'vitest';
 import {testLogConfig} from '../../../otel/src/test-log-config.ts';
 import {unreachable} from '../../../shared/src/asserts.ts';
@@ -89,12 +90,103 @@ type Queries<TSchema extends Schema> = {
   [K in keyof TSchema['tables'] & string]: Query<K, TSchema>;
 };
 
-let tempDir: string | undefined;
-afterAll(async () => {
-  if (tempDir) {
-    await fs.rm(tempDir, {recursive: true, force: true});
+/**
+ * Temp directories created by `bootstrap`, one per suite.
+ *
+ * A list rather than a single slot for the same reason `suiteDatabases` is one:
+ * a file with two suites creates two, and a single slot would silently orphan
+ * the first — its handles would still be closed, so nothing would report it.
+ */
+const tempDirs: string[] = [];
+
+/**
+ * Suite-level handles on files under those directories.
+ *
+ * They live as long as the suite, so teardown is the only place that can close
+ * them — and it has to, because a directory cannot be removed while a handle on
+ * a file inside it is open. (POSIX permits unlink-while-open, which is why
+ * leaving them open went unnoticed.)
+ *
+ * Per-case handles are deliberately absent: each is owned by the `finally` of
+ * the case that opened it, so tracking them here would only retain closed
+ * objects for the rest of the run.
+ */
+const suiteDatabases: Database[] = [];
+
+/**
+ * Opens a handle that lives as long as the suite, so teardown can close it.
+ *
+ * Every suite-lifetime handle on a file under a temp directory comes from here:
+ * the directory cannot be removed while one is open, and a handle opened
+ * directly is invisible to teardown however carefully the rest is tracked.
+ */
+export function openSuiteDatabase(
+  logContext: LogContext,
+  file: string,
+): Database {
+  const db = new Database(logContext, file);
+  suiteDatabases.push(db);
+  return db;
+}
+
+/**
+ * A connection for one case — a comparison run or a benchmark — holding an open
+ * `BEGIN CONCURRENT`.
+ *
+ * The caller owns it and must close it in a `finally`. That is not only about
+ * teardown: these are opened per case, so holding them to the end of the file
+ * means hundreds of live connections, each pinning a WAL2 read snapshot that can
+ * then never be checkpointed.
+ */
+function openScopedDatabase(file: string): Database {
+  const db = new Database(lc, file);
+  try {
+    db.exec('BEGIN CONCURRENT');
+  } catch (error) {
+    // The handle is not returned, so nothing else can ever close it.
+    closeQuietly(db);
+    throw error;
   }
-  tempDir = undefined;
+  return db;
+}
+
+/**
+ * Closes a connection without letting a close failure escape.
+ *
+ * Called from `finally` blocks, where throwing would replace the error the case
+ * actually failed with. The failure is still reported — it is warned rather than
+ * discarded, so a real one (an unfinalized statement, a locked database) is
+ * visible instead of resurfacing later as an unexplained EBUSY from the removal.
+ */
+function closeQuietly(db: Database): void {
+  try {
+    db.close();
+  } catch (error) {
+    lc.warn?.('failed to close a test database', error);
+  }
+}
+
+/**
+ * Windows refuses to unlink a file whose handle has just been released, for long
+ * enough to matter; `force` suppresses a missing path but not a busy one. There
+ * is nothing to wait for elsewhere — `EPERM`, `ENOTEMPTY`, `EMFILE` and `ENFILE`
+ * all occur legitimately on POSIX and no delay fixes any of them — so the budget
+ * is granted only where the wait is real.
+ */
+const removeRetries = process.platform === 'win32' ? 5 : 0;
+
+afterAll(async () => {
+  for (const db of suiteDatabases.splice(0)) {
+    closeQuietly(db);
+  }
+  for (const dir of tempDirs.splice(0)) {
+    await fs.rm(dir, {
+      recursive: true,
+      force: true,
+      maxRetries: removeRetries,
+      retryDelay: 20,
+    });
+  }
 });
 
 async function makeDatabases<TSchema extends Schema>(
@@ -134,9 +226,12 @@ async function makeDatabases<TSchema extends Schema>(
     });
   }
 
-  tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zero-integration-tests'));
+  const tempDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'zero-integration-tests'),
+  );
+  tempDirs.push(tempDir);
   const tempFile = path.join(tempDir, `${suiteName}.db`);
-  const sqlite = new Database(lc, tempFile);
+  const sqlite = openSuiteDatabase(lc, tempFile);
   sqlite.pragma('journal_mode = WAL2');
 
   await initialSync(
@@ -382,25 +477,28 @@ export async function bootstrap<TSchema extends Schema>({
         }),
       );
 
-      const scopedDelegates: Delegates = {
-        ...delegates,
-        pg: new TestPGQueryDelegate(tx, zqlSchema, dbs.pgSchema),
-        memory: new TestMemoryQueryDelegate({
-          sources: forkedMemorySources,
-        }),
-        sqlite: newQueryDelegate(
-          lc,
-          testLogConfig,
-          (() => {
-            const db = new Database(lc, dbs.sqliteFile);
-            db.exec('BEGIN CONCURRENT');
-            return db;
-          })(),
-          zqlSchema,
-          sourceWrapper,
-        ),
-      };
-      await cb(scopedDelegates);
+      // The `try` opens on the line after the handle is acquired, so no path
+      // between acquisition and use can skip the close.
+      const scopedSqlite = openScopedDatabase(dbs.sqliteFile);
+      try {
+        const scopedDelegates: Delegates = {
+          ...delegates,
+          pg: new TestPGQueryDelegate(tx, zqlSchema, dbs.pgSchema),
+          memory: new TestMemoryQueryDelegate({
+            sources: forkedMemorySources,
+          }),
+          sqlite: newQueryDelegate(
+            lc,
+            testLogConfig,
+            scopedSqlite,
+            zqlSchema,
+            sourceWrapper,
+          ),
+        };
+        await cb(scopedDelegates);
+      } finally {
+        closeQuietly(scopedSqlite);
+      }
     });
   }
 
@@ -435,34 +533,31 @@ function makeBenchmark<TSchema extends Schema>({
     case 'push': {
       // isolate delegates to own transactions
       // so push benchmarks are isolated from each other.
-      const newDelegates = {
-        ...delegates,
-        memory: new TestMemoryQueryDelegate({
-          sources: Object.fromEntries(
-            Object.entries(dbs.memory).map(([key, source]) => [
-              key,
-              source.fork(),
-            ]),
-          ),
-        }),
-        sqlite: newQueryDelegate(
-          lc,
-          testLogConfig,
-          (() => {
-            const db = new Database(lc, dbs.sqliteFile);
-            db.exec('BEGIN CONCURRENT');
-            return db;
-          })(),
-          zqlSchema,
-        ),
-      };
-      const queries = makeQueries(zqlSchema);
-      const query = createQuery(queries);
+      const scopedSqlite = openScopedDatabase(dbs.sqliteFile);
+      try {
+        const newDelegates = {
+          ...delegates,
+          memory: new TestMemoryQueryDelegate({
+            sources: Object.fromEntries(
+              Object.entries(dbs.memory).map(([key, source]) => [
+                key,
+                source.fork(),
+              ]),
+            ),
+          }),
+          sqlite: newQueryDelegate(lc, testLogConfig, scopedSqlite, zqlSchema),
+        };
+        const queries = makeQueries(zqlSchema);
+        const query = createQuery(queries);
 
-      // materialize before starting the benchmark. We only want to time push
-      // and not the initial hydration.
-      benchPush(name, 'zql', query, newDelegates, must(generatePush));
-      benchPush(name, 'zqlite', query, newDelegates, must(generatePush));
+        // materialize before starting the benchmark. We only want to time push
+        // and not the initial hydration.
+        benchPush(name, 'zql', query, newDelegates, must(generatePush));
+        benchPush(name, 'zqlite', query, newDelegates, must(generatePush));
+      } finally {
+        // Both runs share `newDelegates`, so the scope covers both.
+        closeQuietly(scopedSqlite);
+      }
 
       break;
     }
@@ -566,37 +661,45 @@ function makeTest<TSchema extends Schema>(
 ) {
   return async () => {
     await dbs.pg.begin(async tx => {
-      // Isolate the test from other tests by putting each test in its own transaction.
-      delegates = {
-        ...delegates,
-        pg: new TestPGQueryDelegate(tx, zqlSchema, dbs.pgSchema),
-        memory: new TestMemoryQueryDelegate({
-          sources: Object.fromEntries(
-            Object.entries(dbs.memory).map(([key, source]) => [
-              key,
-              source.fork(),
-            ]),
-          ),
-        }),
-        sqlite: newQueryDelegate(
-          lc,
-          testLogConfig,
-          (() => {
-            const db = new Database(lc, dbs.sqliteFile);
-            db.exec('BEGIN CONCURRENT');
-            return db;
-          })(),
+      const scopedSqlite = openScopedDatabase(dbs.sqliteFile);
+      try {
+        // Isolate the test from other tests by putting each test in its own
+        // transaction. These are a local rather than a reassignment of the
+        // `delegates` parameter: the returned function closes over that
+        // parameter, so reassigning it would outlive the case whose connection
+        // the sqlite delegate holds.
+        const caseDelegates: Delegates = {
+          ...delegates,
+          pg: new TestPGQueryDelegate(tx, zqlSchema, dbs.pgSchema),
+          memory: new TestMemoryQueryDelegate({
+            sources: Object.fromEntries(
+              Object.entries(dbs.memory).map(([key, source]) => [
+                key,
+                source.fork(),
+              ]),
+            ),
+          }),
+          sqlite: newQueryDelegate(lc, testLogConfig, scopedSqlite, zqlSchema),
+        };
+
+        const queryBuilders = makeQueries(zqlSchema);
+        const query = createQuery(queryBuilders);
+
+        await runAndCompare(
           zqlSchema,
-        ),
-      };
+          caseDelegates,
+          query,
+          manualVerification,
+        );
 
-      const queryBuilders = makeQueries(zqlSchema);
-      const query = createQuery(queryBuilders);
-
-      await runAndCompare(zqlSchema, delegates, query, manualVerification);
-
-      if (pushEvery > 0) {
-        await checkPush(zqlSchema, delegates, query, pushEvery);
+        if (pushEvery > 0) {
+          await checkPush(zqlSchema, caseDelegates, query, pushEvery);
+        }
+      } finally {
+        // The scope is the whole case, not the first comparison: `checkPush`
+        // pushes through the same delegates, so closing between the two would
+        // leave it querying a closed connection.
+        closeQuietly(scopedSqlite);
       }
     });
   };

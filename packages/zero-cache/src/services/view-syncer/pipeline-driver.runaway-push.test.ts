@@ -92,7 +92,13 @@ describe('view-syncer/pipeline-driver', () => {
   });
 
   afterEach(() => {
-    dbFile.delete();
+    // See pipeline-driver.test.ts: the driver holds replica connections that
+    // have to be closed before the file can be unlinked on Windows.
+    try {
+      pipelines.destroy();
+    } finally {
+      dbFile.delete();
+    }
   });
 
   const issue = table('issue')
