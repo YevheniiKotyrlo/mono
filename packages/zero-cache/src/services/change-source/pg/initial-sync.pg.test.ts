@@ -28,6 +28,7 @@ import {PG_17} from '../../../types/pg-versions.ts';
 import {type PostgresDB} from '../../../types/pg.ts';
 import {ZERO_VERSION_COLUMN_NAME} from '../../replicator/schema/replication-state.ts';
 import {
+  copyWorkerCount,
   getInitialDownloadState,
   initialSync,
   INSERT_BATCH_SIZE,
@@ -3109,8 +3110,17 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
             a.includes(' workers to copy '),
         ),
       );
-      expect(workersLog?.[2][0]).toMatch(
-        /^Started 1 workers to copy [2-9]\d* tables$/,
+      // Shadow sync asks for a single copy worker; how many it gets is
+      // `copyWorkerCount`'s decision, which is unit-tested for both platforms.
+      // Asserting it here through the same function keeps this from re-deriving
+      // the rule — and from asserting a number that is only right on one host.
+      const message = workersLog?.[2].find(
+        (a): a is string => typeof a === 'string' && a.startsWith('Started '),
+      );
+      const tables = Number(/copy (\d+) tables$/.exec(message ?? '')?.[1]);
+      expect(tables).toBeGreaterThan(1);
+      expect(message).toBe(
+        `Started ${copyWorkerCount(1, tables, process.platform)} workers to copy ${tables} tables`,
       );
     });
 

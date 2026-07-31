@@ -170,11 +170,17 @@ export function logSQLiteChangeLogStartup(
 export async function sqliteFileBytes(
   lc: LogContext,
   file: string,
+  // Injectable so the non-ENOENT branch below is reachable from a test. It
+  // cannot be provoked portably through the filesystem: POSIX reports ENOTDIR
+  // for a path under a regular file, while Windows reports ENOENT for that and
+  // for every other malformed path shape — which is the case this treats as
+  // expected absence.
+  statFile: typeof stat = stat,
 ): Promise<number> {
   const sizes = await Promise.all(
     [file, `${file}-wal`, `${file}-wal2`].map(async path => {
       try {
-        return (await stat(path)).size;
+        return (await statFile(path)).size;
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
           lc.warn?.(`unable to stat ${path} for size metrics`, e);

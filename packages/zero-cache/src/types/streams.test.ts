@@ -207,7 +207,10 @@ describe('streams with flow control', () => {
     } catch (e) {
       result = e;
     }
-    expect(String(result)).toMatch(/Error: connect ECONNRE(SET|FUSED)/);
+    // Which syscall surfaces the failure is platform-specific: POSIX reports it
+    // on connect, Windows on the following read. What this asserts is that the
+    // failure propagates at all, so the syscall is allowed to vary.
+    expect(String(result)).toMatch(/Error: (connect|read) ECONNRE(SET|FUSED)/);
   });
 });
 
