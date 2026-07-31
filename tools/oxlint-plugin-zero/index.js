@@ -184,7 +184,15 @@ function shouldCheck(filename, include) {
   );
 }
 
-/** Matches `new URL('./x', import.meta.url).pathname` and friends. */
+/**
+ * Matches `.pathname` read off a URL that is known to be a `file:` URL:
+ * `new URL('./x', import.meta.url).pathname` or `new URL(import.meta.url).pathname`.
+ *
+ * The base decides, not the specifier. A relative specifier against an http base
+ * — `new URL('./v2/users', apiBaseUrl).pathname` — is ordinary URL work and must
+ * not be flagged, so a two-argument form is only a finding when the base is
+ * `import.meta.url`.
+ */
 function isFileUrlPathnameAccess(node) {
   if (node.computed || node.property?.name !== 'pathname') {
     return false;
@@ -194,14 +202,15 @@ function isFileUrlPathnameAccess(node) {
     return false;
   }
   const [specifier, base] = target.arguments ?? [];
-  if (isImportMetaUrl(base)) {
-    return true;
+  if (base !== undefined) {
+    return isImportMetaUrl(base);
   }
+  // Single-argument form. `new URL(import.meta.url)` is the one that keeps
+  // appearing; a `file:` literal is the same mistake spelled out.
   return (
-    specifier?.type === 'Literal' &&
-    typeof specifier.value === 'string' &&
-    (specifier.value.startsWith('./') ||
-      specifier.value.startsWith('../') ||
+    isImportMetaUrl(specifier) ||
+    (specifier?.type === 'Literal' &&
+      typeof specifier.value === 'string' &&
       specifier.value.startsWith('file:'))
   );
 }
@@ -219,10 +228,16 @@ function isImportMetaUrl(node) {
  * by bare name without a shell, otherwise undefined.
  */
 function bareShimSpawnCommand(node) {
-  if (node.callee?.type !== 'Identifier') {
-    return undefined;
-  }
-  if (!spawnFunctions.has(node.callee.name)) {
+  // Both `spawn(…)` and `childProcess.spawn(…)`: the member form is just as
+  // common and was previously invisible to this rule.
+  const callee = node.callee;
+  const calleeName =
+    callee?.type === 'Identifier'
+      ? callee.name
+      : callee?.type === 'MemberExpression' && !callee.computed
+        ? callee.property?.name
+        : undefined;
+  if (calleeName === undefined || !spawnFunctions.has(calleeName)) {
     return undefined;
   }
   const [commandArgument, , options] = node.arguments ?? [];

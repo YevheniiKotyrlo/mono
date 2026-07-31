@@ -1,4 +1,5 @@
 import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import type {LogContext} from '@rocicorp/logger';
 import {expect} from 'vitest';
 import {randInt} from '../../../shared/src/rand.ts';
@@ -11,7 +12,10 @@ export class DbFile {
   readonly #connections: Database[] = [];
 
   constructor(testName: string) {
-    this.path = `${tmpdir()}/${testName}-${randInt(1000000, 9999999)}.db`;
+    // join, not string concatenation: concatenating gave a mixed-separator path
+    // like `C:\Users\…\Temp/name-123.db`, which works but leaks into failure
+    // messages and any path comparison.
+    this.path = join(tmpdir(), `${testName}-${randInt(1000000, 9999999)}.db`);
   }
 
   connect(lc: LogContext): Database {

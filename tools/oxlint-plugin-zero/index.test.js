@@ -121,10 +121,25 @@ describe('isFileUrlPathnameAccess', () => {
     ).toBe(true);
   });
 
-  test('flags a bare relative specifier', () => {
-    expect(isFileUrlPathnameAccess(urlPathname([literal('../a/b.js')]))).toBe(
-      true,
-    );
+  test('flags the single-argument new URL(import.meta.url) form', () => {
+    // The form that keeps appearing in real code, and the one this rule missed.
+    expect(isFileUrlPathnameAccess(urlPathname([importMetaUrl()]))).toBe(true);
+  });
+
+  test('flags a single file: literal', () => {
+    expect(
+      isFileUrlPathnameAccess(urlPathname([literal('file:///a/b.js')])),
+    ).toBe(true);
+  });
+
+  test('ignores a relative specifier against a non-file base', () => {
+    // `new URL('./v2/users', apiBaseUrl).pathname` is ordinary URL work; the
+    // base decides, not the specifier.
+    const node = urlPathname([
+      literal('./v2/users'),
+      {type: 'Identifier', name: 'apiBaseUrl'},
+    ]);
+    expect(isFileUrlPathnameAccess(node)).toBe(false);
   });
 
   test('ignores an http URL, where pathname is the right property', () => {
@@ -204,4 +219,26 @@ describe('bareShimSpawnCommand', () => {
   test('ignores unrelated calls', () => {
     expect(bareShimSpawnCommand(spawnCall('execSync', 'npm'))).toBeUndefined();
   });
+});
+
+test('bareShimSpawnCommand flags the member form childProcess.spawn(...)', () => {
+  const node = spawnCall('spawn', 'npm');
+  node.callee = {
+    type: 'MemberExpression',
+    computed: false,
+    object: {type: 'Identifier', name: 'childProcess'},
+    property: {type: 'Identifier', name: 'spawn'},
+  };
+  expect(bareShimSpawnCommand(node)).toBe('npm');
+});
+
+test('bareShimSpawnCommand ignores a computed member callee it cannot read', () => {
+  const node = spawnCall('spawn', 'npm');
+  node.callee = {
+    type: 'MemberExpression',
+    computed: true,
+    object: {type: 'Identifier', name: 'childProcess'},
+    property: {type: 'Identifier', name: 'spawn'},
+  };
+  expect(bareShimSpawnCommand(node)).toBeUndefined();
 });

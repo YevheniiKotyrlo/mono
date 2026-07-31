@@ -180,8 +180,13 @@ export const baseConfig = {
       },
     ],
 
-    // Portability rules: both defects they catch are invisible on POSIX, so
-    // without them a fix can be reverted and CI stays green.
+    // Portability rules. Both defects they catch are invisible on POSIX, so
+    // without them a fix can be reverted with CI still green.
+    //
+    // Scope caveat: `tool` is in ignorePatterns above, so these do not reach
+    // `packages/*/tool/**` — including the build script whose `spawn('tsc')` is
+    // the motivating case. Linting that tree surfaces 37 unrelated pre-existing
+    // errors, so it is left for its own change rather than smuggled in here.
     'zero/no-file-url-pathname': 'error',
     'zero/no-bare-shim-spawn': 'error',
   },

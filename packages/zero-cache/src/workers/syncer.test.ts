@@ -1056,14 +1056,16 @@ describe('connection hijacking prevention', () => {
 });
 
 afterAll(async () => {
+  // Close before removing: the database lives inside tempDir, and Windows
+  // refuses to remove a directory holding an open handle. The catch below meant
+  // the failure was swallowed and the directory leaked every run.
+  sqlite.close();
   try {
-    await fs.rm(tempDir, {recursive: true, force: true});
+    await fs.rm(tempDir, {recursive: true, force: true, maxRetries: 5});
   } catch (e) {
     // oxlint-disable-next-line no-console
     console.error(`Failed to clean up temp directory ${tempDir}:`, e);
   }
-
-  sqlite.close();
 });
 
 class MockWebSocket {
