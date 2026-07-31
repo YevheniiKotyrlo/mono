@@ -4,6 +4,7 @@ import {afterEach, describe, expect, test} from 'vitest';
 import {AbortError} from '../../../../shared/src/abort-error.ts';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
 import type {Database, Statement} from '../../../../zqlite/src/db.ts';
+import {SQLITE_FILE_SUFFIXES} from '../../db/delete-lite-db.ts';
 import {StatementRunner} from '../../db/statements.ts';
 import {DbFile} from '../../test/lite.ts';
 import type {ChangeStreamData} from '../change-source/protocol/current/downstream.ts';
@@ -200,7 +201,7 @@ describe('sqlite change log reader', () => {
     expect(reader.plan('02')).toMatchObject({headWatermark: '06'});
 
     // The reader never touched the replica path, which does not even exist.
-    for (const suffix of ['', '-wal', '-wal2', '-shm']) {
+    for (const suffix of SQLITE_FILE_SUFFIXES) {
       expect(existsSync(file.path + suffix)).toBe(false);
     }
   });

@@ -7,12 +7,27 @@ import {packageOfRelativePath} from './package-of-path.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Overridable so the verification can be pointed at a fixture workspace and
-// proven to report a violation it should. That proof is what distinguishes this
-// gate passing from it not running: it reports success by finding nothing wrong,
-// so anything that empties its input looks identical to a clean workspace.
-const WORKSPACE_ROOT =
-  process.env.VERIFY_PACKAGE_DEPS_ROOT ?? join(__dirname, '../../..');
+/**
+ * The workspace to scan, overridable with `--root` so the verification can be
+ * pointed at a fixture and proven to report a violation it should. That proof is
+ * what distinguishes this gate passing from it not running: it reports success by
+ * finding nothing wrong, so anything that empties its input looks identical to a
+ * clean workspace.
+ *
+ * A flag rather than an environment variable, because an env var silently
+ * repoints a correctness gate — including when set to the empty string, which is
+ * a perfectly good value that resolves the scan against the process's cwd.
+ */
+function workspaceRootFromArgv(argv: readonly string[]): string {
+  const flag = argv.indexOf('--root');
+  const value = flag === -1 ? undefined : argv[flag + 1];
+  if (flag !== -1 && (value === undefined || value.startsWith('--'))) {
+    throw new Error('--root requires a directory');
+  }
+  return value ?? join(__dirname, '../../..');
+}
+
+const WORKSPACE_ROOT = workspaceRootFromArgv(process.argv);
 
 type PackageJson = {
   name?: string;

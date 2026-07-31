@@ -1,4 +1,4 @@
-import {existsSync, mkdtempSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdirSync, mkdtempSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {expect, test} from 'vitest';
@@ -69,11 +69,44 @@ test('retries on win32, where an open handle blocks the unlink', () => {
 });
 
 test('removes recursively on every platform, so the behaviour cannot diverge', () => {
-  // `recursive` is required for Node to honour the retry budget, but it also
-  // decides what happens when the path names a directory. Following the platform
-  // would make a misconfigured replica path an EISDIR on POSIX and a silent
-  // recursive delete on Windows.
+  // `recursive` is required for Node to honour the retry budget. Following the
+  // platform instead would make a misconfigured replica path an EISDIR on POSIX
+  // and a silent recursive delete on Windows.
   for (const platform of ['linux', 'darwin', 'win32'] as const) {
     expect(liteDbRemoveOptions(platform).recursive).toBe(true);
+  }
+});
+
+test('refuses a directory rather than removing one recursively', () => {
+  // The paths come from operator config, so this is reachable by
+  // misconfiguration. `recursive` would otherwise make it a silent tree delete
+  // on every platform, where before it was a loud EISDIR.
+  const dir = mkdtempSync(join(tmpdir(), 'delete-lite-db-'));
+  const asDatabase = join(dir, 'replica.db');
+  mkdirSync(asDatabase);
+  writeFileSync(join(asDatabase, 'keep-me'), '');
+
+  expect(() => deleteLiteDB(asDatabase)).toThrow(/is a directory/);
+  expect(existsSync(join(asDatabase, 'keep-me'))).toBe(true);
+});
+
+test('attempts every suffix before reporting a failure', () => {
+  // A partial delete leaves a sidecar beside a database the caller recreates
+  // straight away, which SQLite then tries to recover into the fresh file.
+  const dir = mkdtempSync(join(tmpdir(), 'delete-lite-db-'));
+  const dbFile = join(dir, 'replica.db');
+  for (const suffix of EXPECTED_SUFFIXES) {
+    writeFileSync(`${dbFile}${suffix}`, '');
+  }
+  // A directory where a sidecar is expected fails its own removal without
+  // stopping the others: it is not the database path itself, so the guard above
+  // does not fire.
+  mkdirSync(`${dbFile}-blocker`);
+  writeFileSync(join(`${dbFile}-blocker`, 'inner'), '');
+
+  deleteLiteDB(dbFile);
+
+  for (const suffix of EXPECTED_SUFFIXES) {
+    expect(existsSync(`${dbFile}${suffix}`)).toBe(false);
   }
 });

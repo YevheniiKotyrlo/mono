@@ -154,38 +154,58 @@ function openScopedDatabase(file: string): Database {
  * Closes a connection without letting a close failure escape.
  *
  * Called from `finally` blocks, where throwing would replace the error the case
- * actually failed with. The failure is still reported — it is warned rather than
- * discarded, so a real one (an unfinalized statement, a locked database) is
- * visible instead of resurfacing later as an unexplained EBUSY from the removal.
+ * actually failed with — so the close failure is dropped, deliberately and in
+ * full: `lc` here is a silent context, which discards every level, so routing it
+ * through the logger would only look like reporting. What a real close failure
+ * (an unfinalized statement, a locked database) does surface as is the removal
+ * error from teardown.
  */
 function closeQuietly(db: Database): void {
   try {
     db.close();
-  } catch (error) {
-    lc.warn?.('failed to close a test database', error);
+  } catch {
+    // See above: nothing useful can be done with this here.
   }
 }
 
 /**
- * Windows refuses to unlink a file whose handle has just been released, for long
- * enough to matter; `force` suppresses a missing path but not a busy one. There
- * is nothing to wait for elsewhere — `EPERM`, `ENOTEMPTY`, `EMFILE` and `ENFILE`
- * all occur legitimately on POSIX and no delay fixes any of them — so the budget
- * is granted only where the wait is real.
+ * Retries for removing a suite's temp DIRECTORY, which is a different problem
+ * from unlinking one file.
+ *
+ * A recursive walk can hit `ENOTEMPTY` on any platform when something appears
+ * under a directory between the listing and the removal, and on Windows a handle
+ * released moments earlier keeps its file busy. Both are genuinely transient, so
+ * the budget applies everywhere here — unlike the single-file case in
+ * `delete-lite-db.ts`, where every retryable errno on POSIX is permanent.
  */
-const removeRetries = process.platform === 'win32' ? 5 : 0;
+const REMOVE_RETRIES = 10;
+const REMOVE_RETRY_DELAY_MS = 50;
 
 afterAll(async () => {
   for (const db of suiteDatabases.splice(0)) {
     closeQuietly(db);
   }
-  for (const dir of tempDirs.splice(0)) {
-    await fs.rm(dir, {
-      recursive: true,
-      force: true,
-      maxRetries: removeRetries,
-      retryDelay: 20,
-    });
+  // Each directory is dropped from the list only once its removal has settled,
+  // and failures are collected rather than thrown from the loop: draining the
+  // list up front meant one busy directory abandoned every later suite's — each
+  // a full seeded replica — with nothing still tracking them.
+  const failures: unknown[] = [];
+  while (tempDirs.length > 0) {
+    const dir = tempDirs[0];
+    try {
+      await fs.rm(dir, {
+        recursive: true,
+        force: true,
+        maxRetries: REMOVE_RETRIES,
+        retryDelay: REMOVE_RETRY_DELAY_MS,
+      });
+    } catch (error) {
+      failures.push(error);
+    }
+    tempDirs.shift();
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'Could not remove every temp directory');
   }
 });
 
@@ -533,31 +553,32 @@ function makeBenchmark<TSchema extends Schema>({
     case 'push': {
       // isolate delegates to own transactions
       // so push benchmarks are isolated from each other.
-      const scopedSqlite = openScopedDatabase(dbs.sqliteFile);
-      try {
-        const newDelegates = {
-          ...delegates,
-          memory: new TestMemoryQueryDelegate({
-            sources: Object.fromEntries(
-              Object.entries(dbs.memory).map(([key, source]) => [
-                key,
-                source.fork(),
-              ]),
-            ),
-          }),
-          sqlite: newQueryDelegate(lc, testLogConfig, scopedSqlite, zqlSchema),
-        };
-        const queries = makeQueries(zqlSchema);
-        const query = createQuery(queries);
+      //
+      // Suite lifetime, not case lifetime: `benchPush` REGISTERS a benchmark, and
+      // the body that queries through these delegates runs afterwards. A scope
+      // that closed at the end of this function would close the connection during
+      // collection, before any benchmark had run.
+      const benchmarkSqlite = openSuiteDatabase(lc, dbs.sqliteFile);
+      benchmarkSqlite.exec('BEGIN CONCURRENT');
+      const newDelegates = {
+        ...delegates,
+        memory: new TestMemoryQueryDelegate({
+          sources: Object.fromEntries(
+            Object.entries(dbs.memory).map(([key, source]) => [
+              key,
+              source.fork(),
+            ]),
+          ),
+        }),
+        sqlite: newQueryDelegate(lc, testLogConfig, benchmarkSqlite, zqlSchema),
+      };
+      const queries = makeQueries(zqlSchema);
+      const query = createQuery(queries);
 
-        // materialize before starting the benchmark. We only want to time push
-        // and not the initial hydration.
-        benchPush(name, 'zql', query, newDelegates, must(generatePush));
-        benchPush(name, 'zqlite', query, newDelegates, must(generatePush));
-      } finally {
-        // Both runs share `newDelegates`, so the scope covers both.
-        closeQuietly(scopedSqlite);
-      }
+      // materialize before starting the benchmark. We only want to time push
+      // and not the initial hydration.
+      benchPush(name, 'zql', query, newDelegates, must(generatePush));
+      benchPush(name, 'zqlite', query, newDelegates, must(generatePush));
 
       break;
     }

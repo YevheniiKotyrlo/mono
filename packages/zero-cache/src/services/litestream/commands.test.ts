@@ -13,6 +13,7 @@ import {join} from 'node:path';
 import {PassThrough} from 'node:stream';
 import {LogContext} from '@rocicorp/logger';
 import {afterEach, describe, expect, test, vi} from 'vitest';
+import {unreachable} from '../../../../shared/src/asserts.ts';
 import {
   createSilentLogContext,
   TestLogSink,
@@ -127,6 +128,11 @@ function fakeChild(
       case 'hang':
         // Never closes on its own: the production timeout must kill it.
         break;
+      default:
+        // A new variant with no arm here would emit no `close`, which is
+        // byte-for-byte how `hang` behaves — so the test would time out and read
+        // as deliberate. This makes it a compile error instead.
+        unreachable(behaviour);
     }
   });
   return child as unknown as childProcess.ChildProcess;
@@ -317,11 +323,19 @@ describe('litestream/commands getLastBackupTime', () => {
     // The rejection alone does not prove the process was killed: the production
     // code rejects first and kills after, so deleting the kill would leave the
     // assertion above green and leak a process per timeout.
-    const spawned = vi.mocked(childProcess.spawn).mock.results.at(-1)
-      ?.value as {
-      kill: ReturnType<typeof vi.fn>;
-    };
-    expect(spawned.kill).toHaveBeenCalledWith('SIGKILL');
+    // Every child, not just the last: the listing runs two subcommands
+    // concurrently and both hang, so both have to be killed. Asserting one left
+    // the other's leak invisible, and which one `at(-1)` returned depended on the
+    // order `Promise.all` happened to evaluate its arguments in.
+    const {results} = vi.mocked(childProcess.spawn).mock;
+    expect(results.length).toBeGreaterThan(0);
+    for (const result of results) {
+      // Checked rather than cast: a spawn that threw carries the error here, and
+      // reading `.kill` off it would fail as "not a spy" rather than saying so.
+      expect(result.type).toBe('return');
+      const child = result.value as {kill: ReturnType<typeof vi.fn>};
+      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    }
   });
 });
 

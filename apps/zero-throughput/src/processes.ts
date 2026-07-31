@@ -155,10 +155,15 @@ export function queryPlanAnalysisLogPath(config: BenchmarkConfig): string {
   return join(processLogsDir(config), `${config.runID}-query-plans.log`);
 }
 
+// The same set as `SQLITE_FILE_SUFFIXES` in zero-cache, restated because this app
+// does not depend on that package. `-wal2` is the one that matters: the replica
+// runs in WAL2, so omitting it left a stale sidecar beside the next run's replica.
+const REPLICA_SUFFIXES = ['', '-wal', '-wal2', '-shm', '-journal'];
+
 export async function removeReplicaFiles(replicaFile: string): Promise<void> {
   await Promise.all(
-    [replicaFile, `${replicaFile}-shm`, `${replicaFile}-wal`].map(file =>
-      rm(file, {force: true}),
+    REPLICA_SUFFIXES.map(suffix =>
+      rm(`${replicaFile}${suffix}`, {force: true}),
     ),
   );
 }

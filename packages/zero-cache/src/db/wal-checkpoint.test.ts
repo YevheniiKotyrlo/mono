@@ -30,9 +30,15 @@ describe('db/wal-checkpoint', () => {
     // see, and Windows refuses to unlink a file with an open handle. The test
     // starts the worker, so the test shuts it down — here rather than in each
     // branch, so neither can forget.
-    await worker?.terminate();
+    const running = worker;
     worker = undefined;
-    dbFile.delete();
+    try {
+      await running?.terminate();
+    } finally {
+      // In a `finally` so a failing terminate still removes the replica, and the
+      // handle is cleared first so the next test cannot inherit a stale one.
+      dbFile.delete();
+    }
   });
 
   type Checkpoint = {
@@ -103,8 +109,16 @@ describe('db/wal-checkpoint', () => {
         // teardown terminates the worker mid-COMMIT — and termination cannot
         // interrupt native code, so the WAL write completes after the request
         // and races the unlink on the next line.
-        const {promise: committed, resolve: setCommitted} = resolver<unknown>();
+        const {
+          promise: committed,
+          resolve: setCommitted,
+          reject: failCommit,
+        } = resolver<unknown>();
         worker.once('message', setCommitted);
+        // A COMMIT that exceeds the worker's busy_timeout throws there and posts
+        // nothing, so without this the wait never settles and the worker's error
+        // surfaces separately, attributed to the whole file rather than to this.
+        worker.once('error', failCommit);
         worker.postMessage('commit');
         await committed;
         return;

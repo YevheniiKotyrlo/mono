@@ -1,9 +1,16 @@
 import {spawnSync} from 'node:child_process';
-import {mkdirSync, mkdtempSync, writeFileSync} from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {expect, test} from 'vitest';
+import {afterEach, expect, test} from 'vitest';
 
 /**
  * Smoke tests for the rules as the linter runs them, not for their predicates.
@@ -18,19 +25,43 @@ import {expect, test} from 'vitest';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN = join(HERE, 'index.js');
-const OXLINT = join(
-  HERE,
-  '..',
-  '..',
-  'node_modules',
-  'oxlint',
-  'bin',
-  'oxlint',
-);
+
+/**
+ * Where oxlint's CLI actually lives, resolved through its manifest.
+ *
+ * Not a hardcoded hop into the root node_modules: that assumes a hoisted layout,
+ * which a filtered install does not give. Not `resolve('oxlint/bin/oxlint')`
+ * either — oxlint has an `exports` map that does not list that subpath, so
+ * requesting it directly throws ERR_PACKAGE_PATH_NOT_EXPORTED. `./package.json`
+ * is exported, and its `bin` says where the entry is.
+ */
+function resolveOxlint() {
+  const require = createRequire(import.meta.url);
+  const manifestPath = require.resolve('oxlint/package.json');
+  const {bin} = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const entry = typeof bin === 'string' ? bin : bin?.oxlint;
+  if (typeof entry !== 'string' || entry.length === 0) {
+    throw new Error(`no usable oxlint bin in ${manifestPath}`);
+  }
+  return join(dirname(manifestPath), entry);
+}
+
+const OXLINT = resolveOxlint();
+
+const fixtureRoots = [];
+
+afterEach(() => {
+  // Each case writes a workspace to run the real linter against; without this
+  // they accumulate in the temp directory for the life of the machine.
+  for (const root of fixtureRoots.splice(0)) {
+    rmSync(root, {recursive: true, force: true});
+  }
+});
 
 /** Writes a fixture file plus a config enabling only this plugin's rules. */
 function lintFixture(relativeFilePath, source, ruleName, ruleOptions) {
   const root = mkdtempSync(join(tmpdir(), 'zero-plugin-smoke-'));
+  fixtureRoots.push(root);
   const filePath = join(root, relativeFilePath);
   mkdirSync(dirname(filePath), {recursive: true});
   writeFileSync(filePath, source);

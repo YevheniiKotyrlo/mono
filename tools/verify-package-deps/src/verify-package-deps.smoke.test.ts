@@ -66,10 +66,14 @@ function makeFixture(betaDeclared: boolean): string {
 }
 
 function runVerification(root: string): {status: number; output: string} {
-  const result = spawnSync(process.execPath, [SCRIPT], {
+  const result = spawnSync(process.execPath, [SCRIPT, '--root', root], {
     encoding: 'utf8',
-    env: {...process.env, VERIFY_PACKAGE_DEPS_ROOT: root},
   });
+  if (result.error) {
+    // Otherwise a failure to start the gate at all reports as an assertion about
+    // missing output, which names neither the spawn nor the cause.
+    throw new Error(`Could not run ${SCRIPT}`, {cause: result.error});
+  }
   return {
     status: result.status ?? -1,
     output: `${result.stdout ?? ''}${result.stderr ?? ''}`,

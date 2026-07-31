@@ -6,5 +6,8 @@ import {defineConfig} from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['src/**/*.test.ts'],
+    // Matches the shared config's 10s: the smoke tests run the real gate out of
+    // process, so vitest's 5s default leaves less margin than anything else here.
+    testTimeout: 10_000,
   },
 });

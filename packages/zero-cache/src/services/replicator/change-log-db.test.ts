@@ -6,6 +6,7 @@ import {
   TestLogSink,
 } from '../../../../shared/src/logging-test-utils.ts';
 import {Database} from '../../../../zqlite/src/db.ts';
+import {SQLITE_FILE_SUFFIXES} from '../../db/delete-lite-db.ts';
 import {DbFile, expectTableExact} from '../../test/lite.ts';
 import {CREATE_V14_CHANGE_LOG_STREAM} from '../change-source/common/replica-schema.ts';
 import {
@@ -41,8 +42,11 @@ const ANCHOR: ChangeLogAnchor = {
   nowMs: NOW_MS,
 };
 
-/** The main file and the sidecars `deleteLiteDB` removes. */
-const SIDECARS = ['', '-wal', '-wal2', '-shm'];
+/**
+ * The main file and its sidecars, taken from the one list rather than restated —
+ * a local copy silently stops covering a suffix the moment one is added.
+ */
+const SIDECARS = SQLITE_FILE_SUFFIXES;
 
 const dbFiles: DbFile[] = [];
 

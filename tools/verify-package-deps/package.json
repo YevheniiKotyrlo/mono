@@ -4,16 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check-fmt": "oxfmt --check .",
-    "check-format": "oxfmt --check .",
-    "check-types": "tsc",
-    "fmt": "oxfmt .",
-    "format": "oxfmt .",
-    "lint": "oxlint --quiet --config ../../oxlint.config.ts",
+    "verify": "node src/verify-package-deps.ts",
+    "verify:fix": "node src/verify-package-deps.ts --fix",
     "test": "vitest run",
     "test:watch": "vitest watch",
-    "verify": "node src/verify-package-deps.ts",
-    "verify:fix": "node src/verify-package-deps.ts --fix"
+    "check-types": "tsc",
+    "format": "oxfmt .",
+    "check-format": "oxfmt --check .",
+    "lint": "oxlint --quiet --config ../../oxlint.config.ts",
+    "fmt": "oxfmt .",
+    "check-fmt": "oxfmt --check ."
   },
   "dependencies": {
     "oxc-parser": "^0.129.0"

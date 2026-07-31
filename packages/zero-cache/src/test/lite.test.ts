@@ -32,20 +32,25 @@ test('delete removes the sidecars, which only exist while a connection is open',
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
 
-  // The connection stays open on purpose. SQLite removes -wal and -shm on a
-  // clean close, so closing first would leave nothing for delete() to remove and
-  // the assertion below would hold over an empty set. Asserting they exist first
-  // is what makes the second assertion mean something.
+  // The connection stays open on purpose. SQLite removes the sidecars on a clean
+  // close, so closing first would leave nothing for delete() to remove and the
+  // assertion below would hold over an empty set. Asserting one exists first is
+  // what makes the second assertion mean something.
+  //
+  // Only `-wal` is asserted: a write in WAL mode creates it on every platform,
+  // whereas `-shm` is absent under exclusive locking, which would make this
+  // depend on SQLite's coordination strategy rather than on `delete()`.
   expect(existsSync(`${file.path}-wal`)).toBe(true);
-  expect(existsSync(`${file.path}-shm`)).toBe(true);
 
   file.delete();
 
-  // Written out rather than iterating the production constant: sharing it lets a
-  // dropped suffix stop being checked at the same moment it stops being removed.
-  for (const suffix of ['', '-wal', '-wal2', '-shm', '-journal']) {
-    expect(existsSync(`${file.path}${suffix}`)).toBe(false);
-  }
+  // Only the database itself is attributable to `delete()`: closing the
+  // connections — which `delete()` does first, and which the case below covers —
+  // is what removes `-wal`. That the removal covers every suffix is pinned by
+  // delete-lite-db.test.ts, which writes each one as a fixture; asserting the
+  // whole list here would pass even if the list were empty.
+  expect(existsSync(file.path)).toBe(false);
+  expect(existsSync(`${file.path}-wal`)).toBe(false);
 });
 
 test('delete closes a connection the caller left open', () => {

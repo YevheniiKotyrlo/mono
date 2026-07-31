@@ -6,37 +6,33 @@ const selectStar = /\bselect\b[\s\S]*?\*(?=\s*(?:,|\bfrom\b))[\s\S]*?\bfrom\b/i;
 // `shell: true` "fixes" it but concatenates arguments instead of escaping them
 // (Node DEP0190), so the portable answer is to resolve the JS entrypoint and
 // spawn that with `process.execPath`.
+// Limited to what this repo actually runs: the two sites that prompted the rule
+// (`npm` from the release scripts, `tsc` from the zero build), the package manager
+// and Node's own launchers, and the CLIs it depends on. Names it has no
+// relationship with are left out — an error-level rule should not be enumerating
+// tools nobody here spawns.
 const shimCommands = new Set([
   'npm',
   'npx',
   'pnpm',
-  'pnpx',
-  'yarn',
   'tsc',
   'tsx',
   'vite',
   'vitest',
   'oxlint',
   'oxfmt',
-  'eslint',
-  'prettier',
   'turbo',
   'prisma',
   'drizzle-kit',
   'playwright',
-  'wrangler',
   'sst',
 ]);
 
-// `exec` and `execSync` are deliberately absent: they always go through a shell,
-// which resolves `npm.cmd` on its own, so the defect this rule describes cannot
-// occur there.
+// `exec` and `execSync` are absent because they always go through a shell, which
+// resolves `npm.cmd` itself.
 //
-// Reach: the command has to be a string literal and the callee a plain or member
-// identifier, so a command in a variable, a template literal, a spread, or an
-// aliased import goes unflagged. Provenance is not checked either, so a `spawn`
-// imported from a shim-aware wrapper such as cross-spawn would be flagged (no
-// such caller exists in this repo today).
+// Reach: the command must be a string literal and the callee a plain or member
+// identifier, and the callee's origin is not tracked.
 const spawnFunctions = new Set([
   'spawn',
   'spawnSync',
@@ -213,9 +209,23 @@ function isFileUrlPathnameAccess(node) {
     return false;
   }
   const [specifier, base] = target.arguments ?? [];
-  // Whichever argument determines the scheme is the one to read: the base when
-  // there is one, otherwise the specifier.
-  return isKnownFileUrl(base ?? specifier);
+  // The base sets the scheme only for a relative specifier. An absolute one
+  // carries its own, so `new URL('https://x/y', 'file:///a')` is not a file URL.
+  if (base !== undefined && !hasOwnScheme(specifier)) {
+    return isKnownFileUrl(base);
+  }
+  return isKnownFileUrl(specifier);
+}
+
+const urlScheme = /^[A-Za-z][A-Za-z\d+.-]*:/;
+
+/** Whether a specifier literal is an absolute URL, making any base irrelevant. */
+function hasOwnScheme(node) {
+  return (
+    node?.type === 'Literal' &&
+    typeof node.value === 'string' &&
+    urlScheme.test(node.value)
+  );
 }
 
 /** A node that is certainly a `file:` URL: `import.meta.url`, or a literal. */
@@ -282,17 +292,31 @@ function bareShimSpawnCommand(node) {
  * index 1 — reading index 2 reported those calls despite the opt-out. A spread
  * is treated as opting in, because its contents are not knowable here and a
  * false negative is cheaper than an error on correct code.
+ *
+ * The VALUE decides, not the key's presence: `{shell: false}` is exactly the
+ * configuration that fails, so reading only the key would exempt the call this
+ * rule exists to report.
  */
 function hasShellOption(argument) {
   if (argument?.type !== 'ObjectExpression') {
     return false;
   }
-  return argument.properties.some(
-    property =>
-      property.type === 'SpreadElement' ||
-      (property.type === 'Property' &&
-        (property.key?.name === 'shell' || property.key?.value === 'shell')),
-  );
+  return argument.properties.some(property => {
+    if (property.type === 'SpreadElement') {
+      return true;
+    }
+    if (
+      property.type !== 'Property' ||
+      (property.key?.name !== 'shell' && property.key?.value !== 'shell')
+    ) {
+      return false;
+    }
+    // A literal `false`/`null`/`0`/`''` is not an opt-out. Anything else —
+    // `true`, a variable, a call — is not statically known to be falsy, so it
+    // counts as deliberate.
+    const {value} = property;
+    return !(value?.type === 'Literal' && !value.value);
+  });
 }
 
 export default plugin;

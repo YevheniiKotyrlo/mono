@@ -110,11 +110,19 @@ export type ServerContext = JSONObject;
  * Windows branch would otherwise be unreachable on CI, and a test that re-derives
  * this rule can drift from it silently.
  */
-export function copyWorkerCount(
-  requested: number,
-  numTables: number,
-  platform: NodeJS.Platform,
-): number {
+export function copyWorkerCount({
+  requested,
+  numTables,
+  platform,
+}: {
+  requested: number;
+  numTables: number;
+  platform: NodeJS.Platform;
+}): number {
+  // Named rather than positional because both counts are plain numbers, and
+  // `Math.min` makes a swapped pair look right whenever the requested count is
+  // the larger one — diverging only when an operator lowers it below the table
+  // count, which is the one case this function exists to reason about.
   return platform === 'win32' ? numTables : Math.min(requested, numTables);
 }
 
@@ -230,7 +238,11 @@ export async function initialSync(
     // Now that tables have been validated, kick off the copiers.
     const {tables, indexes} = published;
     const numTables = tables.length;
-    const numWorkers = copyWorkerCount(tableCopyWorkers, numTables, platform());
+    const numWorkers = copyWorkerCount({
+      requested: tableCopyWorkers,
+      numTables,
+      platform: platform(),
+    });
     if (numWorkers > tableCopyWorkers) {
       lc.warn?.(
         `Increasing the number of copy workers from ${tableCopyWorkers} to ` +

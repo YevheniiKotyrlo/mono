@@ -9,5 +9,9 @@ export default defineConfig({
     // The plugin entry is a root-level index.js — that path is what
     // oxlint.base.ts loads — so tests sit beside it rather than under src/.
     include: ['*.test.js'],
+    // Matches the shared config's 10s. The smoke tests run the real linter out of
+    // process, so vitest's 5s default leaves less margin than anything else here,
+    // and a blocking spawn cannot be interrupted by a timeout anyway.
+    testTimeout: 10_000,
   },
 });

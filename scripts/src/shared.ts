@@ -75,13 +75,28 @@ export function resolveNodeShimCommand(
 /**
  * The one place that knows how to actually run a command.
  *
- * `execFile` is a parameter so a test can observe what was spawned: the routing
- * through `resolveNodeShimCommand` is the part that silently regresses, and
- * asserting the resolution alone would not notice a caller that stopped using it.
+ * The three seams exist so a test can watch what was spawned. Observing the
+ * routing needs all of them: with only `execFile` injected, the sole command
+ * whose resolution differs is npm on Windows, so the assertion would have to
+ * depend on the host it runs on — and passing through a command that needs no
+ * rewriting looks identical whether the routing happened or not.
  */
-export function createExec(execFile: typeof execFileSync = execFileSync): Exec {
+export function createExec({
+  execFile = execFileSync,
+  platform = process.platform,
+  fileExists = existsSync,
+}: {
+  execFile?: typeof execFileSync;
+  platform?: NodeJS.Platform;
+  fileExists?: (path: string) => boolean;
+} = {}): Exec {
   return (command, args, options) => {
-    const resolved = resolveNodeShimCommand(command, args);
+    const resolved = resolveNodeShimCommand(
+      command,
+      args,
+      platform,
+      fileExists,
+    );
     return String(
       execFile(resolved.command, resolved.args, {
         encoding: 'utf8',
@@ -243,8 +258,14 @@ export function npmZeroVersionExists(version: ZeroVersion, exec = defaultExec) {
     ) {
       return false;
     }
+    // Fall back to the message and keep the cause: a failure that never reached
+    // npm carries no `stderr`, so reporting only that produces a sentence ending
+    // in a colon and discards the one explanation available.
+    const reason =
+      stderr.trim() || (error instanceof Error ? error.message : '');
     throw new Error(
-      `Could not check npm for ${zeroPackageName}@${version}: ${stderr}`,
+      `Could not check npm for ${zeroPackageName}@${version}: ${reason}`,
+      {cause: error},
     );
   }
 }

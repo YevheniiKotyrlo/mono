@@ -222,13 +222,42 @@ test('resolveNodeShimCommand throws when npm is not beside node on win32', () =>
 });
 
 test('the exec chokepoint routes through resolveNodeShimCommand', () => {
-  // Without this, reverting defaultExec to spawn the bare command leaves every
-  // resolution test above passing — the resolution would simply go unused.
+  // The command has to be one whose resolution actually differs, or the
+  // assertion holds whether the routing happened or not — which is why the
+  // platform is injected rather than read from the host.
   const calls: {command: string; args: readonly string[]}[] = [];
-  const exec = createExec(((command: string, args: readonly string[]) => {
-    calls.push({command, args});
-    return '';
-  }) as unknown as typeof execFileSync);
+  const exec = createExec({
+    execFile: ((command: string, args: readonly string[]) => {
+      calls.push({command, args});
+      return '';
+    }) as unknown as typeof execFileSync,
+    platform: 'win32',
+    fileExists: () => true,
+  });
+
+  exec('npm', ['pack', '--json'], {});
+
+  const expectedCli = join(
+    dirname(process.execPath),
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
+  );
+  expect(calls).toEqual([
+    {command: process.execPath, args: [expectedCli, 'pack', '--json']},
+  ]);
+});
+
+test('the exec chokepoint leaves a real executable alone', () => {
+  const calls: {command: string; args: readonly string[]}[] = [];
+  const exec = createExec({
+    execFile: ((command: string, args: readonly string[]) => {
+      calls.push({command, args});
+      return '';
+    }) as unknown as typeof execFileSync,
+    platform: 'win32',
+  });
 
   exec('git', ['status'], {});
   expect(calls).toEqual([{command: 'git', args: ['status']}]);

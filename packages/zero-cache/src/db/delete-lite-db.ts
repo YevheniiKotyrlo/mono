@@ -1,4 +1,4 @@
-import {rmSync} from 'node:fs';
+import {rmSync, statSync, type RmOptions} from 'node:fs';
 
 /**
  * Every file a SQLite database can consist of: the database itself plus each
@@ -33,11 +33,12 @@ export const SQLITE_FILE_SUFFIXES = [
  * backoff is linear, so 5 retries at 20ms is ~300ms worst case rather than the
  * ~2.75s that 10 at 50ms would cost — per suffix.
  *
- * `recursive` is unconditional because Node documents `maxRetries`/`retryDelay`
- * as ignored without it. It must not follow the platform: it also decides what
- * happens when the path names a directory, so setting it on one platform only
- * would make a misconfigured replica path an `EISDIR` on POSIX and a silent
- * recursive delete on Windows.
+ * `recursive` is on because Node documents `maxRetries`/`retryDelay` as ignored
+ * without it. It is not a licence to remove a tree: it also decides what happens
+ * when the path names a directory, and these paths come from operator config, so
+ * `deleteLiteDB` refuses a directory before ever reaching here. Without that
+ * guard this would turn a misconfigured replica path from a loud `EISDIR` into a
+ * silent recursive delete.
  */
 export function liteDbRemoveOptions(platform: NodeJS.Platform) {
   const retry = platform === 'win32';
@@ -46,12 +47,33 @@ export function liteDbRemoveOptions(platform: NodeJS.Platform) {
     recursive: true,
     maxRetries: retry ? 5 : 0,
     retryDelay: retry ? 20 : 0,
-  };
+  } satisfies RmOptions;
 }
 
 export function deleteLiteDB(dbFile: string) {
   const options = liteDbRemoveOptions(process.platform);
+  const failures: unknown[] = [];
   for (const suffix of SQLITE_FILE_SUFFIXES) {
-    rmSync(`${dbFile}${suffix}`, options);
+    const path = `${dbFile}${suffix}`;
+    if (statSync(path, {throwIfNoEntry: false})?.isDirectory()) {
+      throw new Error(
+        `Refusing to delete ${path}: it is a directory, not a SQLite database file.`,
+      );
+    }
+    try {
+      rmSync(path, options);
+    } catch (error) {
+      // Every suffix is attempted before reporting. Stopping at the first failure
+      // leaves some files removed and others not, and the callers here recreate
+      // the database immediately — so a surviving sidecar would be recovered into
+      // a freshly created file.
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `Could not remove every file of ${dbFile}`,
+    );
   }
 }

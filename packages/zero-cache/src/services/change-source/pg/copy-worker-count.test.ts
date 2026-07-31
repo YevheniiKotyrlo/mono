@@ -15,7 +15,7 @@ test.each([
 ] as const)(
   'on %s, %i requested over %i tables uses %i workers',
   (platform, requested, numTables, expected) => {
-    expect(copyWorkerCount(requested, numTables, platform)).toBe(expected);
+    expect(copyWorkerCount({requested, numTables, platform})).toBe(expected);
   },
 );
 
@@ -31,11 +31,29 @@ test.each([
     // Sharing a connection across several COPY streams on Windows trips a
     // Node/Postgres bug where the connection stops responding, so each worker
     // gets exactly one table.
-    expect(copyWorkerCount(requested, numTables, 'win32')).toBe(expected);
+    expect(copyWorkerCount({requested, numTables, platform: 'win32'})).toBe(
+      expected,
+    );
   },
 );
 
 test('a table count of zero asks for no workers on either platform', () => {
-  expect(copyWorkerCount(4, 0, 'linux')).toBe(0);
-  expect(copyWorkerCount(4, 0, 'win32')).toBe(0);
+  expect(copyWorkerCount({requested: 4, numTables: 0, platform: 'linux'})).toBe(
+    0,
+  );
+  expect(copyWorkerCount({requested: 4, numTables: 0, platform: 'win32'})).toBe(
+    0,
+  );
+});
+
+test('the two counts are not interchangeable', () => {
+  // Why they are named rather than positional: on the POSIX branch `Math.min` is
+  // symmetric, so swapping them is undetectable by any test — including this one.
+  // Only the win32 branch, which reads one of them, can tell them apart.
+  expect(copyWorkerCount({requested: 1, numTables: 7, platform: 'linux'})).toBe(
+    copyWorkerCount({requested: 7, numTables: 1, platform: 'linux'}),
+  );
+  expect(
+    copyWorkerCount({requested: 1, numTables: 7, platform: 'win32'}),
+  ).not.toBe(copyWorkerCount({requested: 7, numTables: 1, platform: 'win32'}));
 });

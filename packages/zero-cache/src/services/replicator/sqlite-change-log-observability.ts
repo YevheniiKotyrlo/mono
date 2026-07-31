@@ -175,7 +175,11 @@ export async function sqliteFileBytes(
   // for a path under a regular file, while Windows reports ENOENT for that and
   // for every other malformed path shape — which is the case this treats as
   // expected absence.
-  statFile: typeof stat = stat,
+  // Narrower than `typeof stat` on purpose: only the size is read, so this is the
+  // whole contract. Taking the full three-overload signature would force a test
+  // double through `as unknown as`, which checks the double against nothing — a
+  // later change to what this needs would compile and silently mean less.
+  statFile: (path: string) => Promise<{size: number}> = stat,
 ): Promise<number> {
   const sizes = await Promise.all(
     [file, `${file}-wal`, `${file}-wal2`].map(async path => {
