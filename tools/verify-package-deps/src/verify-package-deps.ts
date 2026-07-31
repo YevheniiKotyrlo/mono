@@ -3,6 +3,7 @@ import {readdir, readFile, writeFile} from 'node:fs/promises';
 import {dirname, join, relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parse} from 'oxc-parser';
+import {packageOfRelativePath} from './package-of-path.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_ROOT = join(__dirname, '../../..');
@@ -58,21 +59,8 @@ async function findTypeScriptFiles(dir: string): Promise<string[]> {
   return files;
 }
 
-/**
- * Splits on both separators, because `relative()` returns backslashes on
- * Windows. Splitting on '/' alone yielded a single segment there, so the length
- * check never passed and this returned undefined for every file — which made
- * the whole verification pass vacuously rather than fail.
- */
-export function getPackageName(filePath: string): string | undefined {
-  const parts = relative(WORKSPACE_ROOT, filePath).split(/[\\/]/);
-  if (
-    parts.length >= 2 &&
-    (parts[0] === 'packages' || parts[0] === 'apps' || parts[0] === 'tools')
-  ) {
-    return `${parts[0]}/${parts[1]}`;
-  }
-  return undefined;
+function getPackageName(filePath: string): string | undefined {
+  return packageOfRelativePath(relative(WORKSPACE_ROOT, filePath));
 }
 
 async function extractImports(
