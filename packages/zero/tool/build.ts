@@ -285,7 +285,7 @@ async function assertBareImportsAreDeclared() {
   await Promise.all(
     files.map(async path => {
       for (const id of await collectImportSpecifiers(path)) {
-        if (id.startsWith('.') || id.startsWith('/') || id.startsWith('\0')) {
+        if (isFileModuleId(id)) {
           continue;
         }
         const name = id.startsWith('node:')

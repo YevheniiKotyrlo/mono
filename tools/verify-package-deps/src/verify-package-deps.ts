@@ -58,10 +58,14 @@ async function findTypeScriptFiles(dir: string): Promise<string[]> {
   return files;
 }
 
-function getPackageName(filePath: string): string | undefined {
-  // Convert to relative path from workspace root
-  const relativePath = relative(WORKSPACE_ROOT, filePath);
-  const parts = relativePath.split('/');
+/**
+ * Splits on both separators, because `relative()` returns backslashes on
+ * Windows. Splitting on '/' alone yielded a single segment there, so the length
+ * check never passed and this returned undefined for every file — which made
+ * the whole verification pass vacuously rather than fail.
+ */
+export function getPackageName(filePath: string): string | undefined {
+  const parts = relative(WORKSPACE_ROOT, filePath).split(/[\\/]/);
   if (
     parts.length >= 2 &&
     (parts[0] === 'packages' || parts[0] === 'apps' || parts[0] === 'tools')
