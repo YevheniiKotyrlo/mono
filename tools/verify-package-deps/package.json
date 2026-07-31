@@ -4,14 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "verify": "node src/verify-package-deps.ts",
-    "verify:fix": "node src/verify-package-deps.ts --fix",
-    "check-types": "tsc",
-    "format": "oxfmt .",
+    "check-fmt": "oxfmt --check .",
     "check-format": "oxfmt --check .",
-    "lint": "oxlint --quiet --config ../../oxlint.config.ts",
+    "check-types": "tsc",
     "fmt": "oxfmt .",
-    "check-fmt": "oxfmt --check ."
+    "format": "oxfmt .",
+    "lint": "oxlint --quiet --config ../../oxlint.config.ts",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "verify": "node src/verify-package-deps.ts",
+    "verify:fix": "node src/verify-package-deps.ts --fix"
   },
   "dependencies": {
     "oxc-parser": "^0.129.0"
@@ -19,7 +21,8 @@
   "devDependencies": {
     "@types/node": "^22.10.5",
     "oxfmt": "^0.45.0",
-    "typescript": "~6.0.2"
+    "typescript": "~6.0.2",
+    "vitest": "^4.1.6"
   },
   "engines": {
     "node": ">=22"

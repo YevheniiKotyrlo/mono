@@ -3,9 +3,16 @@ import {readdir, readFile, writeFile} from 'node:fs/promises';
 import {dirname, join, relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parse} from 'oxc-parser';
+import {packageOfRelativePath} from './package-of-path.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const WORKSPACE_ROOT = join(__dirname, '../../..');
+
+// Overridable so the verification can be pointed at a fixture workspace and
+// proven to report a violation it should. That proof is what distinguishes this
+// gate passing from it not running: it reports success by finding nothing wrong,
+// so anything that empties its input looks identical to a clean workspace.
+const WORKSPACE_ROOT =
+  process.env.VERIFY_PACKAGE_DEPS_ROOT ?? join(__dirname, '../../..');
 
 type PackageJson = {
   name?: string;
@@ -59,16 +66,7 @@ async function findTypeScriptFiles(dir: string): Promise<string[]> {
 }
 
 function getPackageName(filePath: string): string | undefined {
-  // Convert to relative path from workspace root
-  const relativePath = relative(WORKSPACE_ROOT, filePath);
-  const parts = relativePath.split('/');
-  if (
-    parts.length >= 2 &&
-    (parts[0] === 'packages' || parts[0] === 'apps' || parts[0] === 'tools')
-  ) {
-    return `${parts[0]}/${parts[1]}`;
-  }
-  return undefined;
+  return packageOfRelativePath(relative(WORKSPACE_ROOT, filePath));
 }
 
 async function extractImports(
@@ -167,6 +165,17 @@ async function analyzePackageDependencies(): Promise<AnalyzeResult> {
 
   console.log(`Found ${allFiles.length} TypeScript files to analyze`);
 
+  // Nothing to check is a failure, not a pass. This gate reports success by
+  // saying nothing was wrong, so every way of ending up with no input — a moved
+  // tool directory, a renamed source root, an unreadable subtree — otherwise
+  // reads as a clean workspace. That is the shape the separator bug took.
+  if (allFiles.length === 0) {
+    throw new Error(
+      `No TypeScript files found under ${WORKSPACE_ROOT}. Nothing was verified, ` +
+        `so a passing result would be meaningless.`,
+    );
+  }
+
   // Build a map from package name to package path
   const packageNameToPath = new Map<string, string>();
   for (const dir of ['packages', 'apps', 'tools']) {
@@ -174,7 +183,12 @@ async function analyzePackageDependencies(): Promise<AnalyzeResult> {
     const entries = await readdir(fullDir, {withFileTypes: true});
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        const pkgPath = join(dir, entry.name);
+        // A canonical `dir/name` identifier, not a filesystem path: it is
+        // compared against the keys `packageOfRelativePath` produces, which are
+        // always forward-slashed. Composing it with join() would follow the host
+        // separator, and a key that matches nothing makes the edges through it
+        // invisible rather than reported.
+        const pkgPath = `${dir}/${entry.name}`;
         const pkgJson = await getPackageJson(join(WORKSPACE_ROOT, pkgPath));
         if (pkgJson?.name) {
           packageNameToPath.set(pkgJson.name, pkgPath);
