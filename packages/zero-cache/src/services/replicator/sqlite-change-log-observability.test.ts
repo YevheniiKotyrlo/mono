@@ -494,9 +494,9 @@ describe('SQLite change-log observability on disk', () => {
     // The failure is injected rather than provoked through the filesystem.
     // POSIX yields ENOTDIR for a path under a regular file, but Windows reports
     // ENOENT for that and for every other malformed shape — and ENOENT is the
-    // case this asserts is silent, so there is no portable path that produces
-    // the branch. Injecting states the intent directly: a stat error that is
-    // not a missing file gets warned about.
+    // case this asserts is silent, so no portable path reaches the branch.
+    // Injecting states the intent directly: a stat error that is not a missing
+    // file gets warned about.
     const failure = Object.assign(new Error('EACCES: permission denied'), {
       code: 'EACCES',
     });
@@ -515,6 +515,39 @@ describe('SQLite change-log observability on disk', () => {
       `unable to stat ${bad} for size metrics`,
       `unable to stat ${bad}-wal for size metrics`,
       `unable to stat ${bad}-wal2 for size metrics`,
+    ]);
+  });
+});
+
+describe('replicator/sqlite-change-log reconcile reporting', () => {
+  // Every ReconcileResult, including each wipe reason: `gap` in steady state
+  // means the log did not lead the resume watermark, and is the one on the
+  // alert list.
+  const cases: [name: string, result: ReconcileResult][] = [
+    ['consistent', {action: 'none', head: '05'}],
+    ['phantom truncation', {action: 'truncated', head: '05', rows: 27}],
+    ['wipe: created', {action: 'reseeded', head: '05', reason: 'created'}],
+    [
+      'wipe: schema-mismatch',
+      {action: 'reseeded', head: '05', reason: 'schema-mismatch'},
+    ],
+    [
+      'wipe: identity-mismatch',
+      {action: 'reseeded', head: '05', reason: 'identity-mismatch'},
+    ],
+    ['wipe: gap', {action: 'reseeded', head: '05', reason: 'gap'}],
+  ];
+
+  test.each(cases)('%s', (_name, result) => {
+    const sink = new TestLogSink();
+    const lc = new LogContext('debug', undefined, sink);
+
+    recordSQLiteChangeLogReconcile(lc, result);
+
+    expect(sink.messages.at(-1)).toEqual([
+      'debug',
+      undefined,
+      ['SQLite change-log reconciliation', {sqliteChangeLogReconcile: result}],
     ]);
   });
 });
