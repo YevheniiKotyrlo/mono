@@ -107,33 +107,33 @@ function openTestDatabase(file: string): Database {
 }
 
 /**
- * A connection for one scope — a single comparison run or benchmark case —
- * holding an open `BEGIN CONCURRENT`.
+ * A connection for one case — a comparison run or a benchmark — holding an open
+ * `BEGIN CONCURRENT`.
  *
- * Registered like any other so teardown cannot leave the file locked, but also
- * closed as soon as its scope ends: these are opened per case, so retaining them
- * to the end of the file would hold hundreds of connections at once, each
- * pinning a WAL2 read snapshot that then can never be checkpointed. Closing
- * twice is harmless, so the registry stays as the backstop.
+ * The caller keeps the handle and closes it when the case ends, rather than the
+ * connection being tracked in a module-level scope list: cases would share that
+ * list, so one ending could close a connection another still holds. It stays
+ * registered in `openDatabases` as the teardown backstop.
+ *
+ * Closing per case matters beyond teardown — these are opened per case, so
+ * holding them to the end of the file means hundreds of live connections, each
+ * pinning a WAL2 read snapshot that then can never be checkpointed.
  */
 function openScopedDatabase(file: string): Database {
   const db = openTestDatabase(file);
   db.exec('BEGIN CONCURRENT');
-  scopedDatabases.push(db);
   return db;
 }
 
-/** Scoped connections awaiting close at the end of the current case. */
-const scopedDatabases: Database[] = [];
-
-/** Closes every scoped connection opened since the last call. */
-function closeScopedDatabases(): void {
-  for (const db of scopedDatabases.splice(0)) {
-    try {
-      db.close();
-    } catch {
-      // Already closed, or closed by the case itself.
-    }
+/**
+ * Closes a case's connection. Tolerates an already-closed handle so a case that
+ * closes its own does not break the surrounding `finally`.
+ */
+function closeQuietly(db: Database): void {
+  try {
+    db.close();
+  } catch {
+    // Already closed.
   }
 }
 
@@ -444,6 +444,7 @@ export async function bootstrap<TSchema extends Schema>({
         }),
       );
 
+      const scopedSqlite = openScopedDatabase(dbs.sqliteFile);
       const scopedDelegates: Delegates = {
         ...delegates,
         pg: new TestPGQueryDelegate(tx, zqlSchema, dbs.pgSchema),
@@ -453,7 +454,7 @@ export async function bootstrap<TSchema extends Schema>({
         sqlite: newQueryDelegate(
           lc,
           testLogConfig,
-          openScopedDatabase(dbs.sqliteFile),
+          scopedSqlite,
           zqlSchema,
           sourceWrapper,
         ),
@@ -461,7 +462,7 @@ export async function bootstrap<TSchema extends Schema>({
       try {
         await cb(scopedDelegates);
       } finally {
-        closeScopedDatabases();
+        closeQuietly(scopedSqlite);
       }
     });
   }
@@ -497,6 +498,7 @@ function makeBenchmark<TSchema extends Schema>({
     case 'push': {
       // isolate delegates to own transactions
       // so push benchmarks are isolated from each other.
+      const scopedSqlite = openScopedDatabase(dbs.sqliteFile);
       const newDelegates = {
         ...delegates,
         memory: new TestMemoryQueryDelegate({
@@ -507,12 +509,7 @@ function makeBenchmark<TSchema extends Schema>({
             ]),
           ),
         }),
-        sqlite: newQueryDelegate(
-          lc,
-          testLogConfig,
-          openScopedDatabase(dbs.sqliteFile),
-          zqlSchema,
-        ),
+        sqlite: newQueryDelegate(lc, testLogConfig, scopedSqlite, zqlSchema),
       };
       const queries = makeQueries(zqlSchema);
       const query = createQuery(queries);
@@ -521,10 +518,11 @@ function makeBenchmark<TSchema extends Schema>({
       // and not the initial hydration.
       try {
         benchPush(name, 'zql', query, newDelegates, must(generatePush));
+        benchPush(name, 'zqlite', query, newDelegates, must(generatePush));
       } finally {
-        closeScopedDatabases();
+        // Both runs share `newDelegates`, so the scope covers both.
+        closeQuietly(scopedSqlite);
       }
-      benchPush(name, 'zqlite', query, newDelegates, must(generatePush));
 
       break;
     }
@@ -629,6 +627,7 @@ function makeTest<TSchema extends Schema>(
   return async () => {
     await dbs.pg.begin(async tx => {
       // Isolate the test from other tests by putting each test in its own transaction.
+      const scopedSqlite = openScopedDatabase(dbs.sqliteFile);
       delegates = {
         ...delegates,
         pg: new TestPGQueryDelegate(tx, zqlSchema, dbs.pgSchema),
@@ -640,12 +639,7 @@ function makeTest<TSchema extends Schema>(
             ]),
           ),
         }),
-        sqlite: newQueryDelegate(
-          lc,
-          testLogConfig,
-          openScopedDatabase(dbs.sqliteFile),
-          zqlSchema,
-        ),
+        sqlite: newQueryDelegate(lc, testLogConfig, scopedSqlite, zqlSchema),
       };
 
       const queryBuilders = makeQueries(zqlSchema);
@@ -653,12 +647,15 @@ function makeTest<TSchema extends Schema>(
 
       try {
         await runAndCompare(zqlSchema, delegates, query, manualVerification);
-      } finally {
-        closeScopedDatabases();
-      }
 
-      if (pushEvery > 0) {
-        await checkPush(zqlSchema, delegates, query, pushEvery);
+        if (pushEvery > 0) {
+          await checkPush(zqlSchema, delegates, query, pushEvery);
+        }
+      } finally {
+        // The scope is the whole case, not the first comparison: `checkPush`
+        // pushes through the same delegates, so closing between the two would
+        // leave it querying a closed connection.
+        closeQuietly(scopedSqlite);
       }
     });
   };
