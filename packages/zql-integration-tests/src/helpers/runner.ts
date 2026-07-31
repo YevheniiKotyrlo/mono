@@ -90,9 +90,40 @@ type Queries<TSchema extends Schema> = {
 };
 
 let tempDir: string | undefined;
+
+/**
+ * Every SQLite handle opened on a file under `tempDir`. Windows refuses to
+ * remove a file that still has an open handle, and these are opened inside test
+ * bodies (some with an open BEGIN CONCURRENT), so the directory cannot be
+ * removed until they are closed. POSIX allows unlink-while-open, which is why
+ * leaving them open went unnoticed.
+ */
+const openDatabases: Database[] = [];
+
+function openTestDatabase(file: string): Database {
+  const db = new Database(lc, file);
+  openDatabases.push(db);
+  return db;
+}
+
 afterAll(async () => {
+  for (const db of openDatabases.splice(0)) {
+    try {
+      db.close();
+    } catch {
+      // A test may have closed its own handle; closing twice is not a failure
+      // worth breaking teardown over.
+    }
+  }
   if (tempDir) {
-    await fs.rm(tempDir, {recursive: true, force: true});
+    // maxRetries covers the lag between closing a handle and Windows releasing
+    // it; force alone suppresses ENOENT but not EBUSY.
+    await fs.rm(tempDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 50,
+    });
   }
   tempDir = undefined;
 });
@@ -136,7 +167,7 @@ async function makeDatabases<TSchema extends Schema>(
 
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zero-integration-tests'));
   const tempFile = path.join(tempDir, `${suiteName}.db`);
-  const sqlite = new Database(lc, tempFile);
+  const sqlite = openTestDatabase(tempFile);
   sqlite.pragma('journal_mode = WAL2');
 
   await initialSync(
@@ -392,7 +423,7 @@ export async function bootstrap<TSchema extends Schema>({
           lc,
           testLogConfig,
           (() => {
-            const db = new Database(lc, dbs.sqliteFile);
+            const db = openTestDatabase(dbs.sqliteFile);
             db.exec('BEGIN CONCURRENT');
             return db;
           })(),
@@ -449,7 +480,7 @@ function makeBenchmark<TSchema extends Schema>({
           lc,
           testLogConfig,
           (() => {
-            const db = new Database(lc, dbs.sqliteFile);
+            const db = openTestDatabase(dbs.sqliteFile);
             db.exec('BEGIN CONCURRENT');
             return db;
           })(),
@@ -582,7 +613,7 @@ function makeTest<TSchema extends Schema>(
           lc,
           testLogConfig,
           (() => {
-            const db = new Database(lc, dbs.sqliteFile);
+            const db = openTestDatabase(dbs.sqliteFile);
             db.exec('BEGIN CONCURRENT');
             return db;
           })(),
