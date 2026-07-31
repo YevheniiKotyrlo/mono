@@ -6,7 +6,13 @@ import {parse} from 'oxc-parser';
 import {packageOfRelativePath} from './package-of-path.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const WORKSPACE_ROOT = join(__dirname, '../../..');
+
+// Overridable so the verification can be pointed at a fixture workspace and
+// proven to actually report a violation. Without that, a break in how files are
+// attributed to packages makes this pass silently over everything — which is
+// exactly what happened.
+const WORKSPACE_ROOT =
+  process.env.VERIFY_PACKAGE_DEPS_ROOT ?? join(__dirname, '../../..');
 
 type PackageJson = {
   name?: string;
