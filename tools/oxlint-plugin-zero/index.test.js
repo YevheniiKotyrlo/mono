@@ -305,6 +305,19 @@ describe('bareShimSpawnCommand', () => {
     },
   );
 
+  test.each([
+    ['undefined', {type: 'Identifier', name: 'undefined'}],
+    ['void 0', {type: 'UnaryExpression', operator: 'void'}],
+  ])('flags a shell option written as %s', (_name, value) => {
+    // Neither is a Literal, so a Literal-only falsy check exempts them — and both
+    // are byte-for-byte the configuration that fails, same as `shell: false`.
+    expect(
+      bareShimSpawnCommand(
+        spawnCall('spawn', 'npm', objectWith('shell', value)),
+      ),
+    ).toBe('npm');
+  });
+
   test('exempts a shell option whose value is not statically falsy', () => {
     // A variable could be either; assuming it is falsy would report code that
     // may well be correct.

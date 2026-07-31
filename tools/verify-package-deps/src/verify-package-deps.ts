@@ -1,3 +1,4 @@
+import {existsSync} from 'node:fs';
 /* eslint-disable no-console */
 import {readdir, readFile, writeFile} from 'node:fs/promises';
 import {dirname, join, relative} from 'node:path';
@@ -19,12 +20,32 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * a perfectly good value that resolves the scan against the process's cwd.
  */
 function workspaceRootFromArgv(argv: readonly string[]): string {
-  const flag = argv.indexOf('--root');
-  const value = flag === -1 ? undefined : argv[flag + 1];
-  if (flag !== -1 && (value === undefined || value.startsWith('--'))) {
+  const inline = argv.find(argument => argument.startsWith('--root='));
+  const separate = argv.indexOf('--root');
+  // Both spellings are recognised. Accepting only `--root <dir>` would make
+  // `--root=<dir>` silently fall back to the real repository — and combined with
+  // `--fix` that rewrites the manifests the operator believed they had pointed
+  // away from.
+  const value =
+    inline !== undefined
+      ? inline.slice('--root='.length)
+      : separate === -1
+        ? undefined
+        : argv[separate + 1];
+  if (inline === undefined && separate === -1) {
+    return join(__dirname, '../../..');
+  }
+  // An empty value is rejected rather than defaulted: `join('', 'packages')` is a
+  // relative path, so it would resolve the scan against the process's cwd.
+  if (value === undefined || value.length === 0 || value.startsWith('-')) {
     throw new Error('--root requires a directory');
   }
-  return value ?? join(__dirname, '../../..');
+  if (!existsSync(join(value, 'pnpm-workspace.yaml'))) {
+    throw new Error(
+      `--root ${value} is not a workspace root: no pnpm-workspace.yaml there`,
+    );
+  }
+  return value;
 }
 
 const WORKSPACE_ROOT = workspaceRootFromArgv(process.argv);

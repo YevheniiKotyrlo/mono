@@ -1,9 +1,9 @@
 import {spawnSync} from 'node:child_process';
-import {mkdirSync, mkdtempSync, writeFileSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {expect, test} from 'vitest';
+import {afterEach, expect, test} from 'vitest';
 
 /**
  * Smoke tests for the verification itself, not its helpers.
@@ -21,6 +21,16 @@ const SCRIPT = join(
   'verify-package-deps.ts',
 );
 
+const fixtureRoots: string[] = [];
+
+afterEach(() => {
+  // Each case writes a workspace to run the real gate against; without this they
+  // accumulate in the temp directory for the life of the machine.
+  for (const root of fixtureRoots.splice(0)) {
+    rmSync(root, {recursive: true, force: true});
+  }
+});
+
 /**
  * Builds a throwaway workspace with two packages where `alpha` imports across
  * into `beta`. `betaDeclared` decides whether alpha declares that dependency,
@@ -28,6 +38,13 @@ const SCRIPT = join(
  */
 function makeFixture(betaDeclared: boolean): string {
   const root = mkdtempSync(join(tmpdir(), 'verify-deps-smoke-'));
+  fixtureRoots.push(root);
+  // The gate refuses a --root that is not a workspace, so the fixture declares
+  // itself one.
+  writeFileSync(
+    join(root, 'pnpm-workspace.yaml'),
+    "packages:\n  - 'packages/*'\n",
+  );
   // All three roots must exist: the scan reads each one directly.
   for (const dir of ['packages', 'apps', 'tools']) {
     mkdirSync(join(root, dir), {recursive: true});
@@ -65,8 +82,13 @@ function makeFixture(betaDeclared: boolean): string {
   return root;
 }
 
-function runVerification(root: string): {status: number; output: string} {
-  const result = spawnSync(process.execPath, [SCRIPT, '--root', root], {
+function runVerification(
+  root: string,
+  spelling: 'separate' | 'inline' = 'separate',
+): {status: number; output: string} {
+  const rootArgs =
+    spelling === 'inline' ? [`--root=${root}`] : ['--root', root];
+  const result = spawnSync(process.execPath, [SCRIPT, ...rootArgs], {
     encoding: 'utf8',
   });
   if (result.error) {
@@ -96,6 +118,41 @@ test('passes when the same import is declared', () => {
 
   expect(output).toContain('properly declared');
   expect(status).toBe(0);
+});
+
+test('honours --root=<dir> as well as --root <dir>', () => {
+  // Recognising only the separated form would make `--root=<dir>` fall back to the
+  // real repository — and with --fix that rewrites the manifests the operator
+  // believed they had pointed away from.
+  const {status, output} = runVerification(makeFixture(false), 'inline');
+  expect(output).toContain('packages/alpha');
+  expect(status).not.toBe(0);
+});
+
+test('refuses a --root that is not a workspace', () => {
+  const notAWorkspace = mkdtempSync(join(tmpdir(), 'verify-deps-notws-'));
+  fixtureRoots.push(notAWorkspace);
+  const result = spawnSync(
+    process.execPath,
+    [SCRIPT, '--root', notAWorkspace],
+    {
+      encoding: 'utf8',
+    },
+  );
+  expect(result.status).not.toBe(0);
+  expect(`${result.stdout ?? ''}${result.stderr ?? ''}`).toContain(
+    'not a workspace root',
+  );
+});
+
+test('refuses an empty --root rather than scanning the cwd', () => {
+  const result = spawnSync(process.execPath, [SCRIPT, '--root', ''], {
+    encoding: 'utf8',
+  });
+  expect(result.status).not.toBe(0);
+  expect(`${result.stdout ?? ''}${result.stderr ?? ''}`).toContain(
+    '--root requires a directory',
+  );
 });
 
 test('attributes the violation to a package rather than reporting none', () => {

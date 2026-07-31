@@ -6,9 +6,10 @@ import {defaultExec, mustEnv, writeGithubOutput} from './shared.ts';
 const packDestination = mustEnv('PACK_DEST');
 mkdirSync(packDestination, {recursive: true});
 
-// Goes through defaultExec rather than execFileSync directly: that is the one
-// place that knows how to invoke npm portably, and a second exec path here
-// would silently miss it.
+// Goes through defaultExec rather than execFileSync directly: that is where the
+// knowledge of how to invoke npm portably lives, and a second exec path here would
+// not pick it up. (The release workflow inlines its own `npm pack` in YAML, which
+// no lint rule can see — it runs on Linux, where a bare name resolves.)
 const output = defaultExec('npm', [
   'pack',
   '--pack-destination',

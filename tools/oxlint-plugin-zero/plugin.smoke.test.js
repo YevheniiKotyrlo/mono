@@ -8,7 +8,7 @@ import {
 } from 'node:fs';
 import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
-import {dirname, join} from 'node:path';
+import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {afterEach, expect, test} from 'vitest';
 
@@ -43,7 +43,12 @@ function resolveOxlint() {
   if (typeof entry !== 'string' || entry.length === 0) {
     throw new Error(`no usable oxlint bin in ${manifestPath}`);
   }
-  return join(dirname(manifestPath), entry);
+  const packageDir = dirname(manifestPath);
+  const resolved = resolve(packageDir, entry);
+  if (!resolved.startsWith(packageDir)) {
+    throw new Error(`oxlint bin points outside its package: ${entry}`);
+  }
+  return resolved;
 }
 
 const OXLINT = resolveOxlint();

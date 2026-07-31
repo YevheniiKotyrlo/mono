@@ -193,12 +193,13 @@ function shouldCheck(filename, include) {
 
 /**
  * Matches `.pathname` read off a URL that is known to be a `file:` URL:
- * `new URL('./x', import.meta.url).pathname` or `new URL(import.meta.url).pathname`.
+ * `new URL('./x', import.meta.url).pathname`, `new URL(import.meta.url).pathname`,
+ * or either with a spelled-out `file:` literal.
  *
- * The base decides, not the specifier. A relative specifier against an http base
- * — `new URL('./v2/users', apiBaseUrl).pathname` — is ordinary URL work and must
- * not be flagged, so a two-argument form is only a finding when the base is
- * `import.meta.url`.
+ * Whichever argument settles the scheme is the one read: a specifier carrying its
+ * own scheme, otherwise the base. So `new URL('./v2/users', apiBaseUrl).pathname`
+ * is ordinary URL work and not a finding, while `new URL('https://x/y',
+ * 'file:///a').pathname` is not one either — the base is irrelevant there.
  */
 function isFileUrlPathnameAccess(node) {
   if (node.computed || node.property?.name !== 'pathname') {
@@ -215,6 +216,21 @@ function isFileUrlPathnameAccess(node) {
     return isKnownFileUrl(base);
   }
   return isKnownFileUrl(specifier);
+}
+
+/**
+ * Whether a value node is knowably falsy: a falsy literal, or either spelling of
+ * undefined. `undefined` parses as an Identifier and `void 0` as a UnaryExpression,
+ * so neither is caught by a Literal check.
+ */
+function isStaticallyFalsy(node) {
+  if (node?.type === 'Literal') {
+    return !node.value;
+  }
+  if (node?.type === 'Identifier') {
+    return node.name === 'undefined';
+  }
+  return node?.type === 'UnaryExpression' && node.operator === 'void';
 }
 
 const urlScheme = /^[A-Za-z][A-Za-z\d+.-]*:/;
@@ -311,11 +327,11 @@ function hasShellOption(argument) {
     ) {
       return false;
     }
-    // A literal `false`/`null`/`0`/`''` is not an opt-out. Anything else —
-    // `true`, a variable, a call — is not statically known to be falsy, so it
-    // counts as deliberate.
-    const {value} = property;
-    return !(value?.type === 'Literal' && !value.value);
+    // A statically falsy value is not an opt-out — `{shell: false}` is the very
+    // configuration that fails, and `{shell: undefined}` / `{shell: void 0}` are
+    // that same configuration spelled differently. Anything else — `true`, a
+    // variable, a call — is not knowably falsy, so it counts as deliberate.
+    return !isStaticallyFalsy(property.value);
   });
 }
 

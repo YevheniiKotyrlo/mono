@@ -359,7 +359,16 @@ function resolveTscEntrypoint(): string {
     typeof relativeEntrypoint === 'string' && relativeEntrypoint.length > 0,
     `no usable tsc bin in ${manifestPath}`,
   );
-  return resolve(dirname(manifestPath), relativeEntrypoint);
+  const packageDir = dirname(manifestPath);
+  const entrypoint = resolve(packageDir, relativeEntrypoint);
+  // `resolve` discards the base for an absolute second argument, so a manifest
+  // could otherwise name any file on disk and this would spawn it. npm normalizes
+  // `bin` to stay inside the package; nothing here had.
+  assert(
+    entrypoint.startsWith(packageDir),
+    `tsc bin in ${manifestPath} points outside its package: ${relativeEntrypoint}`,
+  );
+  return entrypoint;
 }
 
 // Resolved on first use, not at module load: `--bundle-sizes` never compiles, and

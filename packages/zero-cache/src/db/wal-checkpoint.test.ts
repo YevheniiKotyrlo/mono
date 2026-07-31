@@ -120,7 +120,14 @@ describe('db/wal-checkpoint', () => {
         // surfaces separately, attributed to the whole file rather than to this.
         worker.once('error', failCommit);
         worker.postMessage('commit');
-        await committed;
+        try {
+          await committed;
+        } finally {
+          // Detached once the wait is over: `once` only removes itself when it
+          // fires, so leaving it attached would swallow a later error during
+          // teardown by rejecting an already-settled promise.
+          worker.off('error', failCommit);
+        }
         return;
       }
 

@@ -1,8 +1,8 @@
 import {existsSync, statSync} from 'node:fs';
 import type {LogContext} from '@rocicorp/logger';
 import {SqliteError} from '@rocicorp/zero-sqlite3';
+import {SQLITE_FILE_SUFFIXES} from '../../../shared/src/sqlite-file-suffixes.ts';
 import {Database} from '../../../zqlite/src/db.ts';
-import {SQLITE_FILE_SUFFIXES} from './delete-lite-db.ts';
 
 const SQLITE_CORRUPTION_CODES = new Set(['SQLITE_CORRUPT', 'SQLITE_NOTADB']);
 const SQLITE_CORRUPTION_MESSAGE =

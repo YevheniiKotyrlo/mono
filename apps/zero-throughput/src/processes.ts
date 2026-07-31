@@ -4,6 +4,7 @@ import {createWriteStream, mkdirSync, type WriteStream} from 'node:fs';
 import {rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {SQLITE_FILE_SUFFIXES} from '../../../packages/shared/src/sqlite-file-suffixes.ts';
 import type {BenchmarkConfig} from './config.ts';
 import {appPath, appRoot, repoRoot} from './config.ts';
 import {
@@ -155,14 +156,12 @@ export function queryPlanAnalysisLogPath(config: BenchmarkConfig): string {
   return join(processLogsDir(config), `${config.runID}-query-plans.log`);
 }
 
-// The same set as `SQLITE_FILE_SUFFIXES` in zero-cache, restated because this app
-// does not depend on that package. `-wal2` is the one that matters: the replica
-// runs in WAL2, so omitting it left a stale sidecar beside the next run's replica.
-const REPLICA_SUFFIXES = ['', '-wal', '-wal2', '-shm', '-journal'];
-
 export async function removeReplicaFiles(replicaFile: string): Promise<void> {
+  // `-wal2` is what this was missing: the replica runs in WAL2, so a stale sidecar
+  // survived beside the next run's replica. No `recursive`, so a path that names a
+  // directory still fails loudly.
   await Promise.all(
-    REPLICA_SUFFIXES.map(suffix =>
+    SQLITE_FILE_SUFFIXES.map(suffix =>
       rm(`${replicaFile}${suffix}`, {force: true}),
     ),
   );

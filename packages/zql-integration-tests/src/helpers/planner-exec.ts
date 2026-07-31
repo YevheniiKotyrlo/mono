@@ -1,3 +1,4 @@
+import {basename, dirname, join} from 'node:path';
 // oxlint-disable no-console
 import {testLogConfig} from '../../../otel/src/test-log-config.ts';
 import {createSilentLogContext} from '../../../shared/src/logging-test-utils.ts';
@@ -420,7 +421,13 @@ export async function createPlannerInfrastructure(config: {
   });
 
   // Create a copy of the baseline SQLite database for the indexed version
-  const indexedDbFile = dbs.sqliteFile.replace('.db', '-indexed.db');
+  // Suffixed on the basename, not the whole path: `replace` hits the first match
+  // anywhere, so a temp directory containing '.db' would retarget the copy outside
+  // the suite's directory — where teardown would not remove it.
+  const indexedDbFile = join(
+    dirname(dbs.sqliteFile),
+    basename(dbs.sqliteFile).replace('.db', '-indexed.db'),
+  );
 
   // Use VACUUM INTO to create a proper copy of the database (handles WAL files)
   dbs.sqlite.exec(`VACUUM INTO '${indexedDbFile}'`);
