@@ -114,6 +114,20 @@ const tempDirs: string[] = [];
 const suiteDatabases: Database[] = [];
 
 /**
+ * Upstream Postgres databases created by `bootstrap`, one per suite.
+ *
+ * Dropped in teardown, which also ends the client. Without that the client stays
+ * connected for the rest of the worker: files run sequentially in one process, so
+ * every suite's pool is added to the last one's and the container eventually
+ * refuses with "sorry, too many clients already" — one file peaks around 18
+ * connections against a default limit of 100, and the project has 21 files.
+ *
+ * `testDBs.end()` drops whatever is left at the very end and warns
+ * "undropped databases", which is how this was visible before it was fixed.
+ */
+const suitePgDatabases: PostgresDB[] = [];
+
+/**
  * Opens a handle that lives as long as the suite, so teardown can close it.
  *
  * Every suite-lifetime handle on a file under a temp directory comes from here:
@@ -185,6 +199,12 @@ afterAll(async () => {
   for (const db of suiteDatabases.splice(0)) {
     closeQuietly(db);
   }
+  // Dropping ends the client too, which is the part that matters: these are
+  // per-suite, files share a worker process, and the connections are otherwise
+  // held until the whole run ends.
+  if (suitePgDatabases.length > 0) {
+    await testDBs.drop(...suitePgDatabases.splice(0));
+  }
   // Each directory is dropped from the list only once its removal has settled,
   // and failures are collected rather than thrown from the loop: draining the
   // list up front meant one busy directory abandoned every later suite's — each
@@ -217,6 +237,7 @@ async function makeDatabases<TSchema extends Schema>(
   testData?: (serverSchema: ServerSchema) => Record<string, Row[]>,
 ): Promise<DBs<TSchema>> {
   const pg = await testDBs.create(suiteName, {typeOpts: false});
+  suitePgDatabases.push(pg);
   await pg.unsafe(pgContent);
 
   const serverSchema = await pg.begin(tx =>
