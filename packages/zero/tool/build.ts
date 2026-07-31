@@ -1,9 +1,9 @@
 // Build script for @rocicorp/zero package
 import {spawn} from 'node:child_process';
-import {existsSync} from 'node:fs';
+import {existsSync, readFileSync} from 'node:fs';
 import {chmod, copyFile, mkdir, readdir, readFile, rm} from 'node:fs/promises';
-import {builtinModules} from 'node:module';
-import {basename, resolve} from 'node:path';
+import {builtinModules, createRequire} from 'node:module';
+import {basename, dirname, isAbsolute, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parse} from 'oxc-parser';
 import {type InlineConfig, build as viteBuild} from 'vite';
@@ -57,7 +57,11 @@ function packageName(id: string): string {
 
 function external(id: string): boolean {
   // Relative/absolute ids and bundler-virtual ids (\0-prefixed) get bundled.
-  if (id.startsWith('.') || id.startsWith('/') || id.startsWith('\0')) {
+  // isAbsolute, not a leading-slash test: on Windows an absolute id is 'C:\…'
+  // or 'C:/…', so a leading-slash test classified every first-party module as
+  // external. Nothing was bundled and the build silently emitted pass-through
+  // stubs importing .ts paths, which cannot load at runtime.
+  if (id.startsWith('.') || isAbsolute(id) || id.startsWith('\0')) {
     return false;
   }
   return !inlinedModules.has(packageName(id));
@@ -326,11 +330,42 @@ async function runPromise(p: Promise<unknown>, label: string) {
   console.log(`✓ ${label} completed in ${((end - start) / 1000).toFixed(2)}s`);
 }
 
-function exec(cmd: string, name: string) {
+// `tsc` on PATH is a `.CMD` shim on Windows, and CreateProcess only ever
+// appends `.exe` — so `spawn('tsc', …)` throws ENOENT there even with
+// node_modules/.bin on PATH. `shell: true` would work but concatenates
+// arguments instead of escaping them (Node DEP0190), so resolve TypeScript's
+// own entrypoint and run it under the current Node instead. Also removes the
+// PATH dependency entirely: the compiler used is the one this package depends on.
+//
+// Resolve through the manifest rather than requesting './bin/tsc' directly:
+// TypeScript 7 added an `exports` map that does not list ./bin/tsc, so
+// resolving that subpath throws ERR_PACKAGE_PATH_NOT_EXPORTED there.
+// './package.json' is exported by both 6 and 7, and reading `bin.tsc` from it
+// keeps this working if the file ever moves.
+function resolveTscEntrypoint(): string {
+  const manifestPath = createRequire(import.meta.url).resolve(
+    'typescript/package.json',
+  );
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
+    bin?: string | Record<string, string>;
+  };
+  const {bin} = manifest;
+  const relativeEntrypoint = typeof bin === 'string' ? bin : bin?.tsc;
+  assert(
+    relativeEntrypoint !== undefined,
+    'typescript package.json declares no tsc bin',
+  );
+  return resolve(dirname(manifestPath), relativeEntrypoint);
+}
+
+const tscEntrypoint = resolveTscEntrypoint();
+
+function execTsc(args: readonly string[], name: string) {
   return runPromise(
     new Promise<void>((resolve, reject) => {
-      const [command, ...args] = cmd.split(' ');
-      const proc = spawn(command, args, {stdio: 'inherit'});
+      const proc = spawn(process.execPath, [tscEntrypoint, ...args], {
+        stdio: 'inherit',
+      });
       proc.on('exit', code =>
         code === 0 ? resolve() : reject(new Error(`${name} failed`)),
       );
@@ -362,12 +397,12 @@ async function build() {
     viteConfig.build = {...viteConfig.build, watch: {}};
     await Promise.all([
       runViteBuild(viteConfig, 'vite build (watch)'),
-      exec(
-        'tsc -p tsconfig.client.json --watch --preserveWatchOutput',
+      execTsc(
+        ['-p', 'tsconfig.client.json', '--watch', '--preserveWatchOutput'],
         'client dts (watch)',
       ),
-      exec(
-        'tsc -p tsconfig.server.json --watch --preserveWatchOutput',
+      execTsc(
+        ['-p', 'tsconfig.server.json', '--watch', '--preserveWatchOutput'],
         'server dts (watch)',
       ),
     ]);
@@ -376,8 +411,8 @@ async function build() {
     const viteConfig = await getViteConfig();
     await Promise.all([
       runViteBuild(viteConfig, 'vite build'),
-      exec('tsc -p tsconfig.client.json', 'client dts'),
-      exec('tsc -p tsconfig.server.json', 'server dts'),
+      execTsc(['-p', 'tsconfig.client.json'], 'client dts'),
+      execTsc(['-p', 'tsconfig.server.json'], 'server dts'),
     ]);
 
     await makeBinFilesExecutable();

@@ -8,6 +8,7 @@ import {
   assertZeroVersion,
   npmZeroVersionExists,
   readReleaseMode,
+  resolveNodeShimCommand,
   writeGithubOutput,
   writeZeroPackageVersion,
   zeroTag,
@@ -175,3 +176,45 @@ function missingNpmVersionError() {
   error.stderr = Buffer.from('');
   return error;
 }
+
+// resolveNodeShimCommand: platform is injected rather than read from the host,
+// so the Windows behaviour is covered on a POSIX CI runner too. Without that
+// the npm-on-Windows defect is untestable anywhere it does not already occur.
+test('resolveNodeShimCommand leaves npm alone on posix', () => {
+  const resolved = resolveNodeShimCommand('npm', ['pack'], 'linux', () => true);
+  expect(resolved).toEqual({command: 'npm', args: ['pack']});
+});
+
+test('resolveNodeShimCommand runs npm under node on win32', () => {
+  const resolved = resolveNodeShimCommand(
+    'npm',
+    ['pack', '--json'],
+    'win32',
+    () => true,
+  );
+  expect(resolved.command).toBe(process.execPath);
+  expect(resolved.args.slice(1)).toEqual(['pack', '--json']);
+  expect(resolved.args[0]).toMatch(/npm-cli\.js$/);
+});
+
+test('resolveNodeShimCommand falls back to the bare name when npm is not beside node', () => {
+  const resolved = resolveNodeShimCommand(
+    'npm',
+    ['pack'],
+    'win32',
+    () => false,
+  );
+  expect(resolved).toEqual({command: 'npm', args: ['pack']});
+});
+
+test.each(['docker', 'git', 'tar'] as const)(
+  'resolveNodeShimCommand leaves %s untouched on win32 — it is a real executable',
+  command => {
+    expect(
+      resolveNodeShimCommand(command, ['--version'], 'win32', () => true),
+    ).toEqual({
+      command,
+      args: ['--version'],
+    });
+  },
+);

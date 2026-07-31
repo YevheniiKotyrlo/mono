@@ -1,5 +1,6 @@
 import {execFileSync} from 'node:child_process';
-import {appendFileSync, readFileSync, writeFileSync} from 'node:fs';
+import {appendFileSync, existsSync, readFileSync, writeFileSync} from 'node:fs';
+import {dirname, join} from 'node:path';
 
 export const zeroPackageName = '@rocicorp/zero';
 export const zeroPackageJsonPath = 'packages/zero/package.json';
@@ -30,13 +31,48 @@ export type ZeroTag<V extends ZeroVersion = ZeroVersion> = `zero/v${V}`;
 export type MaintenanceZeroBranch = `maint/zero/v${number}.${number}`;
 export type ReleaseBranch = 'main' | MaintenanceZeroBranch;
 
-export const defaultExec: Exec = (command, args, options) =>
-  String(
-    execFileSync(command, [...args], {
+/**
+ * On Windows `npm` is `npm.cmd`, and `CreateProcess` only ever appends `.exe` —
+ * so `execFileSync('npm', …)` throws ENOENT. `shell: true` would work but
+ * concatenates arguments rather than escaping them (Node DEP0190), and these
+ * arguments include filesystem paths, so run npm's own JS entrypoint under the
+ * current Node instead. npm ships beside the Node binary; if that layout ever
+ * changes we fall back to the bare name, which fails loudly as it does today
+ * rather than silently doing something else.
+ *
+ * `docker`, `git` and `tar` are real executables on Windows and need none of
+ * this.
+ */
+export function resolveNodeShimCommand(
+  command: Command,
+  args: readonly string[],
+  platform: string = process.platform,
+  fileExists: (path: string) => boolean = existsSync,
+): {command: string; args: string[]} {
+  if (command !== 'npm' || platform !== 'win32') {
+    return {command, args: [...args]};
+  }
+  const npmCli = join(
+    dirname(process.execPath),
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
+  );
+  return fileExists(npmCli)
+    ? {command: process.execPath, args: [npmCli, ...args]}
+    : {command, args: [...args]};
+}
+
+export const defaultExec: Exec = (command, args, options) => {
+  const resolved = resolveNodeShimCommand(command, args);
+  return String(
+    execFileSync(resolved.command, resolved.args, {
       encoding: 'utf8',
       ...options,
     }) ?? '',
   );
+};
 
 const stableZeroVersionPattern = /^\d+\.\d+\.\d+$/;
 export const headVersionShaLength = 8;
