@@ -500,9 +500,10 @@ describe('SQLite change-log observability on disk', () => {
     const failure = Object.assign(new Error('EACCES: permission denied'), {
       code: 'EACCES',
     });
-    const statFile = (() => Promise.reject(failure)) as unknown as Parameters<
-      typeof sqliteFileBytes
-    >[2];
+    // Typed, not cast: the narrow parameter exists so a double like this needs no
+    // `as unknown as`, and an annotation still checks it against the contract.
+    const statFile: Parameters<typeof sqliteFileBytes>[2] = () =>
+      Promise.reject(failure);
 
     expect(await sqliteFileBytes(files.lc, bad, statFile)).toBe(0);
     // Unordered: the three files are stat'd concurrently.

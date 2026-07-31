@@ -84,10 +84,10 @@ test('every Postgres major with a setup file has a dev container service', () =>
   // Guards the direction the per-major cases cannot: adding pg-19.ts and
   // forgetting the compose service would otherwise leave the new major
   // unchecked.
-  const declared = [...compose.matchAll(/^ {2}pg(\d+):$/gmu)].map(m =>
+  const declared = Array.from(compose.matchAll(/^ {2}pg(\d+):$/gmu), m =>
     Number(m[1]),
   );
-  expect(declared.sort()).toEqual([...MAJORS]);
+  expect(declared.toSorted()).toEqual([...MAJORS]);
 });
 
 describe.each(MAJORS)('pg%d', major => {
@@ -112,8 +112,8 @@ describe.each(MAJORS)('pg%d', major => {
     const settings = command.filter(
       item => item !== 'postgres' && item !== '-c',
     );
-    expect(settings.sort()).toEqual(
-      [...postgresServerSettings(timezone)].sort(),
+    expect(settings.toSorted()).toEqual(
+      postgresServerSettings(timezone).toSorted(),
     );
   });
 });

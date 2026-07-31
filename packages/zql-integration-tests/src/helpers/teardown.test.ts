@@ -88,7 +88,6 @@ test('describes a thrown non-error in the message', async () => {
   try {
     await releaseAll([
       () => {
-        // eslint-disable-next-line no-throw-literal
         throw 'not an error';
       },
       () => {

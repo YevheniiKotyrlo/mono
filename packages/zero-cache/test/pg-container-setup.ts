@@ -1,4 +1,5 @@
 import {PostgreSqlContainer} from '@testcontainers/postgresql';
+import type {ProvidedContext} from 'vitest';
 
 const IMAGE_MAJOR_VERSION = /^postgres:(\d+)/;
 
@@ -32,8 +33,25 @@ export function postgresServerSettings(timezone: string): readonly string[] {
   return [...SHARED_POSTGRES_SETTINGS, `timezone=${timezone}`];
 }
 
+/**
+ * The half of vitest's global setup context this uses.
+ *
+ * Keyed on the same `ProvidedContext` the readers narrow against
+ * (../src/test/db.ts augments it), so adding a provided value is checked at both
+ * ends rather than only where it is injected. Declared structurally because vitest
+ * 4 exports no type for the context, and narrowly because `provide` is all of it
+ * that is needed — vitest supplies the argument, so nothing else has to satisfy
+ * this.
+ */
+type ProvidingContext = {
+  provide: <K extends keyof ProvidedContext>(
+    key: K,
+    value: ProvidedContext[K],
+  ) => void;
+};
+
 export function runPostgresContainer(image: string, timezone: string) {
-  return async ({provide}) => {
+  return async ({provide}: ProvidingContext) => {
     // TEST_PG_<major> (e.g. TEST_PG_16=postgres://user:password@pg16:5432/postgres)
     // points the tests at an already-running Postgres instead of starting one
     // with testcontainers. The instance must be configured with the same
