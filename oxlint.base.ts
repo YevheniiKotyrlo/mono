@@ -183,10 +183,16 @@ export const baseConfig = {
     // Portability rules. Both defects they catch are invisible on POSIX, so
     // without them a fix can be reverted with CI still green.
     //
-    // Scope caveat: `tool` is in ignorePatterns above, so these do not reach
-    // `packages/*/tool/**` — including the build script whose `spawn('tsc')` is
-    // the motivating case. Linting that tree surfaces 37 unrelated pre-existing
-    // errors, so it is left for its own change rather than smuggled in here.
+    // Scope caveat, worth stating precisely because it is larger than it looks:
+    // `tool` in ignorePatterns above has gitignore semantics, so it matches a
+    // `tool` directory at any depth — and an `overrides` entry cannot narrow it
+    // back, since an ignored file is skipped even when named explicitly. So
+    // neither rule reaches `packages/zero/tool/**` (the `spawn('tsc')` that
+    // motivated the second rule) or `packages/shared/src/tool/**` (one of the
+    // three `.pathname` sites the first one describes). Linting those trees
+    // surfaces 37 unrelated pre-existing errors, so bringing them into scope is
+    // its own change; until then these rules guard new code rather than the code
+    // that prompted them.
     'zero/no-file-url-pathname': 'error',
     'zero/no-bare-shim-spawn': 'error',
   },

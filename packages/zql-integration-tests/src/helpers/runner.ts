@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import type {LogContext} from '@rocicorp/logger';
 import {afterAll, expect} from 'vitest';
 import {testLogConfig} from '../../../otel/src/test-log-config.ts';
 import {unreachable} from '../../../shared/src/asserts.ts';
@@ -89,22 +90,44 @@ type Queries<TSchema extends Schema> = {
   [K in keyof TSchema['tables'] & string]: Query<K, TSchema>;
 };
 
-let tempDir: string | undefined;
+/**
+ * Temp directories created by `bootstrap`, one per suite.
+ *
+ * A list rather than a single slot for the same reason `suiteDatabases` is one:
+ * a file with two suites creates two, and a single slot would silently orphan
+ * the first — its handles would still be closed, so nothing would report it.
+ */
+const tempDirs: string[] = [];
 
 /**
- * The suite-level handle on the replica under `tempDir`, one per `bootstrap`.
+ * Suite-level handles on files under those directories.
  *
- * It lives as long as the suite, so teardown is the only place that can close
- * it — and it has to, because the directory cannot be removed while a handle on
+ * They live as long as the suite, so teardown is the only place that can close
+ * them — and it has to, because a directory cannot be removed while a handle on
  * a file inside it is open. (POSIX permits unlink-while-open, which is why
- * leaving it open went unnoticed.) A file with more than one suite contributes
- * more than one, hence a list.
+ * leaving them open went unnoticed.)
  *
  * Per-case handles are deliberately absent: each is owned by the `finally` of
  * the case that opened it, so tracking them here would only retain closed
  * objects for the rest of the run.
  */
 const suiteDatabases: Database[] = [];
+
+/**
+ * Opens a handle that lives as long as the suite, so teardown can close it.
+ *
+ * Every suite-lifetime handle on a file under a temp directory comes from here:
+ * the directory cannot be removed while one is open, and a handle opened
+ * directly is invisible to teardown however carefully the rest is tracked.
+ */
+export function openSuiteDatabase(
+  logContext: LogContext,
+  file: string,
+): Database {
+  const db = new Database(logContext, file);
+  suiteDatabases.push(db);
+  return db;
+}
 
 /**
  * A connection for one case — a comparison run or a benchmark — holding an open
@@ -117,37 +140,53 @@ const suiteDatabases: Database[] = [];
  */
 function openScopedDatabase(file: string): Database {
   const db = new Database(lc, file);
-  db.exec('BEGIN CONCURRENT');
+  try {
+    db.exec('BEGIN CONCURRENT');
+  } catch (error) {
+    // The handle is not returned, so nothing else can ever close it.
+    closeQuietly(db);
+    throw error;
+  }
   return db;
 }
 
 /**
- * Closes a connection, tolerating an already-closed handle so a case that closes
- * its own does not break the surrounding `finally`.
+ * Closes a connection without letting a close failure escape.
+ *
+ * Called from `finally` blocks, where throwing would replace the error the case
+ * actually failed with. The failure is still reported — it is warned rather than
+ * discarded, so a real one (an unfinalized statement, a locked database) is
+ * visible instead of resurfacing later as an unexplained EBUSY from the removal.
  */
 function closeQuietly(db: Database): void {
   try {
     db.close();
-  } catch {
-    // Already closed.
+  } catch (error) {
+    lc.warn?.('failed to close a test database', error);
   }
 }
+
+/**
+ * Windows refuses to unlink a file whose handle has just been released, for long
+ * enough to matter; `force` suppresses a missing path but not a busy one. There
+ * is nothing to wait for elsewhere — `EPERM`, `ENOTEMPTY`, `EMFILE` and `ENFILE`
+ * all occur legitimately on POSIX and no delay fixes any of them — so the budget
+ * is granted only where the wait is real.
+ */
+const removeRetries = process.platform === 'win32' ? 5 : 0;
 
 afterAll(async () => {
   for (const db of suiteDatabases.splice(0)) {
     closeQuietly(db);
   }
-  if (tempDir) {
-    // maxRetries covers the lag between closing a handle and Windows releasing
-    // it; force alone suppresses ENOENT but not EBUSY.
-    await fs.rm(tempDir, {
+  for (const dir of tempDirs.splice(0)) {
+    await fs.rm(dir, {
       recursive: true,
       force: true,
-      maxRetries: 10,
-      retryDelay: 50,
+      maxRetries: removeRetries,
+      retryDelay: 20,
     });
   }
-  tempDir = undefined;
 });
 
 async function makeDatabases<TSchema extends Schema>(
@@ -187,10 +226,12 @@ async function makeDatabases<TSchema extends Schema>(
     });
   }
 
-  tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zero-integration-tests'));
+  const tempDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'zero-integration-tests'),
+  );
+  tempDirs.push(tempDir);
   const tempFile = path.join(tempDir, `${suiteName}.db`);
-  const sqlite = new Database(lc, tempFile);
-  suiteDatabases.push(sqlite);
+  const sqlite = openSuiteDatabase(lc, tempFile);
   sqlite.pragma('journal_mode = WAL2');
 
   await initialSync(
@@ -644,7 +685,12 @@ function makeTest<TSchema extends Schema>(
         const queryBuilders = makeQueries(zqlSchema);
         const query = createQuery(queryBuilders);
 
-        await runAndCompare(zqlSchema, caseDelegates, query, manualVerification);
+        await runAndCompare(
+          zqlSchema,
+          caseDelegates,
+          query,
+          manualVerification,
+        );
 
         if (pushEvery > 0) {
           await checkPush(zqlSchema, caseDelegates, query, pushEvery);

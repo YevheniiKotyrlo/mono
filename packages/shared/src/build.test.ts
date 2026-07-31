@@ -1,5 +1,5 @@
 import {expect, test} from 'vitest';
-import {isFileModuleId} from './build.ts';
+import {isExternalModuleId, isFileModuleId, packageName} from './build.ts';
 
 // Windows-shaped ids are written out literally rather than built with path.join,
 // so these assertions mean the same thing on every runner. The bug this guards
@@ -44,15 +44,62 @@ test.each([
   expect(isFileModuleId(id)).toBe(false);
 });
 
-// The regression in full: a bundler asks "is this a file?" to decide whether to
-// bundle. Answering "no" for a first-party Windows path externalizes everything.
-test('a Windows entry path is bundled, not externalized', () => {
-  const entry = 'C:\\repo\\packages\\zero\\src\\adapters\\kysely.ts';
-  const inlined = new Set(['@oxc-project/runtime']);
-  const isExternal = (id: string) => !isFileModuleId(id) && !inlined.has(id);
+test.each([
+  ['C:foo\\bar.ts', true],
+  ['C:a.ts', true],
+])(
+  'treats the Windows drive-relative id %s as a file',
+  (id, expected: boolean) => {
+    // Legal on Windows and a genuine file path. A single letter followed by ':'
+    // cannot be a package name, so there is nothing to confuse it with — whereas
+    // classifying it as a package would externalize it and then report the whole
+    // path as an undeclared module.
+    expect(isFileModuleId(id)).toBe(expected);
+  },
+);
 
-  expect(isExternal(entry)).toBe(false);
-  // A genuine third-party import stays external in the same breath.
-  expect(isExternal('kysely')).toBe(true);
-  expect(isExternal('@oxc-project/runtime')).toBe(false);
+test('an empty id is not treated as a file', () => {
+  // Recorded rather than asserted as desirable: no bundler emits it, and there is
+  // no better answer available — an empty id names neither a file nor a package.
+  expect(isFileModuleId('')).toBe(false);
 });
+
+test.each([
+  ['@scope/pkg/deep/path', '@scope/pkg'],
+  ['pkg/subpath', 'pkg'],
+  ['pkg', 'pkg'],
+  ['@scope/pkg', '@scope/pkg'],
+])('packageName(%s) is %s', (id, expected) => {
+  expect(packageName(id)).toBe(expected);
+});
+
+// The regression in full: the bundler asks this exact function whether to leave a
+// module as an import. Answering "yes" for a first-party Windows path externalizes
+// the whole program, and the build still reports success. This asserts the real
+// decision rather than a re-derivation of it, so reverting the predicate at the
+// call site cannot leave the suite green.
+const INLINED = new Set(['@oxc-project/runtime']);
+
+test.each([
+  'C:\\repo\\packages\\zero\\src\\adapters\\kysely.ts',
+  'C:/repo/packages/zero/src/adapters/kysely.ts',
+  '/repo/packages/zero/src/adapters/kysely.ts',
+  './relative.ts',
+  '\0virtual:module',
+])('bundles the first-party id %s', id => {
+  expect(isExternalModuleId(id, INLINED)).toBe(false);
+});
+
+test.each(['kysely', 'node:fs', '@rocicorp/logger', 'drizzle-orm/pg-core'])(
+  'leaves the third-party id %s external',
+  id => {
+    expect(isExternalModuleId(id, INLINED)).toBe(true);
+  },
+);
+
+test.each(['@oxc-project/runtime', '@oxc-project/runtime/helpers/x'])(
+  'bundles the inlined package id %s, subpaths included',
+  id => {
+    expect(isExternalModuleId(id, INLINED)).toBe(false);
+  },
+);

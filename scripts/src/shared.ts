@@ -36,9 +36,12 @@ export type ReleaseBranch = 'main' | MaintenanceZeroBranch;
  * so `execFileSync('npm', …)` throws ENOENT. `shell: true` would work but
  * concatenates arguments rather than escaping them (Node DEP0190), and these
  * arguments include filesystem paths, so run npm's own JS entrypoint under the
- * current Node instead. npm ships beside the Node binary; if that layout ever
- * changes we fall back to the bare name, which fails loudly as it does today
- * rather than silently doing something else.
+ * current Node instead. npm ships beside the Node binary.
+ *
+ * When that layout does not hold, this throws naming the path it looked for.
+ * Returning the bare name instead would hand back the one invocation this
+ * function exists to avoid, and the ENOENT it produces names neither npm's
+ * location nor this decision.
  *
  * `docker`, `git` and `tar` are real executables on Windows and need none of
  * this.
@@ -46,7 +49,7 @@ export type ReleaseBranch = 'main' | MaintenanceZeroBranch;
 export function resolveNodeShimCommand(
   command: Command,
   args: readonly string[],
-  platform: string = process.platform,
+  platform: NodeJS.Platform = process.platform,
   fileExists: (path: string) => boolean = existsSync,
 ): {command: string; args: string[]} {
   if (command !== 'npm' || platform !== 'win32') {
@@ -59,20 +62,36 @@ export function resolveNodeShimCommand(
     'bin',
     'npm-cli.js',
   );
-  return fileExists(npmCli)
-    ? {command: process.execPath, args: [npmCli, ...args]}
-    : {command, args: [...args]};
+  if (!fileExists(npmCli)) {
+    throw new Error(
+      `Cannot run npm on Windows: expected npm's entrypoint at ${npmCli}. ` +
+        `Spawning 'npm' by name cannot work here — it is npm.cmd, which ` +
+        `CreateProcess will not resolve.`,
+    );
+  }
+  return {command: process.execPath, args: [npmCli, ...args]};
 }
 
-export const defaultExec: Exec = (command, args, options) => {
-  const resolved = resolveNodeShimCommand(command, args);
-  return String(
-    execFileSync(resolved.command, resolved.args, {
-      encoding: 'utf8',
-      ...options,
-    }) ?? '',
-  );
-};
+/**
+ * The one place that knows how to actually run a command.
+ *
+ * `execFile` is a parameter so a test can observe what was spawned: the routing
+ * through `resolveNodeShimCommand` is the part that silently regresses, and
+ * asserting the resolution alone would not notice a caller that stopped using it.
+ */
+export function createExec(execFile: typeof execFileSync = execFileSync): Exec {
+  return (command, args, options) => {
+    const resolved = resolveNodeShimCommand(command, args);
+    return String(
+      execFile(resolved.command, resolved.args, {
+        encoding: 'utf8',
+        ...options,
+      }) ?? '',
+    );
+  };
+}
+
+export const defaultExec: Exec = createExec();
 
 const stableZeroVersionPattern = /^\d+\.\d+\.\d+$/;
 export const headVersionShaLength = 8;

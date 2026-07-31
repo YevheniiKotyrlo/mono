@@ -60,11 +60,36 @@ function lintFixture(relativeFilePath, source, ruleName, ruleOptions) {
     cwd: root,
     encoding: 'utf8',
   });
-  return `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+
+  // A harness that cannot lint would satisfy every "does not report" assertion
+  // below — a plugin that fails to load, a rejected config, a wrong oxlint path.
+  // So each run proves it actually linked the fixture before its own assertion
+  // is allowed to mean anything. This is the same failure the rule under test
+  // had (silence is indistinguishable from clean), reintroduced one level up.
+  if (!/Found \d+ warnings? and \d+ errors?/.test(output)) {
+    throw new Error(
+      `oxlint did not lint the fixture (status ${result.status}):\n${output}`,
+    );
+  }
+  return {output, status: result.status};
+}
+
+/** Asserts the rule fired on a fixture that violates it. */
+function expectReported(result, ruleName) {
+  expect(result.output).toContain(ruleName);
+  expect(result.status).not.toBe(0);
+}
+
+/** Asserts the rule stayed silent on a fixture that does not violate it. */
+function expectSilent(result, ruleName) {
+  expect(result.output).not.toContain(ruleName);
+  expect(result.output).toMatch(/Found 0 warnings and 0 errors/);
+  expect(result.status).toBe(0);
 }
 
 test('no-select-star reports SELECT * inside an included path', () => {
-  const output = lintFixture(
+  const result = lintFixture(
     join('packages', 'zero-cache', 'src', 'query.ts'),
     'const sql = `SELECT * FROM issues`;\nexport default sql;\n',
     'zero/no-select-star',
@@ -73,56 +98,56 @@ test('no-select-star reports SELECT * inside an included path', () => {
 
   // The regression this guards: the include prefix stopped matching, the rule
   // silently did not run, and the lint reported a clean file.
-  expect(output).toContain('no-select-star');
+  expectReported(result, 'no-select-star');
 });
 
 test('no-select-star stays quiet outside the included paths', () => {
-  const output = lintFixture(
+  const result = lintFixture(
     join('packages', 'other', 'src', 'query.ts'),
     'const sql = `SELECT * FROM issues`;\nexport default sql;\n',
     'zero/no-select-star',
     {include: ['packages/zero-cache/src/']},
   );
 
-  expect(output).not.toContain('no-select-star');
+  expectSilent(result, 'no-select-star');
 });
 
 test('no-file-url-pathname reports a file URL used as a path', () => {
-  const output = lintFixture(
+  const result = lintFixture(
     join('packages', 'thing', 'src', 'a.ts'),
     "const p = new URL('./x.js', import.meta.url).pathname;\nexport default p;\n",
     'zero/no-file-url-pathname',
   );
 
-  expect(output).toContain('no-file-url-pathname');
+  expectReported(result, 'no-file-url-pathname');
 });
 
 test('no-file-url-pathname leaves a real URL alone', () => {
-  const output = lintFixture(
+  const result = lintFixture(
     join('packages', 'thing', 'src', 'a.ts'),
     "const p = new URL('https://example.com/a').pathname;\nexport default p;\n",
     'zero/no-file-url-pathname',
   );
 
-  expect(output).not.toContain('no-file-url-pathname');
+  expectSilent(result, 'no-file-url-pathname');
 });
 
 test('no-bare-shim-spawn reports spawning a shim command by bare name', () => {
-  const output = lintFixture(
+  const result = lintFixture(
     join('packages', 'thing', 'src', 'a.ts'),
     "import {spawn} from 'node:child_process';\nspawn('tsc', ['-p', 'tsconfig.json'], {stdio: 'inherit'});\n",
     'zero/no-bare-shim-spawn',
   );
 
-  expect(output).toContain('no-bare-shim-spawn');
+  expectReported(result, 'no-bare-shim-spawn');
 });
 
 test('no-bare-shim-spawn leaves a real executable alone', () => {
-  const output = lintFixture(
+  const result = lintFixture(
     join('packages', 'thing', 'src', 'a.ts'),
     "import {spawn} from 'node:child_process';\nspawn('git', ['--version'], {stdio: 'inherit'});\n",
     'zero/no-bare-shim-spawn',
   );
 
-  expect(output).not.toContain('no-bare-shim-spawn');
+  expectSilent(result, 'no-bare-shim-spawn');
 });

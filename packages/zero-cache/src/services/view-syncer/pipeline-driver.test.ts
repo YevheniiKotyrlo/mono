@@ -153,8 +153,13 @@ describe('view-syncer/pipeline-driver', () => {
     // The driver owns a Snapshotter that opened its own connection to the
     // replica; destroying it releases those before the file is removed.
     // Windows cannot unlink a file that still has an open handle.
-    pipelines.destroy();
-    dbFile.delete();
+    try {
+      pipelines.destroy();
+    } finally {
+      // In a `finally` so a failing destroy still removes the replica, rather
+      // than leaking it on top of the failure it is already reporting.
+      dbFile.delete();
+    }
   });
 
   const issues = table('issues')

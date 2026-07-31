@@ -37,14 +37,33 @@ test.each([
   expect(packageOfRelativePath(relativePath)).toBeUndefined();
 });
 
-test('a bare package root with no package under it is not attributed', () => {
-  expect(packageOfRelativePath('packages')).toBeUndefined();
+test.each(['packages', 'packages\\', 'packages/'])(
+  'a package root with no package under it is not attributed: %s',
+  relativePath => {
+    // A trailing separator must not read as a package named '': the result is
+    // matched against real package names, matches nothing, and the file is then
+    // silently exempt from verification rather than reported.
+    expect(packageOfRelativePath(relativePath)).toBeUndefined();
+  },
+);
+
+test.each([
+  ['packages//zero/src/a.ts', 'packages/zero'],
+  ['packages\\\\zero\\src\\a.ts', 'packages/zero'],
+  ['packages/zero//src//a.ts', 'packages/zero'],
+])('collapses repeated separators: %s', (relativePath, expected) => {
+  // Reachable because the scan root arrives from the environment and needs no
+  // normalization to be valid.
+  expect(packageOfRelativePath(relativePath)).toBe(expected);
 });
 
 test('always reports the package with forward slashes, whatever the input', () => {
   // Callers compare this against package.json-derived names, which are always
-  // forward-slashed, so the output separator cannot follow the platform.
+  // forward-slashed, so the output separator cannot follow the platform. Both
+  // sides are asserted absolutely — comparing the two calls to each other is
+  // satisfied by undefined === undefined.
   expect(packageOfRelativePath('packages\\zero\\src\\a.ts')).toBe(
-    packageOfRelativePath('packages/zero/src/a.ts'),
+    'packages/zero',
   );
+  expect(packageOfRelativePath('packages/zero/src/a.ts')).toBe('packages/zero');
 });

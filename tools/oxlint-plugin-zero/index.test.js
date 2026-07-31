@@ -159,6 +159,53 @@ describe('isFileUrlPathnameAccess', () => {
     node.computed = true;
     expect(isFileUrlPathnameAccess(node)).toBe(false);
   });
+
+  test('flags a relative specifier against a file: literal base', () => {
+    // The two-argument form of the case above: the base is what decides, so a
+    // spelled-out file: base is the same finding as import.meta.url.
+    expect(
+      isFileUrlPathnameAccess(
+        urlPathname([literal('./a.js'), literal('file:///repo/b.js')]),
+      ),
+    ).toBe(true);
+  });
+
+  // The reach of this rule is one expression: it reads the `new URL(...)` that
+  // the `.pathname` is taken from, and does no dataflow. These cases record that
+  // boundary rather than leaving it to be discovered — each is a real Windows
+  // bug that this rule does not catch, and the reason it is acceptable is that
+  // the inline form is the one that appears in practice (all three sites fixed
+  // on this branch were inline).
+  describe('out of reach — no dataflow', () => {
+    test('a URL held in a variable first', () => {
+      const node = {
+        type: 'MemberExpression',
+        computed: false,
+        property: {name: 'pathname'},
+        object: {type: 'Identifier', name: 'fileUrl'},
+      };
+      expect(isFileUrlPathnameAccess(node)).toBe(false);
+    });
+
+    test('a template-literal file: URL, whose value is not statically read', () => {
+      const node = urlPathname([{type: 'TemplateLiteral', quasis: []}]);
+      expect(isFileUrlPathnameAccess(node)).toBe(false);
+    });
+
+    test('a URL built by pathToFileURL', () => {
+      const node = {
+        type: 'MemberExpression',
+        computed: false,
+        property: {name: 'pathname'},
+        object: {
+          type: 'CallExpression',
+          callee: {type: 'Identifier', name: 'pathToFileURL'},
+          arguments: [{type: 'Identifier', name: 'file'}],
+        },
+      };
+      expect(isFileUrlPathnameAccess(node)).toBe(false);
+    });
+  });
 });
 
 const spawnCall = (name, commandValue, options) => ({

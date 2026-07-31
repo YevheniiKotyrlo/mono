@@ -2,11 +2,11 @@ import {existsSync, statSync} from 'node:fs';
 import type {LogContext} from '@rocicorp/logger';
 import {SqliteError} from '@rocicorp/zero-sqlite3';
 import {Database} from '../../../zqlite/src/db.ts';
+import {SQLITE_FILE_SUFFIXES} from './delete-lite-db.ts';
 
 const SQLITE_CORRUPTION_CODES = new Set(['SQLITE_CORRUPT', 'SQLITE_NOTADB']);
 const SQLITE_CORRUPTION_MESSAGE =
   /database disk image is malformed|file is not a database|database is malformed|malformed database/i;
-const SQLITE_FILE_SUFFIXES = ['', '-wal', '-wal2', '-shm', '-journal'] as const;
 const MAX_LOGGED_CHECK_ISSUES = 20;
 
 type ErrorSummary = {

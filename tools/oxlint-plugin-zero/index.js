@@ -28,6 +28,15 @@ const shimCommands = new Set([
   'sst',
 ]);
 
+// `exec` and `execSync` are deliberately absent: they always go through a shell,
+// which resolves `npm.cmd` on its own, so the defect this rule describes cannot
+// occur there.
+//
+// Reach: the command has to be a string literal and the callee a plain or member
+// identifier, so a command in a variable, a template literal, a spread, or an
+// aliased import goes unflagged. Provenance is not checked either, so a `spawn`
+// imported from a shim-aware wrapper such as cross-spawn would be flagged (no
+// such caller exists in this repo today).
 const spawnFunctions = new Set([
   'spawn',
   'spawnSync',
@@ -164,10 +173,12 @@ function hasSelectStar(source) {
 }
 
 /**
- * Normalize a filesystem path to forward slashes so path matching behaves
- * identically on Windows and POSIX. Without this every `/`-bearing comparison
- * in `shouldCheck` is silently false on a Windows checkout, which disabled
- * `no-select-star` outright there instead of failing loudly.
+ * Normalize a filesystem path to forward slashes, so the `/`-bearing comparisons
+ * in `shouldCheck` mean the same thing wherever the linter runs.
+ *
+ * Comparing against a raw filename makes every one of them false where paths use
+ * backslashes, and a rule that never matches a path never runs — which reads
+ * exactly like a codebase with nothing to report.
  */
 function toPosixPath(filename) {
   return filename.replaceAll('\\', '/');
@@ -202,16 +213,18 @@ function isFileUrlPathnameAccess(node) {
     return false;
   }
   const [specifier, base] = target.arguments ?? [];
-  if (base !== undefined) {
-    return isImportMetaUrl(base);
-  }
-  // Single-argument form. `new URL(import.meta.url)` is the one that keeps
-  // appearing; a `file:` literal is the same mistake spelled out.
+  // Whichever argument determines the scheme is the one to read: the base when
+  // there is one, otherwise the specifier.
+  return isKnownFileUrl(base ?? specifier);
+}
+
+/** A node that is certainly a `file:` URL: `import.meta.url`, or a literal. */
+function isKnownFileUrl(node) {
   return (
-    isImportMetaUrl(specifier) ||
-    (specifier?.type === 'Literal' &&
-      typeof specifier.value === 'string' &&
-      specifier.value.startsWith('file:'))
+    isImportMetaUrl(node) ||
+    (node?.type === 'Literal' &&
+      typeof node.value === 'string' &&
+      node.value.startsWith('file:'))
   );
 }
 
@@ -228,8 +241,8 @@ function isImportMetaUrl(node) {
  * by bare name without a shell, otherwise undefined.
  */
 function bareShimSpawnCommand(node) {
-  // Both `spawn(…)` and `childProcess.spawn(…)`: the member form is just as
-  // common and was previously invisible to this rule.
+  // Both spellings count: a bare `spawn(…)` and a `childProcess.spawn(…)` member
+  // call are equally common, and `cp['spawn'](…)` is out of reach either way.
   const callee = node.callee;
   const calleeName =
     callee?.type === 'Identifier'
@@ -240,7 +253,7 @@ function bareShimSpawnCommand(node) {
   if (calleeName === undefined || !spawnFunctions.has(calleeName)) {
     return undefined;
   }
-  const [commandArgument, , options] = node.arguments ?? [];
+  const [commandArgument, ...rest] = node.arguments ?? [];
   if (
     commandArgument?.type !== 'Literal' ||
     typeof commandArgument.value !== 'string'
@@ -251,22 +264,34 @@ function bareShimSpawnCommand(node) {
   if (!shimCommands.has(command)) {
     return undefined;
   }
-  // An explicit `shell` option is a deliberate (if discouraged) choice; this
-  // rule only flags the silently-broken bare form.
-  if (hasShellProperty(options)) {
+  // The rule name is the scope: a shim spawned by bare name WITHOUT a shell
+  // cannot be resolved at all. `shell: true` does resolve it, at the different
+  // cost DEP0190 describes, which is Node's warning to give and not this rule's.
+  // So an explicit `shell` is a deliberate opt-out.
+  if (rest.some(hasShellOption)) {
     return undefined;
   }
   return command;
 }
 
-function hasShellProperty(options) {
-  if (options?.type !== 'ObjectExpression') {
+/**
+ * Whether an argument is an options object that opts into a shell.
+ *
+ * The options bag is located by shape, not by position: `args` is optional in
+ * every one of these signatures, so `spawn('npm', {shell: true})` puts it at
+ * index 1 — reading index 2 reported those calls despite the opt-out. A spread
+ * is treated as opting in, because its contents are not knowable here and a
+ * false negative is cheaper than an error on correct code.
+ */
+function hasShellOption(argument) {
+  if (argument?.type !== 'ObjectExpression') {
     return false;
   }
-  return options.properties.some(
+  return argument.properties.some(
     property =>
-      property.type === 'Property' &&
-      (property.key?.name === 'shell' || property.key?.value === 'shell'),
+      property.type === 'SpreadElement' ||
+      (property.type === 'Property' &&
+        (property.key?.name === 'shell' || property.key?.value === 'shell')),
   );
 }
 

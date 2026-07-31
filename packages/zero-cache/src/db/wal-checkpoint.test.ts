@@ -98,7 +98,15 @@ describe('db/wal-checkpoint', () => {
         // litestream does not set a busy_timeout.
         const [result] = writer.pragma('wal_checkpoint(RESTART)') as Checkpoint;
         expect(result).toEqual({busy: 1, log: 10, checkpointed: 10});
+
+        // Wait for the commit to be acknowledged before returning. Otherwise
+        // teardown terminates the worker mid-COMMIT — and termination cannot
+        // interrupt native code, so the WAL write completes after the request
+        // and races the unlink on the next line.
+        const {promise: committed, resolve: setCommitted} = resolver<unknown>();
+        worker.once('message', setCommitted);
         worker.postMessage('commit');
+        await committed;
         return;
       }
 

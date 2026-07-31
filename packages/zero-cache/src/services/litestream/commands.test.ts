@@ -40,13 +40,11 @@ vi.mock('node:child_process', async importOriginal => {
 /**
  * What the fake `litestream` does, by subcommand.
  *
- * Declared rather than scripted. The fake used to be a `#!/bin/sh` script that
- * the production code really spawned, which no Windows process can execute —
- * CreateProcess runs images, and Node refuses a `.cmd`/`.bat` without a shell,
- * which the production spawn rightly does not use. What these suites are about
- * is the output parsing, the exit-code handling and the timeout-and-kill path,
- * none of which needs a real process, so the child is faked instead of the
- * executable.
+ * Declared rather than scripted: the child is faked, not the executable. What
+ * these suites cover is the output parsing, the exit-code handling and the
+ * timeout-and-kill path, none of which needs a real process — and a scripted
+ * fake would need one that the host can execute, which a `#!/bin/sh` file is
+ * not everywhere.
  */
 type FakeLitestream =
   | {kind: 'listing'; snapshots: readonly string[]; wal: readonly string[]}
@@ -116,8 +114,10 @@ function fakeChild(
       case 'restore':
         if (subcommand === 'restore') {
           if (behaviour.copyFrom !== undefined) {
-            // `args[5]` is the restore target, as `$6` was to the shell fake.
-            copyFileSync(behaviour.copyFrom, args[5]);
+            // The restore target is the trailing argument — the only one that is
+            // neither a flag nor a flag's value — so this survives another flag
+            // being added ahead of it, which an index would not.
+            copyFileSync(behaviour.copyFrom, must(args.at(-1)));
           }
           close(0, null);
         } else {
@@ -140,8 +140,12 @@ function configWithFakeLitestream(
   behaviour: FakeLitestream,
   replicaFile?: string,
 ): NormalizedZeroConfig {
-  const dir = mkdtempSync(join(tmpdir(), 'litestream-test-'));
+  // Paths only — nothing here is created or executed. The child is faked, so the
+  // executable is never resolved and a replica file is never opened; a real temp
+  // directory would just be created and left behind on every call.
+  const dir = join(tmpdir(), 'litestream-test-fake');
   const executable = join(dir, 'fake-litestream');
+  vi.mocked(childProcess.spawn).mockReset();
   vi.mocked(childProcess.spawn).mockImplementation(((
     _command: string,
     args: readonly string[],

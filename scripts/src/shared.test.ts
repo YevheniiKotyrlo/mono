@@ -1,11 +1,13 @@
+import type {execFileSync} from 'node:child_process';
 import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {afterEach, expect, test} from 'vitest';
 import {
   assertStableZeroVersion,
   assertZeroTagMatchesVersion,
   assertZeroVersion,
+  createExec,
   npmZeroVersionExists,
   readReleaseMode,
   resolveNodeShimCommand,
@@ -186,25 +188,50 @@ test('resolveNodeShimCommand leaves npm alone on posix', () => {
 });
 
 test('resolveNodeShimCommand runs npm under node on win32', () => {
+  const probed: string[] = [];
   const resolved = resolveNodeShimCommand(
     'npm',
     ['pack', '--json'],
     'win32',
-    () => true,
+    path => {
+      probed.push(path);
+      return true;
+    },
   );
   expect(resolved.command).toBe(process.execPath);
   expect(resolved.args.slice(1)).toEqual(['pack', '--json']);
-  expect(resolved.args[0]).toMatch(/npm-cli\.js$/);
+  // The full expected path, not a suffix match: the location is the whole point,
+  // and a suffix match would accept npm-cli.js resolved from anywhere.
+  const expectedCli = join(
+    dirname(process.execPath),
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
+  );
+  expect(resolved.args[0]).toBe(expectedCli);
+  expect(probed).toEqual([expectedCli]);
 });
 
-test('resolveNodeShimCommand falls back to the bare name when npm is not beside node', () => {
-  const resolved = resolveNodeShimCommand(
-    'npm',
-    ['pack'],
-    'win32',
-    () => false,
-  );
-  expect(resolved).toEqual({command: 'npm', args: ['pack']});
+test('resolveNodeShimCommand throws when npm is not beside node on win32', () => {
+  // Never fall back to the bare name: that is the invocation this exists to
+  // avoid, and its ENOENT names neither npm nor this decision.
+  expect(() =>
+    resolveNodeShimCommand('npm', ['pack'], 'win32', () => false),
+  ).toThrow(/npm-cli\.js/);
+});
+
+test('the exec chokepoint routes through resolveNodeShimCommand', () => {
+  // Without this, reverting defaultExec to spawn the bare command leaves every
+  // resolution test above passing — the resolution would simply go unused.
+  const calls: {command: string; args: readonly string[]}[] = [];
+  const exec = createExec(((command: string, args: readonly string[]) => {
+    calls.push({command, args});
+    return '';
+  }) as unknown as typeof execFileSync);
+
+  exec('git', ['status'], {});
+  expect(calls).toEqual([{command: 'git', args: ['status']}]);
 });
 
 test.each(['docker', 'git', 'tar'] as const)(

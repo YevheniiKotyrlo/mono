@@ -8,9 +8,9 @@ import {packageOfRelativePath} from './package-of-path.ts';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Overridable so the verification can be pointed at a fixture workspace and
-// proven to actually report a violation. Without that, a break in how files are
-// attributed to packages makes this pass silently over everything — which is
-// exactly what happened.
+// proven to report a violation it should. That proof is what distinguishes this
+// gate passing from it not running: it reports success by finding nothing wrong,
+// so anything that empties its input looks identical to a clean workspace.
 const WORKSPACE_ROOT =
   process.env.VERIFY_PACKAGE_DEPS_ROOT ?? join(__dirname, '../../..');
 
@@ -165,6 +165,17 @@ async function analyzePackageDependencies(): Promise<AnalyzeResult> {
 
   console.log(`Found ${allFiles.length} TypeScript files to analyze`);
 
+  // Nothing to check is a failure, not a pass. This gate reports success by
+  // saying nothing was wrong, so every way of ending up with no input — a moved
+  // tool directory, a renamed source root, an unreadable subtree — otherwise
+  // reads as a clean workspace. That is the shape the separator bug took.
+  if (allFiles.length === 0) {
+    throw new Error(
+      `No TypeScript files found under ${WORKSPACE_ROOT}. Nothing was verified, ` +
+        `so a passing result would be meaningless.`,
+    );
+  }
+
   // Build a map from package name to package path
   const packageNameToPath = new Map<string, string>();
   for (const dir of ['packages', 'apps', 'tools']) {
@@ -173,10 +184,10 @@ async function analyzePackageDependencies(): Promise<AnalyzeResult> {
     for (const entry of entries) {
       if (entry.isDirectory()) {
         // A canonical `dir/name` identifier, not a filesystem path: it is
-        // compared against the keys packageOfRelativePath produces, which are
-        // always forward-slashed. Building it with join() gave `packages\name`
-        // on Windows, so bare-specifier edges never matched and cycles reached
-        // through them were invisible there.
+        // compared against the keys `packageOfRelativePath` produces, which are
+        // always forward-slashed. Composing it with join() would follow the host
+        // separator, and a key that matches nothing makes the edges through it
+        // invisible rather than reported.
         const pkgPath = `${dir}/${entry.name}`;
         const pkgJson = await getPackageJson(join(WORKSPACE_ROOT, pkgPath));
         if (pkgJson?.name) {

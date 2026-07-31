@@ -1,7 +1,6 @@
 import {existsSync} from 'node:fs';
 import {expect, test} from 'vitest';
 import {createSilentLogContext} from '../../../shared/src/logging-test-utils.ts';
-import {LITE_DB_SUFFIXES} from '../db/delete-lite-db.ts';
 import {DbFile} from './lite.ts';
 
 // These cover the invariant rather than the symptom: DbFile hands out
@@ -27,18 +26,26 @@ test('delete removes the database file', () => {
   expect(existsSync(file.path)).toBe(false);
 });
 
-test('delete removes every sidecar the suffix list covers', () => {
+test('delete removes the sidecars, which only exist while a connection is open', () => {
   const file = new DbFile('lite-test-sidecars');
   const db = file.connect(lc);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
-  db.close();
+
+  // The connection stays open on purpose. SQLite removes -wal and -shm on a
+  // clean close, so closing first would leave nothing for delete() to remove and
+  // the assertion below would hold over an empty set. Asserting they exist first
+  // is what makes the second assertion mean something.
+  expect(existsSync(`${file.path}-wal`)).toBe(true);
+  expect(existsSync(`${file.path}-shm`)).toBe(true);
 
   file.delete();
-  const remaining = LITE_DB_SUFFIXES.filter(suffix =>
-    existsSync(`${file.path}${suffix}`),
-  );
-  expect(remaining).toEqual([]);
+
+  // Written out rather than iterating the production constant: sharing it lets a
+  // dropped suffix stop being checked at the same moment it stops being removed.
+  for (const suffix of ['', '-wal', '-wal2', '-shm', '-journal']) {
+    expect(existsSync(`${file.path}${suffix}`)).toBe(false);
+  }
 });
 
 test('delete closes a connection the caller left open', () => {

@@ -8,7 +8,12 @@ import {fileURLToPath} from 'node:url';
 import {parse} from 'oxc-parser';
 import {type InlineConfig, build as viteBuild} from 'vite';
 import {assert} from '../../shared/src/asserts.ts';
-import {isFileModuleId, makeDefine} from '../../shared/src/build.ts';
+import {
+  isExternalModuleId,
+  isFileModuleId,
+  makeDefine,
+  packageName,
+} from '../../shared/src/build.ts';
 import * as workerUrls from '../../zero-cache/src/server/worker-urls.ts';
 
 const forBundleSizeDashboard = process.argv.includes('--bundle-sizes');
@@ -49,23 +54,10 @@ const allowedUndeclaredImports = new Set([
   'solid-js',
 ]);
 
-// '@scope/pkg/subpath' -> '@scope/pkg', 'pkg/subpath' -> 'pkg'.
-function packageName(id: string): string {
-  const parts = id.split('/');
-  return id.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
-}
-
-function external(id: string): boolean {
-  // Relative/absolute ids and bundler-virtual ids (\0-prefixed) get bundled.
-  // The file-vs-package decision lives in shared/build.ts so it can be tested
-  // against Windows-shaped ids — it used to be a leading-slash test here, which
-  // externalized every first-party module on Windows and reduced the build to
-  // pass-through stubs while still reporting success.
-  if (isFileModuleId(id)) {
-    return false;
-  }
-  return !inlinedModules.has(packageName(id));
-}
+// Files and bundler-virtual ids are bundled; a package is bundled only when it is
+// on the inline list. The decision lives in shared/build.ts so it can be tested
+// against both platforms' id shapes rather than only the host's.
+const external = (id: string) => isExternalModuleId(id, inlinedModules);
 
 const define = {
   ...makeDefine('unknown'),
@@ -122,7 +114,11 @@ function getWorkerEntryPoints(): Record<string, string> {
   for (const url of Object.values(workerUrls)) {
     assert(url instanceof URL, 'Expected worker URL to be a URL instance');
 
-    const worker = basename(url.pathname);
+    // fileURLToPath, not `.pathname`: a file: URL's pathname is a URL path, so
+    // it is percent-encoded and drive-prefixed ('/C:/…'). basename happens to
+    // survive both, which is why this reads as fine — but it only survives them
+    // as long as nothing before the last segment matters.
+    const worker = basename(fileURLToPath(url));
 
     // verify that the file exists in the expected place.
     const srcPath = resolve('..', baseDir, worker);
@@ -347,27 +343,46 @@ function resolveTscEntrypoint(): string {
     'typescript/package.json',
   );
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
-    bin?: string | Record<string, string>;
+    bin?: unknown;
   };
   const {bin} = manifest;
-  const relativeEntrypoint = typeof bin === 'string' ? bin : bin?.tsc;
+  // A string `bin` names the command after the package, so it is the tsc entry
+  // for typescript. Both shapes are read from a file on disk, so neither is
+  // trusted to be a usable string: an empty one resolves to the package
+  // directory and a non-string throws out of `resolve` about `paths[1]`, both
+  // far from the cause.
+  const relativeEntrypoint =
+    typeof bin === 'string'
+      ? bin
+      : ((bin as Record<string, unknown> | undefined)?.tsc ?? undefined);
   assert(
-    relativeEntrypoint !== undefined,
-    'typescript package.json declares no tsc bin',
+    typeof relativeEntrypoint === 'string' && relativeEntrypoint.length > 0,
+    `no usable tsc bin in ${manifestPath}`,
   );
   return resolve(dirname(manifestPath), relativeEntrypoint);
 }
 
-const tscEntrypoint = resolveTscEntrypoint();
+// Resolved on first use, not at module load: `--bundle-sizes` never compiles, and
+// importing this module for its exports should not require TypeScript to be
+// installed.
+let tscEntrypoint: string | undefined;
 
 function execTsc(args: readonly string[], name: string) {
+  tscEntrypoint ??= resolveTscEntrypoint();
+  const entrypoint = tscEntrypoint;
   return runPromise(
     new Promise<void>((resolve, reject) => {
-      const proc = spawn(process.execPath, [tscEntrypoint, ...args], {
+      const proc = spawn(process.execPath, [entrypoint, ...args], {
         stdio: 'inherit',
       });
-      proc.on('exit', code =>
-        code === 0 ? resolve() : reject(new Error(`${name} failed`)),
+      proc.on('exit', (code, signal) =>
+        code === 0
+          ? resolve()
+          : reject(
+              new Error(
+                `${name} failed${code === null ? ` (${signal})` : ` (exit ${code})`}`,
+              ),
+            ),
       );
       proc.on('error', reject);
     }),
