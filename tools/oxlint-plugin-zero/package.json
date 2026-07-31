@@ -14,6 +14,7 @@
     "check-fmt": "oxfmt --check ."
   },
   "devDependencies": {
+    "oxfmt": "^0.45.0",
     "vitest": "^4.1.6"
   },
   "engines": {

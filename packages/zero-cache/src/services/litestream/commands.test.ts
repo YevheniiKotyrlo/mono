@@ -58,14 +58,24 @@ type FakeLitestream =
  * Stands in for a spawned `litestream`, implementing only what the production
  * code consumes: encoded stdout/stderr, `error`/`close`, and `kill`.
  */
-function fakeChild(behaviour: FakeLitestream, args: readonly string[]) {
+function fakeChild(
+  behaviour: FakeLitestream,
+  args: readonly string[],
+  options: {stdio?: unknown} = {},
+) {
   const child = new EventEmitter() as EventEmitter & {
-    stdout: PassThrough;
-    stderr: PassThrough;
-    kill: (signal?: NodeJS.Signals) => boolean;
+    stdout: PassThrough | null;
+    stderr: PassThrough | null;
+    kill: ReturnType<typeof vi.fn>;
   };
-  child.stdout = new PassThrough();
-  child.stderr = new PassThrough();
+
+  // Only piped slots get a stream, exactly as a real child does. That keeps the
+  // implicit guard the real fixture used to provide: reverting the production
+  // spawn to `stdio: 'inherit'` leaves stdout/stderr null and the code that
+  // reads them fails, rather than quietly losing INC-961's protection.
+  const stdio = Array.isArray(options.stdio) ? options.stdio : [];
+  child.stdout = stdio[1] === 'pipe' ? new PassThrough() : null;
+  child.stderr = stdio[2] === 'pipe' ? new PassThrough() : null;
 
   let done = false;
   const close = (code: number | null, signal: NodeJS.Signals | null) => {
@@ -73,23 +83,30 @@ function fakeChild(behaviour: FakeLitestream, args: readonly string[]) {
       return;
     }
     done = true;
-    child.stdout.end();
-    child.stderr.end();
+    child.stdout?.end();
+    child.stderr?.end();
     child.emit('close', code, signal);
   };
-  child.kill = signal => {
-    // The timeout path kills the process and expects the close that follows.
+  // A vi.fn so the timeout test can assert the process was actually killed —
+  // the production code rejects before killing, so nothing else observes it.
+  child.kill = vi.fn((signal?: NodeJS.Signals) => {
     close(null, signal ?? 'SIGKILL');
     return true;
-  };
+  });
 
   const subcommand = args[0];
   setImmediate(() => {
+    // A late fire after teardown must not throw out of the immediate: an
+    // uncaught exception there is attributed to the file, not the test, and
+    // fails every case in it.
+    if (done) {
+      return;
+    }
     switch (behaviour.kind) {
       case 'listing': {
         const rows =
           subcommand === 'snapshots' ? behaviour.snapshots : behaviour.wal;
-        child.stdout.write(`${rows.join('\n')}\n`);
+        child.stdout?.write(`${rows.join('\n')}\n`);
         close(0, null);
         break;
       }
@@ -128,7 +145,13 @@ function configWithFakeLitestream(
   vi.mocked(childProcess.spawn).mockImplementation(((
     _command: string,
     args: readonly string[],
-  ) => fakeChild(behaviour, args)) as unknown as typeof childProcess.spawn);
+    options: {stdio?: unknown},
+  ) =>
+    fakeChild(
+      behaviour,
+      args,
+      options,
+    )) as unknown as typeof childProcess.spawn);
   return {
     port: 4848,
     log: {format: 'text'},
@@ -286,6 +309,15 @@ describe('litestream/commands getLastBackupTime', () => {
     expect(String(outcome.ok === false && outcome.e)).toMatch(
       /timed out listing backup state/,
     );
+
+    // The rejection alone does not prove the process was killed: the production
+    // code rejects first and kills after, so deleting the kill would leave the
+    // assertion above green and leak a process per timeout.
+    const spawned = vi.mocked(childProcess.spawn).mock.results.at(-1)
+      ?.value as {
+      kill: ReturnType<typeof vi.fn>;
+    };
+    expect(spawned.kill).toHaveBeenCalledWith('SIGKILL');
   });
 });
 

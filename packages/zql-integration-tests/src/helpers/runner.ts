@@ -106,6 +106,37 @@ function openTestDatabase(file: string): Database {
   return db;
 }
 
+/**
+ * A connection for one scope — a single comparison run or benchmark case —
+ * holding an open `BEGIN CONCURRENT`.
+ *
+ * Registered like any other so teardown cannot leave the file locked, but also
+ * closed as soon as its scope ends: these are opened per case, so retaining them
+ * to the end of the file would hold hundreds of connections at once, each
+ * pinning a WAL2 read snapshot that then can never be checkpointed. Closing
+ * twice is harmless, so the registry stays as the backstop.
+ */
+function openScopedDatabase(file: string): Database {
+  const db = openTestDatabase(file);
+  db.exec('BEGIN CONCURRENT');
+  scopedDatabases.push(db);
+  return db;
+}
+
+/** Scoped connections awaiting close at the end of the current case. */
+const scopedDatabases: Database[] = [];
+
+/** Closes every scoped connection opened since the last call. */
+function closeScopedDatabases(): void {
+  for (const db of scopedDatabases.splice(0)) {
+    try {
+      db.close();
+    } catch {
+      // Already closed, or closed by the case itself.
+    }
+  }
+}
+
 afterAll(async () => {
   for (const db of openDatabases.splice(0)) {
     try {
@@ -422,16 +453,16 @@ export async function bootstrap<TSchema extends Schema>({
         sqlite: newQueryDelegate(
           lc,
           testLogConfig,
-          (() => {
-            const db = openTestDatabase(dbs.sqliteFile);
-            db.exec('BEGIN CONCURRENT');
-            return db;
-          })(),
+          openScopedDatabase(dbs.sqliteFile),
           zqlSchema,
           sourceWrapper,
         ),
       };
-      await cb(scopedDelegates);
+      try {
+        await cb(scopedDelegates);
+      } finally {
+        closeScopedDatabases();
+      }
     });
   }
 
@@ -479,11 +510,7 @@ function makeBenchmark<TSchema extends Schema>({
         sqlite: newQueryDelegate(
           lc,
           testLogConfig,
-          (() => {
-            const db = openTestDatabase(dbs.sqliteFile);
-            db.exec('BEGIN CONCURRENT');
-            return db;
-          })(),
+          openScopedDatabase(dbs.sqliteFile),
           zqlSchema,
         ),
       };
@@ -492,7 +519,11 @@ function makeBenchmark<TSchema extends Schema>({
 
       // materialize before starting the benchmark. We only want to time push
       // and not the initial hydration.
-      benchPush(name, 'zql', query, newDelegates, must(generatePush));
+      try {
+        benchPush(name, 'zql', query, newDelegates, must(generatePush));
+      } finally {
+        closeScopedDatabases();
+      }
       benchPush(name, 'zqlite', query, newDelegates, must(generatePush));
 
       break;
@@ -612,11 +643,7 @@ function makeTest<TSchema extends Schema>(
         sqlite: newQueryDelegate(
           lc,
           testLogConfig,
-          (() => {
-            const db = openTestDatabase(dbs.sqliteFile);
-            db.exec('BEGIN CONCURRENT');
-            return db;
-          })(),
+          openScopedDatabase(dbs.sqliteFile),
           zqlSchema,
         ),
       };
@@ -624,7 +651,11 @@ function makeTest<TSchema extends Schema>(
       const queryBuilders = makeQueries(zqlSchema);
       const query = createQuery(queryBuilders);
 
-      await runAndCompare(zqlSchema, delegates, query, manualVerification);
+      try {
+        await runAndCompare(zqlSchema, delegates, query, manualVerification);
+      } finally {
+        closeScopedDatabases();
+      }
 
       if (pushEvery > 0) {
         await checkPush(zqlSchema, delegates, query, pushEvery);

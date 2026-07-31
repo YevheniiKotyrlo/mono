@@ -172,7 +172,12 @@ async function analyzePackageDependencies(): Promise<AnalyzeResult> {
     const entries = await readdir(fullDir, {withFileTypes: true});
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        const pkgPath = join(dir, entry.name);
+        // A canonical `dir/name` identifier, not a filesystem path: it is
+        // compared against the keys packageOfRelativePath produces, which are
+        // always forward-slashed. Building it with join() gave `packages\name`
+        // on Windows, so bare-specifier edges never matched and cycles reached
+        // through them were invisible there.
+        const pkgPath = `${dir}/${entry.name}`;
         const pkgJson = await getPackageJson(join(WORKSPACE_ROOT, pkgPath));
         if (pkgJson?.name) {
           packageNameToPath.set(pkgJson.name, pkgPath);

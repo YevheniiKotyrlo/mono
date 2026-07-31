@@ -1,19 +1,29 @@
 // oxlint-disable e18e/prefer-static-regex
 import {readFileSync} from 'node:fs';
-import {isAbsolute} from 'node:path';
+
+/**
+ * Absolute in either platform's shape: a leading separator (`/x`, `\\server\share`)
+ * or a drive letter (`C:\x`, `C:/x`).
+ *
+ * Deliberately not `path.isAbsolute`, which resolves to the *host* platform's
+ * rules: on POSIX it answers `false` for `C:\…`, so a Windows-shaped id would be
+ * misclassified and the behaviour could only ever be tested on Windows. No bare
+ * package specifier can match this, so recognising both shapes everywhere costs
+ * nothing and makes the predicate testable on any runner.
+ */
+const ABSOLUTE_PATH = /^(?:[/\\]|[A-Za-z]:[/\\])/;
 
 /**
  * True when a bundler module id points at a file rather than naming a package:
  * a relative path, an absolute path, or a bundler-virtual id (`\0`-prefixed).
  *
- * `isAbsolute` rather than a leading-slash test, because on Windows an absolute
- * id is `C:\…` or `C:/…`. A leading-slash test answers "not a file" for every
- * first-party module there, so a bundler that decides externality from it
- * externalizes the whole program: the output becomes pass-through stubs that
- * re-export source paths, and the build still reports success.
+ * The absolute case matters because a leading-slash test answers "not a file"
+ * for every first-party module on Windows, so a bundler deciding externality
+ * from it externalizes the whole program: the output becomes pass-through stubs
+ * that re-export source paths, and the build still reports success.
  */
 export function isFileModuleId(id: string): boolean {
-  return id.startsWith('.') || isAbsolute(id) || id.startsWith('\0');
+  return id.startsWith('.') || ABSOLUTE_PATH.test(id) || id.startsWith('\0');
 }
 
 const external = [

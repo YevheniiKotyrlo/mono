@@ -4,24 +4,39 @@ import {rmSync} from 'node:fs';
 export const LITE_DB_SUFFIXES = ['', '-wal', '-wal2', '-shm'] as const;
 
 /**
- * POSIX lets you unlink a file that still has open handles; Windows does not,
- * and fails with EPERM or EBUSY instead. `force` suppresses ENOENT but not
- * those, so a replica whose handle the OS has not released yet — SQLite unmaps
- * lazily, so this happens even after close() — made deletion throw.
+ * How to remove one replica file, per platform.
  *
- * maxRetries is exactly what Node documents for this case: it retries on EBUSY,
- * EMFILE, ENFILE, ENOTEMPTY and EPERM with a linear backoff. Retrying is the
- * whole fix — the handle is already closed by the time we get here, Windows
- * just has not caught up.
+ * POSIX unlinks a file that still has open handles, so it needs no retries and
+ * must not have any: the retry set includes EPERM, ENOTEMPTY, EMFILE and ENFILE,
+ * all of which occur legitimately there (read-only mount, wrong owner, fd
+ * exhaustion) and none of which a delay can fix — `rmSync` is synchronous, so
+ * nothing can close an fd while it sleeps. Retrying would only convert a fast,
+ * accurate failure into a blocked event loop.
+ *
+ * Windows refuses to unlink a file with an open handle, and SQLite unmaps
+ * lazily, so the file can stay busy for a moment after `close()`. There the
+ * retries earn their keep, with a budget small enough to stay a hiccup: the
+ * backoff is linear, so 5 retries at 20ms is ~300ms worst case rather than the
+ * ~2.75s that 10 at 50ms would cost — per suffix.
+ *
+ * `recursive` is set because Node documents `maxRetries`/`retryDelay` as ignored
+ * without it. The current implementation honours them either way, but relying on
+ * that would be relying on undocumented behaviour.
  */
-export const LITE_DB_REMOVE_OPTIONS = {
-  force: true,
-  maxRetries: 10,
-  retryDelay: 50,
-} as const;
+export function liteDbRemoveOptions(platform: string = process.platform) {
+  const retry = platform === 'win32';
+  return {
+    force: true,
+    // Only meaningful alongside the retry budget, per Node's documentation.
+    recursive: retry,
+    maxRetries: retry ? 5 : 0,
+    retryDelay: retry ? 20 : 0,
+  };
+}
 
 export function deleteLiteDB(dbFile: string) {
+  const options = liteDbRemoveOptions();
   for (const suffix of LITE_DB_SUFFIXES) {
-    rmSync(`${dbFile}${suffix}`, LITE_DB_REMOVE_OPTIONS);
+    rmSync(`${dbFile}${suffix}`, options);
   }
 }
