@@ -8,16 +8,36 @@ import {id} from '../types/sql.ts';
 
 export class DbFile {
   readonly path;
+  readonly #connections: Database[] = [];
 
   constructor(testName: string) {
     this.path = `${tmpdir()}/${testName}-${randInt(1000000, 9999999)}.db`;
   }
 
   connect(lc: LogContext): Database {
-    return new Database(lc, this.path);
+    const db = new Database(lc, this.path);
+    this.#connections.push(db);
+    return db;
   }
 
+  /**
+   * Closes the connections this file handed out, then removes it.
+   *
+   * The close is load-bearing on Windows, which refuses to unlink a file that
+   * still has an open handle (EPERM/EBUSY). POSIX allows unlink-while-open, so
+   * a `delete()` that left connections open worked there and failed here —
+   * which is why the file that hands out the connections is what closes them,
+   * rather than asking every test to remember.
+   */
   delete() {
+    for (const db of this.#connections.splice(0)) {
+      try {
+        db.close();
+      } catch {
+        // Tests are free to close their own connection first; closing twice is
+        // not an error worth failing teardown over.
+      }
+    }
     deleteLiteDB(this.path);
   }
 }
