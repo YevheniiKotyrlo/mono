@@ -1,5 +1,7 @@
 import * as childProcess from 'node:child_process';
+import {EventEmitter} from 'node:events';
 import {
+  copyFileSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -8,6 +10,7 @@ import {
 } from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {PassThrough} from 'node:stream';
 import {LogContext} from '@rocicorp/logger';
 import {afterEach, describe, expect, test, vi} from 'vitest';
 import {
@@ -27,23 +30,105 @@ import {
 import * as litestreamMetrics from './metrics.ts';
 
 // Wrap (don't replace) node:child_process.spawn so tests can assert the args it
-// was called with while it still spawns the fake litestream executable. Node's
-// built-in module exports are non-configurable, so vi.spyOn cannot be used here.
+// was called with. Node's built-in module exports are non-configurable, so
+// vi.spyOn cannot be used here.
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof childProcess>();
   return {...actual, spawn: vi.fn(actual.spawn)};
 });
 
-// Writes a fake `litestream` executable that emits `sh` (a POSIX shell
-// snippet that can branch on `$1`, the litestream subcommand) and returns the
-// config pointing at it.
+/**
+ * What the fake `litestream` does, by subcommand.
+ *
+ * Declared rather than scripted. The fake used to be a `#!/bin/sh` script that
+ * the production code really spawned, which no Windows process can execute —
+ * CreateProcess runs images, and Node refuses a `.cmd`/`.bat` without a shell,
+ * which the production spawn rightly does not use. What these suites are about
+ * is the output parsing, the exit-code handling and the timeout-and-kill path,
+ * none of which needs a real process, so the child is faked instead of the
+ * executable.
+ */
+type FakeLitestream =
+  | {kind: 'listing'; snapshots: readonly string[]; wal: readonly string[]}
+  | {kind: 'exit'; code: number}
+  | {kind: 'hang'}
+  | {kind: 'restore'; copyFrom?: string};
+
+/**
+ * Stands in for a spawned `litestream`, implementing only what the production
+ * code consumes: encoded stdout/stderr, `error`/`close`, and `kill`.
+ */
+function fakeChild(behaviour: FakeLitestream, args: readonly string[]) {
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: PassThrough;
+    stderr: PassThrough;
+    kill: (signal?: NodeJS.Signals) => boolean;
+  };
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+
+  let done = false;
+  const close = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (done) {
+      return;
+    }
+    done = true;
+    child.stdout.end();
+    child.stderr.end();
+    child.emit('close', code, signal);
+  };
+  child.kill = signal => {
+    // The timeout path kills the process and expects the close that follows.
+    close(null, signal ?? 'SIGKILL');
+    return true;
+  };
+
+  const subcommand = args[0];
+  setImmediate(() => {
+    switch (behaviour.kind) {
+      case 'listing': {
+        const rows =
+          subcommand === 'snapshots' ? behaviour.snapshots : behaviour.wal;
+        child.stdout.write(`${rows.join('\n')}\n`);
+        close(0, null);
+        break;
+      }
+      case 'exit':
+        close(behaviour.code, null);
+        break;
+      case 'restore':
+        if (subcommand === 'restore') {
+          if (behaviour.copyFrom !== undefined) {
+            // `args[5]` is the restore target, as `$6` was to the shell fake.
+            copyFileSync(behaviour.copyFrom, args[5]);
+          }
+          close(0, null);
+        } else {
+          close(1, null);
+        }
+        break;
+      case 'hang':
+        // Never closes on its own: the production timeout must kill it.
+        break;
+    }
+  });
+  return child as unknown as childProcess.ChildProcess;
+}
+
+/**
+ * Points the config at a `litestream` path that is never executed, and makes
+ * `spawn` return a fake child driven by `behaviour`.
+ */
 function configWithFakeLitestream(
-  sh: string,
+  behaviour: FakeLitestream,
   replicaFile?: string,
 ): NormalizedZeroConfig {
   const dir = mkdtempSync(join(tmpdir(), 'litestream-test-'));
   const executable = join(dir, 'fake-litestream');
-  writeFileSync(executable, `#!/bin/sh\n${sh}\n`, {mode: 0o755});
+  vi.mocked(childProcess.spawn).mockImplementation(((
+    _command: string,
+    args: readonly string[],
+  ) => fakeChild(behaviour, args)) as unknown as typeof childProcess.spawn);
   return {
     port: 4848,
     log: {format: 'text'},
@@ -140,330 +225,303 @@ describe('litestream/commands parseBackupCreatedTimes', () => {
   });
 });
 
-// The two suites below drive the real spawn path through a fake `litestream`
-// executable, and that fixture is a POSIX shell script (`#!/bin/sh`). Windows
-// cannot execute one: CreateProcess runs images, and Node refuses to spawn a
-// .cmd/.bat wrapper without a shell (CVE-2024-27980) — which the production
-// spawn correctly does not use. Making the fixture a Windows-executable image is
-// not something a test can do, so these skip there rather than fail, and rather
-// than pass by not exercising the spawn at all. parseBackupCreatedTimes above is
-// pure and runs everywhere.
-const cannotSpawnShellFixture = process.platform === 'win32';
+describe('litestream/commands getLastBackupTime', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
-describe.skipIf(cannotSpawnShellFixture)(
-  'litestream/commands getLastBackupTime',
-  () => {
-    afterEach(() => {
-      vi.useRealTimers();
+  const lc = createSilentLogContext();
+
+  test('returns the most recent created time across snapshots and wal', async () => {
+    const {litestream, replica} = configWithFakeLitestream({
+      kind: 'listing',
+      snapshots: [
+        'replica generation index size created',
+        's3 gen 0 100 2025-04-24T00:00:00Z',
+      ],
+      wal: [
+        'replica generation index offset size created',
+        's3 gen 1 0 100 2025-04-24T00:05:00Z',
+        's3 gen 2 0 100 2025-04-24T00:10:00Z',
+      ],
+    });
+    expect(await getLastBackupTime(lc, litestream, replica.file)).toEqual(
+      new Date('2025-04-24T00:10:00Z'),
+    );
+  });
+
+  test('rejects when nothing is listed at the destination', async () => {
+    const {litestream, replica} = configWithFakeLitestream({
+      kind: 'exit',
+      code: 0,
+    });
+    await expect(
+      getLastBackupTime(lc, litestream, replica.file),
+    ).rejects.toThrow(/no snapshots or WAL segments listed/);
+  });
+
+  test('rejects when the litestream process exits non-zero', async () => {
+    const {litestream, replica} = configWithFakeLitestream({
+      kind: 'exit',
+      code: 1,
+    });
+    await expect(
+      getLastBackupTime(lc, litestream, replica.file),
+    ).rejects.toThrow(/litestream (snapshots|wal) exited with code 1/);
+  });
+
+  test('rejects (and kills the process) when listing times out', async () => {
+    vi.useFakeTimers();
+    const {litestream, replica} = configWithFakeLitestream({kind: 'hang'});
+    const result = getLastBackupTime(lc, litestream, replica.file);
+    // Surface the rejection synchronously so the unhandled-rejection guard
+    // does not fire before we await it below.
+    const settled = result.then(
+      v => ({ok: true as const, v}),
+      e => ({ok: false as const, e}),
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    const outcome = await settled;
+    expect(outcome.ok).toBe(false);
+    expect(String(outcome.ok === false && outcome.e)).toMatch(
+      /timed out listing backup state/,
+    );
+  });
+});
+
+describe('litestream/commands restoreReplica', () => {
+  const lc = createSilentLogContext();
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test('restores and validates a compatible replica', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const source = join(dir, 'source.db');
+    const replica = join(dir, 'replica.db');
+    createRestorableReplica(source, '01');
+    const restoredDbBytesAdd = vi.fn();
+    vi.spyOn(litestreamMetrics, 'litestreamRestoredDbBytes').mockReturnValue({
+      add: restoredDbBytesAdd,
+    } as unknown as ReturnType<
+      typeof litestreamMetrics.litestreamRestoredDbBytes
+    >);
+    const {litestream} = configWithFakeLitestream({
+      kind: 'restore',
+      copyFrom: source,
     });
 
-    const lc = createSilentLogContext();
+    await tryRestore(
+      lc,
+      litestream,
+      replica,
+      {
+        replicaVersion: '01',
+        minWatermark: '01',
+      },
+      'replication_manager',
+    );
 
-    test('returns the most recent created time across snapshots and wal', async () => {
-      const {litestream, replica} = configWithFakeLitestream(
-        `if [ "$1" = "snapshots" ]; then\n` +
-          `  echo "replica generation index size created"\n` +
-          `  echo "s3 gen 0 100 2025-04-24T00:00:00Z"\n` +
-          `else\n` +
-          `  echo "replica generation index offset size created"\n` +
-          `  echo "s3 gen 1 0 100 2025-04-24T00:05:00Z"\n` +
-          `  echo "s3 gen 2 0 100 2025-04-24T00:10:00Z"\n` +
-          `fi`,
-      );
-      expect(await getLastBackupTime(lc, litestream, replica.file)).toEqual(
-        new Date('2025-04-24T00:10:00Z'),
-      );
+    expect(existsSync(replica)).toBe(true);
+    expect(restoredDbBytesAdd).toHaveBeenCalledWith(
+      statSync(replica).size,
+      expect.objectContaining({result: 'success'}),
+    );
+  });
+
+  test('deletes a change log left beside a restored replica', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const source = join(dir, 'source.db');
+    const replica = join(dir, 'replica.db');
+    createRestorableReplica(source, '01');
+    // A change log whose replica is gone: the file it was anchored to is not
+    // the one this restore materializes.
+    const staleLog = changeLogFileName(replica);
+    writeFileSync(staleLog, '');
+    writeFileSync(`${staleLog}-wal2`, '');
+    const {litestream} = configWithFakeLitestream({
+      kind: 'restore',
+      copyFrom: source,
     });
 
-    test('rejects when nothing is listed at the destination', async () => {
-      const {litestream, replica} = configWithFakeLitestream(`exit 0`);
-      await expect(
-        getLastBackupTime(lc, litestream, replica.file),
-      ).rejects.toThrow(/no snapshots or WAL segments listed/);
-    });
-
-    test('rejects when the litestream process exits non-zero', async () => {
-      const {litestream, replica} = configWithFakeLitestream(`exit 1`);
-      await expect(
-        getLastBackupTime(lc, litestream, replica.file),
-      ).rejects.toThrow(/litestream (snapshots|wal) exited with code 1/);
-    });
-
-    test('rejects (and kills the process) when listing times out', async () => {
-      vi.useFakeTimers();
-      const {litestream, replica} = configWithFakeLitestream(`sleep 30`);
-      const result = getLastBackupTime(lc, litestream, replica.file);
-      // Surface the rejection synchronously so the unhandled-rejection guard
-      // does not fire before we await it below.
-      const settled = result.then(
-        v => ({ok: true as const, v}),
-        e => ({ok: false as const, e}),
-      );
-      await vi.advanceTimersByTimeAsync(30_000);
-      const outcome = await settled;
-      expect(outcome.ok).toBe(false);
-      expect(String(outcome.ok === false && outcome.e)).toMatch(
-        /timed out listing backup state/,
-      );
-    });
-  },
-);
-
-describe.skipIf(cannotSpawnShellFixture)(
-  'litestream/commands restoreReplica',
-  () => {
-    const lc = createSilentLogContext();
-
-    afterEach(() => {
-      vi.restoreAllMocks();
-    });
-
-    test('restores and validates a compatible replica', async () => {
-      const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
-      const source = join(dir, 'source.db');
-      const replica = join(dir, 'replica.db');
-      createRestorableReplica(source, '01');
-      const restoredDbBytesAdd = vi.fn();
-      vi.spyOn(litestreamMetrics, 'litestreamRestoredDbBytes').mockReturnValue({
-        add: restoredDbBytesAdd,
-      } as unknown as ReturnType<
-        typeof litestreamMetrics.litestreamRestoredDbBytes
-      >);
-      const {litestream} = configWithFakeLitestream(
-        `if [ "$1" = "restore" ]; then\n` +
-          `  cp "${source}" "$6"\n` +
-          `  exit 0\n` +
-          `fi\n` +
-          `exit 1`,
-        replica,
-      );
-
-      await tryRestore(
-        lc,
-        litestream,
-        replica,
-        {
-          replicaVersion: '01',
-          minWatermark: '01',
-        },
-        'replication_manager',
-      );
-
-      expect(existsSync(replica)).toBe(true);
-      expect(restoredDbBytesAdd).toHaveBeenCalledWith(
-        statSync(replica).size,
-        expect.objectContaining({result: 'success'}),
-      );
-    });
-
-    test('deletes a change log left beside a restored replica', async () => {
-      const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
-      const source = join(dir, 'source.db');
-      const replica = join(dir, 'replica.db');
-      createRestorableReplica(source, '01');
-      // A change log whose replica is gone: the file it was anchored to is not
-      // the one this restore materializes.
-      const staleLog = changeLogFileName(replica);
-      writeFileSync(staleLog, '');
-      writeFileSync(`${staleLog}-wal2`, '');
-      const {litestream} = configWithFakeLitestream(
-        `if [ "$1" = "restore" ]; then\n` +
-          `  cp "${source}" "$6"\n` +
-          `  exit 0\n` +
-          `fi\n` +
-          `exit 1`,
-        replica,
-      );
-
-      expect(
-        await tryRestore(
-          lc,
-          litestream,
-          replica,
-          {replicaVersion: '01', minWatermark: '01'},
-          'replication_manager',
-        ),
-      ).toMatchObject({restored: true, result: 'success'});
-
-      expect(existsSync(replica)).toBe(true);
-      expect(existsSync(staleLog)).toBe(false);
-      expect(existsSync(`${staleLog}-wal2`)).toBe(false);
-    });
-
-    // The process-restart path: `-if-db-not-exists` makes the restore a no-op,
-    // and the change log beside the reused replica is still the one written
-    // against it. Deleting it would cost every reconnecting subscriber a
-    // `too-old` on every deploy.
-    test('keeps the change log when the restore reuses an existing replica', async () => {
-      const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
-      const replica = join(dir, 'replica.db');
-      createRestorableReplica(replica, '01');
-      const log = changeLogFileName(replica);
-      writeFileSync(log, '');
-      const {litestream} = configWithFakeLitestream(
-        `if [ "$1" = "restore" ]; then\n` + `  exit 0\n` + `fi\n` + `exit 1`,
-        replica,
-      );
-
+    expect(
       await tryRestore(
         lc,
         litestream,
         replica,
         {replicaVersion: '01', minWatermark: '01'},
         'replication_manager',
-      );
+      ),
+    ).toMatchObject({restored: true, result: 'success'});
 
-      expect(existsSync(log)).toBe(true);
+    expect(existsSync(replica)).toBe(true);
+    expect(existsSync(staleLog)).toBe(false);
+    expect(existsSync(`${staleLog}-wal2`)).toBe(false);
+  });
+
+  // The process-restart path: `-if-db-not-exists` makes the restore a no-op,
+  // and the change log beside the reused replica is still the one written
+  // against it. Deleting it would cost every reconnecting subscriber a
+  // `too-old` on every deploy.
+  test('keeps the change log when the restore reuses an existing replica', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const replica = join(dir, 'replica.db');
+    createRestorableReplica(replica, '01');
+    const log = changeLogFileName(replica);
+    writeFileSync(log, '');
+    const {litestream} = configWithFakeLitestream({kind: 'restore'});
+
+    await tryRestore(
+      lc,
+      litestream,
+      replica,
+      {replicaVersion: '01', minWatermark: '01'},
+      'replication_manager',
+    );
+
+    expect(existsSync(log)).toBe(true);
+  });
+
+  test('does not record restored bytes when reusing an existing replica', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const replica = join(dir, 'replica.db');
+    createRestorableReplica(replica, '01');
+    const restoredDbBytesAdd = vi.fn();
+    vi.spyOn(litestreamMetrics, 'litestreamRestoredDbBytes').mockReturnValue({
+      add: restoredDbBytesAdd,
+    } as unknown as ReturnType<
+      typeof litestreamMetrics.litestreamRestoredDbBytes
+    >);
+    const {litestream} = configWithFakeLitestream({kind: 'restore'});
+
+    await tryRestore(
+      lc,
+      litestream,
+      replica,
+      {
+        replicaVersion: '01',
+        minWatermark: '01',
+      },
+      'replication_manager',
+    );
+
+    expect(restoredDbBytesAdd).not.toHaveBeenCalled();
+  });
+
+  test('deletes an incompatible restored replica', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const source = join(dir, 'source.db');
+    const replica = join(dir, 'replica.db');
+    createRestorableReplica(source, '01');
+    const restoreValidationRecordMs = vi.fn();
+    vi.spyOn(
+      litestreamMetrics,
+      'litestreamRestoreValidationDuration',
+    ).mockReturnValue({
+      recordMs: restoreValidationRecordMs,
+    } as unknown as ReturnType<
+      typeof litestreamMetrics.litestreamRestoreValidationDuration
+    >);
+    const {litestream} = configWithFakeLitestream({
+      kind: 'restore',
+      copyFrom: source,
     });
+    writeFileSync(changeLogFileName(replica), '');
 
-    test('does not record restored bytes when reusing an existing replica', async () => {
-      const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
-      const replica = join(dir, 'replica.db');
-      createRestorableReplica(replica, '01');
-      const restoredDbBytesAdd = vi.fn();
-      vi.spyOn(litestreamMetrics, 'litestreamRestoredDbBytes').mockReturnValue({
-        add: restoredDbBytesAdd,
-      } as unknown as ReturnType<
-        typeof litestreamMetrics.litestreamRestoredDbBytes
-      >);
-      const {litestream} = configWithFakeLitestream(
-        `if [ "$1" = "restore" ]; then\n` + `  exit 0\n` + `fi\n` + `exit 1`,
-        replica,
-      );
-
+    expect(
       await tryRestore(
         lc,
         litestream,
         replica,
         {
-          replicaVersion: '01',
-          minWatermark: '01',
+          replicaVersion: '02',
+          minWatermark: '02',
         },
         'replication_manager',
-      );
-
-      expect(restoredDbBytesAdd).not.toHaveBeenCalled();
+      ),
+    ).toMatchObject({
+      restored: false,
+      result: 'invalid_replica',
     });
 
-    test('deletes an incompatible restored replica', async () => {
-      const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
-      const source = join(dir, 'source.db');
-      const replica = join(dir, 'replica.db');
-      createRestorableReplica(source, '01');
-      const restoreValidationRecordMs = vi.fn();
-      vi.spyOn(
-        litestreamMetrics,
-        'litestreamRestoreValidationDuration',
-      ).mockReturnValue({
-        recordMs: restoreValidationRecordMs,
-      } as unknown as ReturnType<
-        typeof litestreamMetrics.litestreamRestoreValidationDuration
-      >);
-      const {litestream} = configWithFakeLitestream(
-        `if [ "$1" = "restore" ]; then\n` +
-          `  cp "${source}" "$6"\n` +
-          `  exit 0\n` +
-          `fi\n` +
-          `exit 1`,
-        replica,
-      );
-      writeFileSync(changeLogFileName(replica), '');
+    expect(existsSync(replica)).toBe(false);
+    // The change log went with it; the next attempt reseeds against whatever
+    // replica it restores.
+    expect(existsSync(changeLogFileName(replica))).toBe(false);
+    expect(restoreValidationRecordMs).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({result: 'invalid_replica'}),
+    );
+  });
 
-      expect(
-        await tryRestore(
-          lc,
-          litestream,
-          replica,
-          {
-            replicaVersion: '02',
-            minWatermark: '02',
-          },
-          'replication_manager',
-        ),
-      ).toMatchObject({
-        restored: false,
-        result: 'invalid_replica',
-      });
-
-      expect(existsSync(replica)).toBe(false);
-      // The change log went with it; the next attempt reseeds against whatever
-      // replica it restores.
-      expect(existsSync(changeLogFileName(replica))).toBe(false);
-      expect(restoreValidationRecordMs).toHaveBeenCalledWith(
-        expect.any(Number),
-        expect.objectContaining({result: 'invalid_replica'}),
-      );
+  // INC-961: the mechanism that actually prevents the paging is spawning
+  // `litestream restore` with piped (captured) stdio rather than inheriting the
+  // pod's streams — with `stdio: 'inherit'` litestream's own ERROR would reach
+  // the pod's stdout directly, before our retry logic could downgrade it.
+  // Assert the spawn options so a regression back to inheriting is caught.
+  test('spawns `litestream restore` with piped stdio (not inherited)', async () => {
+    const spawnMock = vi.mocked(childProcess.spawn);
+    spawnMock.mockClear();
+    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const source = join(dir, 'source.db');
+    const replica = join(dir, 'replica.db');
+    createRestorableReplica(source, '01');
+    const {litestream} = configWithFakeLitestream({
+      kind: 'restore',
+      copyFrom: source,
     });
 
-    // INC-961: the mechanism that actually prevents the paging is spawning
-    // `litestream restore` with piped (captured) stdio rather than inheriting the
-    // pod's streams — with `stdio: 'inherit'` litestream's own ERROR would reach
-    // the pod's stdout directly, before our retry logic could downgrade it.
-    // Assert the spawn options so a regression back to inheriting is caught.
-    test('spawns `litestream restore` with piped stdio (not inherited)', async () => {
-      const spawnMock = vi.mocked(childProcess.spawn);
-      spawnMock.mockClear();
-      const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
-      const source = join(dir, 'source.db');
-      const replica = join(dir, 'replica.db');
-      createRestorableReplica(source, '01');
-      const {litestream} = configWithFakeLitestream(
-        `if [ "$1" = "restore" ]; then\n` +
-          `  cp "${source}" "$6"\n` +
-          `  exit 0\n` +
-          `fi\n` +
-          `exit 1`,
-        replica,
-      );
+    await tryRestore(
+      lc,
+      litestream,
+      replica,
+      {
+        replicaVersion: '01',
+        minWatermark: '01',
+      },
+      'replication_manager',
+    );
 
-      await tryRestore(
-        lc,
-        litestream,
-        replica,
-        {
-          replicaVersion: '01',
-          minWatermark: '01',
-        },
-        'replication_manager',
-      );
+    const restoreCall = spawnMock.mock.calls.find(
+      call => Array.isArray(call[1]) && call[1][0] === 'restore',
+    );
+    expect(restoreCall).toBeDefined();
+    // stdio is [stdin, stdout, stderr]; stdout/stderr must be piped so
+    // litestream's output is captured rather than sent to the pod's stdout.
+    expect(restoreCall?.[2]?.stdio).toEqual(['ignore', 'pipe', 'pipe']);
+  });
 
-      const restoreCall = spawnMock.mock.calls.find(
-        call => Array.isArray(call[1]) && call[1][0] === 'restore',
-      );
-      expect(restoreCall).toBeDefined();
-      // stdio is [stdin, stdout, stderr]; stdout/stderr must be piped so
-      // litestream's output is captured rather than sent to the pod's stdout.
-      expect(restoreCall?.[2]?.stdio).toEqual(['ignore', 'pipe', 'pipe']);
-    });
+  // The change log is a local cache that is deliberately not backed up: it
+  // holds nothing that is not already in the replica's backup or re-derivable
+  // from the upstream slot, and shipping it would give back the S3 and
+  // follower-download savings the separate file exists to win.
+  test('the rendered litestream config never backs up the change-log database', () => {
+    const replica = join(
+      mkdtempSync(join(tmpdir(), 'litestream-config-test-')),
+      'replica.db',
+    );
+    const {litestream} = configWithFakeLitestream(
+      {kind: 'exit', code: 0},
+      replica,
+    );
+    // The variables `getLitestream` substitutes into the config it hands
+    // litestream; `ZERO_REPLICA_FILE` is always the replica, never a path
+    // derived from it.
+    const env: Record<string, string> = {
+      ZERO_REPLICA_FILE: replica,
+      ZERO_LITESTREAM_BACKUP_URL: must(litestream.backupURL),
+    };
+    const yaml = readFileSync(
+      new URL('./config.yml', import.meta.url),
+      'utf-8',
+    ).replace(/\$\{(\w+)\}/g, (_, name: string) => env[name] ?? '');
 
-    // The change log is a local cache that is deliberately not backed up: it
-    // holds nothing that is not already in the replica's backup or re-derivable
-    // from the upstream slot, and shipping it would give back the S3 and
-    // follower-download savings the separate file exists to win.
-    test('the rendered litestream config never backs up the change-log database', () => {
-      const replica = join(
-        mkdtempSync(join(tmpdir(), 'litestream-config-test-')),
-        'replica.db',
-      );
-      const {litestream} = configWithFakeLitestream('exit 0', replica);
-      // The variables `getLitestream` substitutes into the config it hands
-      // litestream; `ZERO_REPLICA_FILE` is always the replica, never a path
-      // derived from it.
-      const env: Record<string, string> = {
-        ZERO_REPLICA_FILE: replica,
-        ZERO_LITESTREAM_BACKUP_URL: must(litestream.backupURL),
-      };
-      const yaml = readFileSync(
-        new URL('./config.yml', import.meta.url),
-        'utf-8',
-      ).replace(/\$\{(\w+)\}/g, (_, name: string) => env[name] ?? '');
-
-      const paths = Array.from(
-        yaml.matchAll(/^\s*-?\s*path:\s*(\S+)\s*$/gm),
-        ([, path]) => path,
-      );
-      expect(paths).toEqual([replica]);
-      expect(paths).not.toContain(changeLogFileName(replica));
-    });
-  },
-);
+    const paths = Array.from(
+      yaml.matchAll(/^\s*-?\s*path:\s*(\S+)\s*$/gm),
+      ([, path]) => path,
+    );
+    expect(paths).toEqual([replica]);
+    expect(paths).not.toContain(changeLogFileName(replica));
+  });
+});
