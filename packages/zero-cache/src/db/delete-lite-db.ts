@@ -1,5 +1,6 @@
 import {rmSync, statSync, type RmOptions} from 'node:fs';
 import {rm} from 'node:fs/promises';
+import {sleep} from '../../../shared/src/sleep.ts';
 import {SQLITE_FILE_SUFFIXES} from '../../../shared/src/sqlite-file-suffixes.ts';
 
 /**
@@ -9,17 +10,23 @@ import {SQLITE_FILE_SUFFIXES} from '../../../shared/src/sqlite-file-suffixes.ts'
 export const SYNC_RETRY_BUDGET = {maxRetries: 5, retryDelay: 20} as const;
 
 /**
- * Larger than the synchronous budget because it costs no blocking — the loop keeps
- * running between attempts, so the handle can actually be released while they
- * elapse, and the observed case succeeds on the second attempt.
- *
- * Still bounded well under a test hook's timeout, deliberately. A handle held by a
- * process that is never going to release it does not become releasable with more
- * waiting, and a budget long enough to outlast the hook turns a precise `EPERM`
- * naming the file into `Hook timed out`, which names nothing. 10 tries on a linear
- * backoff is ~2.8s worst case.
+ * The awaited path retries itself, over one deadline for the whole database, so it
+ * hands `rm` no budget of its own.
  */
-export const ASYNC_RETRY_BUDGET = {maxRetries: 10, retryDelay: 50} as const;
+export const NO_RETRIES = {maxRetries: 0, retryDelay: 0} as const;
+
+/**
+ * How long the awaited removal keeps trying before reporting what is still held.
+ *
+ * Generous, because waiting costs nothing when the loop keeps running — that is the
+ * whole difference from the synchronous path, and a Windows handle dropped by a
+ * departing process becomes free within a moment of it going. Still bounded well
+ * inside a test hook's timeout: a handle nobody will release does not become
+ * releasable with more waiting, and a wait that outlasts its caller turns a precise
+ * `EBUSY` naming the file into `Hook timed out`, which names nothing.
+ */
+export const ASYNC_REMOVE_DEADLINE_MS = 8_000;
+const ASYNC_REMOVE_RETRY_DELAY_MS = 50;
 
 /**
  * How to remove one replica file, per platform.
@@ -33,7 +40,8 @@ export const ASYNC_RETRY_BUDGET = {maxRetries: 10, retryDelay: 50} as const;
  * Windows refuses to unlink a file with an open handle, and SQLite unmaps lazily,
  * so the file can stay busy for a moment after `close()`. There the retries earn
  * their keep — how much is worth spending on them is the caller's, since it
- * depends on whether waiting blocks the release; see the two budgets above.
+ * depends on whether waiting blocks the release; see the budget and the
+ * deadline above.
  *
  * `recursive` rides with the retry budget, because Node documents
  * `maxRetries`/`retryDelay` as ignored without it — and only there. It also turns
@@ -133,15 +141,37 @@ export async function deleteLiteDBAsync(
     assertNotADirectory(path);
   }
 
-  const options = removeOptions(platform, ASYNC_RETRY_BUDGET);
+  // One deadline for the database, not one budget per file. `rm`'s own
+  // `maxRetries` is per call, so five sidecars multiply it — a budget generous
+  // enough for the last file to be released becomes five times that in the worst
+  // case, which is how a wait long enough to work stops fitting inside the timeout
+  // of whatever is waiting for it. What a caller wants to bound is how long until
+  // the database is gone.
+  const options = removeOptions(platform, NO_RETRIES);
+  const deadline = Date.now() + ASYNC_REMOVE_DEADLINE_MS;
+  let remaining = paths;
   const failures: unknown[] = [];
-  for (const path of paths) {
-    try {
-      await remove(path, options);
-    } catch (error) {
-      failures.push(error);
+
+  for (;;) {
+    const stillHeld: string[] = [];
+    failures.length = 0;
+    for (const path of remaining) {
+      try {
+        await remove(path, options);
+      } catch (error) {
+        // Only the paths still held are retried, so one that has already gone
+        // cannot contribute a failure on a later pass.
+        stillHeld.push(path);
+        failures.push(error);
+      }
     }
+    remaining = stillHeld;
+    if (remaining.length === 0 || Date.now() >= deadline) {
+      break;
+    }
+    await sleep(ASYNC_REMOVE_RETRY_DELAY_MS);
   }
+
   reportFailures(dbFile, failures, paths.length);
 }
 
