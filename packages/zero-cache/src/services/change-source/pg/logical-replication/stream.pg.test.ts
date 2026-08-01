@@ -90,11 +90,10 @@ describe('pg/logic-replication', () => {
   async function expectConfirmedFlushLSN(lsn: LSN | null) {
     const expected = fromBigInt(toBigInt(lsn ?? '0/0'));
 
-    // Since there's no reliable mechanism to wait for the ack to have
-    // been processed by postgres, add retries with sleeps in between.
-    // Waits for the flush rather than for ten fixed polls: the old loop gave up
-    // after a budget that a busy machine outlasts, and reported the last value it
-    // happened to read.
+    // There is no reliable signal for postgres having processed the ack, so this
+    // waits for the flush to be visible rather than for a fixed number of polls.
+    // A poll budget is the same dependence on wall-clock time as a sleep, spelled
+    // longer: it runs out on a busy machine and asserts whatever it last read.
     await vi.waitFor(
       async () => {
         const [{confirmed}] = await db<{confirmed: string}[]>`

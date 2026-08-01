@@ -173,7 +173,7 @@ function reportFailures(
   const [first] = failures;
   // The first failure's text is folded into the message and kept as the cause:
   // an AggregateError's own message says nothing, so a sink that stringifies it
-  // would report less than the single errno this used to throw.
+  // would report less than a single errno does.
   throw new AggregateError(
     failures,
     `Could not remove every file of ${dbFile} (${failures.length} of ` +

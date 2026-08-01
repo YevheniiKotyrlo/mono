@@ -47,8 +47,8 @@ export function packageName(id: string): string {
  * inline list.
  *
  * This is the decision itself rather than its parts, so a test covers what the
- * build actually asks. Reverting the file check alone used to leave every test
- * passing while the build emitted stubs.
+ * build actually asks. Reverting the file check alone leaves every test passing
+ * while the build emits stubs.
  */
 export function isExternalModuleId(
   id: string,

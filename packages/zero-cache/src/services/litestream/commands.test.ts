@@ -69,7 +69,7 @@ function fakeChild(
   };
 
   // Only piped slots get a stream, exactly as a real child does. That keeps the
-  // implicit guard the real fixture used to provide: reverting the production
+  // implicit guard a real child provides: reverting the production
   // spawn to `stdio: 'inherit'` leaves stdout/stderr null and the code that
   // reads them fails, rather than quietly losing INC-961's protection.
   const stdio = Array.isArray(options.stdio) ? options.stdio : [];

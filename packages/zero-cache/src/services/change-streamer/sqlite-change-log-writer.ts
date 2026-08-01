@@ -262,9 +262,9 @@ export class SQLiteChangeLogWriter {
     this.close();
     // Before the delete, not after. `onDisabled` closes the catchup reader, which
     // holds its own handle on this same file — and Windows refuses to unlink a file
-    // that is still open, so the old order asked it to do the impossible and then
-    // logged the refusal. POSIX unlinks a file with open handles, which is why the
-    // order never mattered there.
+    // that is still open. Deleting first therefore fails, and the writer logs the
+    // refusal it caused. POSIX unlinks a file with open handles, which is why the
+    // order looks arbitrary there.
     //
     // Guarded, because moving it ahead of the delete would otherwise let a throwing
     // callback skip the delete entirely and escape into the write path this is
