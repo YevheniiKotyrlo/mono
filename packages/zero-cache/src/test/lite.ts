@@ -1,3 +1,7 @@
+/* oxlint-disable no-console */
+// Warns about a temp file it could not remove, the way ./db.ts warns about a
+// database it could not drop: a test helper reporting leftovers has no log
+// context to route through, and staying silent is what lets them accumulate.
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import type {LogContext} from '@rocicorp/logger';
