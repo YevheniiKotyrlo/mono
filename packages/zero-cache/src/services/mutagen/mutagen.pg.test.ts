@@ -75,7 +75,7 @@ async function createTables(db: PostgresDB) {
     `);
 }
 
-describe('processMutation', {timeout: 15000}, () => {
+describe('processMutation', () => {
   let lc: LogContext;
   let db: PostgresDB;
 

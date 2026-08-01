@@ -14,7 +14,7 @@ import {
   MeterProvider,
   PeriodicExportingMetricReader,
 } from '@opentelemetry/sdk-metrics';
-import {afterEach, expect, test, vi} from 'vitest';
+import {beforeAll, afterEach, expect, test, vi} from 'vitest';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
 import type {ChangeStreamData} from '../change-source/protocol/current/downstream.ts';
 import type {ReseedReason} from './change-log-db.ts';
@@ -22,6 +22,16 @@ import type {
   ChangeLogCommit,
   SQLiteChangeLogInfo,
 } from './sqlite-change-log-observability.ts';
+
+// The graph is loaded once here rather than inside the first case that needs it.
+// Each case below resets the module registry and re-imports on purpose — the meter
+// binds when the module is evaluated, so a fresh one is the point — but the FIRST
+// of those pays for compiling the whole graph, inside a budget meant for the
+// assertions. Warming it in a hook moves that cost off every test's clock, and the
+// re-imports that follow hit a warm transform cache.
+beforeAll(async () => {
+  await import('./sqlite-change-log-observability.ts');
+});
 
 afterEach(() => {
   metrics.disable();

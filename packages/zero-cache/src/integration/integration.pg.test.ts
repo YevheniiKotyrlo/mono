@@ -416,7 +416,7 @@ const INITIAL_CUSTOM_SETUP: ChangeStreamMessage[] = [
   ['commit', {tag: 'commit'}, {watermark: '101'}],
 ];
 
-describe('integration', {timeout: 30000}, () => {
+describe('integration', () => {
   let upDB: PostgresDB;
   let cvrDB: PostgresDB;
   let changeDB: PostgresDB;

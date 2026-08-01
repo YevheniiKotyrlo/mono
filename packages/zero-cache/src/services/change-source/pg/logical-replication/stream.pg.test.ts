@@ -11,7 +11,7 @@ import {fromBigInt, toBigInt, type LSN} from '../lsn.ts';
 import type {MessageCommit} from './pgoutput.types.ts';
 import {subscribe, type StreamMessage} from './stream.ts';
 
-describe('pg/logic-replication', {timeout: 30000}, () => {
+describe('pg/logic-replication', () => {
   let lc: LogContext;
   let db: PostgresDB;
 
