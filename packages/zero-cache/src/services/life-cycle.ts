@@ -3,6 +3,7 @@ import {pid} from 'node:process';
 import type {EventEmitter} from 'stream';
 import type {LogContext} from '@rocicorp/logger';
 import {resolver} from '@rocicorp/resolver';
+import {promiseVoid} from '../../../shared/src/resolved-promises.ts';
 import {logLastChanceSQLiteCorruptionDiagnostics} from '../db/sqlite-corruption.ts';
 import {
   getOrCreateHistogram,
@@ -106,6 +107,15 @@ function workerStartupDuration() {
   });
 }
 
+/**
+ * How long a drained shutdown waits for its supporting workers before giving up.
+ *
+ * Well inside the grace period a container runtime allows (Docker and Kubernetes
+ * both default to 10s before a SIGKILL), so exceeding this reports and exits
+ * rather than being killed mid-shutdown.
+ */
+const WORKER_STOP_TIMEOUT_MS = 5_000;
+
 // An internal error code used to indicate that a message has already been
 // logged at level ERRROR. When a process exits with this error code, the
 // parent process logs the exit at level WARN instead of ERROR.
@@ -127,6 +137,14 @@ export class ProcessManager {
   readonly #exitImpl: (code: number) => never;
   readonly #start = Date.now();
   readonly #ready: Promise<void>[] = [];
+
+  readonly #closed = new Map<Subprocess, Promise<void>>();
+
+  /**
+   * Set once the remaining workers have been asked to stop and are being waited
+   * for, so their exits do not each try to end the process.
+   */
+  #stopping = false;
 
   #runningState = new RunningState('process-manager');
   #drainStart = 0;
@@ -179,8 +197,15 @@ export class ProcessManager {
       );
     }
 
+    // Captured here rather than read at exit time. How this manager ends is a
+    // property of how it was started, and re-reading it later lets an unrelated
+    // change of the environment turn what should be an in-process exit into a real
+    // one — which, for an exit that happens a tick after a drain rather than
+    // inside it, means calling `process.exit()` in a test runner's worker and
+    // taking the worker with it.
+    const exitsInProcess = singleProcessMode();
     this.#exitImpl = (code: number) => {
-      if (singleProcessMode()) {
+      if (exitsInProcess) {
         return proc.emit('exit', code) as never; // For unit / integration tests.
       }
       process.exit(code);
@@ -192,6 +217,50 @@ export class ProcessManager {
       this.#startDrain(GRACEFUL_SHUTDOWN[0]);
     }
     await this.#runningState.stopped();
+  }
+
+  /**
+   * Stops the workers that are left and exits once they are gone.
+   *
+   * Reached when the user-facing workers have drained, leaving the supporting ones
+   * — the replicator among them. Exiting first and stopping them from the `exit`
+   * handler on the way out means nothing waits for them, so a caller that observes
+   * this process closing can still be racing a replicator that holds the replica
+   * file open. POSIX hides that completely, because unlink-while-open is legal
+   * there: a caller can delete a file a live worker still has open and see it
+   * succeed. Windows refuses, which is where the race became visible.
+   *
+   * Bounded, because a shutdown that waits without a limit is worse than one that
+   * gives up: a wedged worker would hold the process past whatever grace period a
+   * container runtime allows, and it would be killed mid-shutdown rather than
+   * completing one. Past the deadline this says so and exits anyway.
+   */
+  #exitWhenWorkersHaveStopped(code: number) {
+    if (this.#all.size === 0) {
+      return this.#exit(code);
+    }
+    this.#stopping = true;
+
+    const remaining = [...this.#all];
+    const pending = remaining.map(
+      worker => this.#closed.get(worker) ?? promiseVoid,
+    );
+    this.#lc.info?.(`stopping ${remaining.length} supporting worker(s)`);
+    this.#kill(this.#all, GRACEFUL_SHUTDOWN[0]);
+
+    const deadline = new Promise<'timeout'>(resolve =>
+      setTimeout(resolve, WORKER_STOP_TIMEOUT_MS, 'timeout').unref(),
+    );
+    void Promise.race([Promise.all(pending).then(() => 'stopped'), deadline])
+      .then(outcome => {
+        if (outcome === 'timeout') {
+          this.#lc.warn?.(
+            `exiting with ${this.#all.size} worker(s) still running after ` +
+              `${WORKER_STOP_TIMEOUT_MS} ms`,
+          );
+        }
+      })
+      .finally(() => this.#exit(code));
   }
 
   #exit(code: number) {
@@ -221,9 +290,16 @@ export class ProcessManager {
     }
     this.#all.add(proc);
 
+    // Tracked so a drained shutdown can wait for this worker rather than exiting
+    // out from under it; see #exitWhenWorkersHaveStopped.
+    const closed = resolver<void>();
+    this.#closed.set(proc, closed.promise);
+
     let isOpen = true;
     proc.on('close', (code, signal) => {
       isOpen = false;
+      closed.resolve();
+      this.#closed.delete(proc);
       this.#onExit(code, signal, null, type, name, proc);
     });
 
@@ -311,6 +387,12 @@ export class ProcessManager {
           ? 'info'
           : 'warn';
       this.#lc[log]?.(`${name} (${pid}) exited with code (${code})`, err ?? '');
+      if (this.#stopping) {
+        // Already waiting for these to finish. Exiting on the first one to close
+        // would abandon its siblings — which is the whole point of the wait, since
+        // one of them is the replicator and it still holds the replica file.
+        return;
+      }
       return this.#exit(code);
     }
 
@@ -336,7 +418,7 @@ export class ProcessManager {
             } ms)`
           : `all user-facing workers exited`,
       );
-      return this.#exit(0);
+      return this.#exitWhenWorkersHaveStopped(0);
     }
 
     if (this.#drainStart === 0) {

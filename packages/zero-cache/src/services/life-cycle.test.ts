@@ -167,6 +167,81 @@ describe('shutdown', () => {
     },
   );
 
+  test('a drained shutdown does not exit before its supporting workers stop', async () => {
+    // The replicator is a supporting worker and it holds the replica file open.
+    // Exiting while it runs lets a caller that sees this process close still race
+    // it — invisible on POSIX, where unlink-while-open is legal, and a failure on
+    // Windows, which refuses to unlink a file somebody has open.
+    const exited = resolver<number>();
+    proc.on('exit', code => exited.resolve(code));
+
+    proc.emit('message', [...SHUTDOWN_MESSAGE]);
+
+    await syncer1.draining.promise;
+    await syncer2.draining.promise;
+    syncer1.finishDrain.resolve();
+    syncer2.finishDrain.resolve();
+
+    await changeStreamer.draining.promise;
+    await replicator.draining.promise;
+    expect(
+      await Promise.race([
+        exited.promise.then(() => 'exited'),
+        new Promise(resolve => setTimeout(resolve, 250, 'still running')),
+      ]),
+    ).toBe('still running');
+
+    changeStreamer.finishDrain.resolve();
+    replicator.finishDrain.resolve();
+
+    expect(await exited.promise).toBe(0);
+    // Stopped, not merely asked.
+    expect(events.filter(e => e === 'stop supporting')).toHaveLength(2);
+  });
+
+  test('a supporting worker that never stops does not hold the process forever', async () => {
+    // A wait without a bound is worse than giving up: a container runtime would
+    // kill the process mid-shutdown for exceeding its grace period.
+    vi.useFakeTimers();
+    try {
+      const exited = resolver<number>();
+      proc.on('exit', code => exited.resolve(code));
+
+      proc.emit('message', [...SHUTDOWN_MESSAGE]);
+
+      await syncer1.draining.promise;
+      await syncer2.draining.promise;
+      syncer1.finishDrain.resolve();
+      syncer2.finishDrain.resolve();
+
+      await changeStreamer.draining.promise;
+      await replicator.draining.promise;
+      // Neither supporting worker ever finishes draining.
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await exited.promise).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('how it exits is decided when it is built, not when it exits', async () => {
+    // Because the exit can now happen a tick after the drain rather than inside
+    // it, and anything may have changed the environment by then. Re-reading the
+    // mode at exit turned an in-process exit into `process.exit()` — which, in a
+    // test runner, kills the worker running the suite.
+    const exited = resolver<number>();
+    const built = new EventEmitter();
+    built.on('exit', code => exited.resolve(code));
+    new ProcessManager(lc, built);
+
+    delete process.env['SINGLE_PROCESS'];
+    built.emit('message', [...SHUTDOWN_MESSAGE]);
+
+    // Reaches the emitter it was built with rather than the real process.
+    expect(await exited.promise).toBe(0);
+  });
+
   test('a shutdown request over IPC drains exactly like SIGTERM', async () => {
     // The only way to ask on Windows, where Node delivers no SIGTERM and a
     // `kill()` terminates the process outright — running none of this and leaving
