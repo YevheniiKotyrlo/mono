@@ -77,25 +77,32 @@ test('refuses a directory rather than removing one, before removing anything', (
   mkdirSync(`${dbFile}-shm`);
 
   const {calls, remove} = recordingRemover();
-  expect(() => deleteLiteDB(dbFile, remove)).toThrow(/is a directory/);
+  expect(() => deleteLiteDB(dbFile, 'linux', remove)).toThrow(/is a directory/);
   expect(calls).toEqual([]);
   expect(existsSync(dbFile)).toBe(true);
   expect(existsSync(`${dbFile}-wal`)).toBe(true);
 });
 
-test('removes without retrying, on every platform', () => {
-  // `rm`'s retries block, and the release they wait for is work on the event loop,
-  // so they starve exactly what they need. Retrying is worth doing only where the
-  // loop keeps running, which is the awaited version, and it owns its own loop.
-  // `recursive` goes with them: it was only ever required for `maxRetries`, and it
-  // would turn a misconfigured directory path into a silent tree delete.
-  const {calls, remove} = recordingRemover();
-  deleteLiteDB('/tmp/replica.db', remove);
-  expect(calls).toHaveLength(EXPECTED_SUFFIXES.length);
-  for (const call of calls) {
-    expect(call.options).toEqual({force: true});
-  }
-});
+test.each([
+  ['linux', {force: true, recursive: false, maxRetries: 0, retryDelay: 0}],
+  ['darwin', {force: true, recursive: false, maxRetries: 0, retryDelay: 0}],
+  ['win32', {force: true, recursive: true, maxRetries: 5, retryDelay: 20}],
+] as const)(
+  'the blocking path retries on %s as it should',
+  (platform, expected) => {
+    // This budget covers a handle THIS process just closed, which Windows releases
+    // at the kernel's pace without needing the event loop — so blocking briefly is
+    // the right instrument, and removing it turned 20 pg suites red. POSIX needs
+    // none: unlink-while-open is legal, and every error in the retry set occurs
+    // there legitimately and cannot be fixed by waiting.
+    const {calls, remove} = recordingRemover();
+    deleteLiteDB('/tmp/replica.db', platform, remove);
+    expect(calls).toHaveLength(EXPECTED_SUFFIXES.length);
+    for (const call of calls) {
+      expect(call.options).toEqual(expected);
+    }
+  },
+);
 
 test('attempts every suffix, then reports the failures together', () => {
   // Stopping at the first failure leaves a sidecar beside a database the caller
@@ -103,7 +110,7 @@ test('attempts every suffix, then reports the failures together', () => {
   const {calls, remove} = recordingRemover(['-wal', '-journal']);
   let caught: unknown;
   try {
-    deleteLiteDB('/tmp/replica.db', remove);
+    deleteLiteDB('/tmp/replica.db', 'linux', remove);
   } catch (error) {
     caught = error;
   }
@@ -160,7 +167,7 @@ test('async: attempts every suffix, then reports the failures together', async (
   let caught: unknown;
   vi.useFakeTimers();
   try {
-    const removing = deleteLiteDBAsync(file, failing).catch(e => e);
+    const removing = deleteLiteDBAsync(file, 'win32', failing).catch(e => e);
     await vi.advanceTimersByTimeAsync(ASYNC_REMOVE_DEADLINE_MS + 1_000);
     caught = await removing;
   } finally {
@@ -191,12 +198,13 @@ test('async: retries itself rather than handing rm a per-file budget', async () 
   };
 
   const file = join(mkdtempSync(join(tmpdir(), 'delete-lite-db-')), 'r.db');
-  await deleteLiteDBAsync(file, record);
+  await deleteLiteDBAsync(file, 'win32', record);
 
   expect(seen).toHaveLength(SQLITE_FILE_SUFFIXES.length);
   for (const options of seen) {
-    // Its own loop, so `rm` is handed nothing to multiply.
-    expect(options).toEqual({force: true});
+    // Its own loop, so `rm` is handed no budget to multiply — even on win32,
+    // where the blocking path does take one.
+    expect(options.maxRetries).toBe(0);
   }
   expect(ASYNC_REMOVE_DEADLINE_MS).toBeGreaterThan(0);
 });
@@ -218,7 +226,9 @@ test('async: keeps trying a held file, and only that file, until it goes', async
     return Promise.resolve();
   };
 
-  await expect(deleteLiteDBAsync(file, flaky)).resolves.toBeUndefined();
+  await expect(
+    deleteLiteDBAsync(file, 'win32', flaky),
+  ).resolves.toBeUndefined();
 
   // Every path once on the first pass, then the held one alone until it succeeds.
   expect(attempts.filter(p => p === wal)).toHaveLength(4);
@@ -234,7 +244,7 @@ test('async: reports what is still held once the deadline passes', async () => {
   const file = join(mkdtempSync(join(tmpdir(), 'delete-lite-db-')), 'r.db');
   vi.useFakeTimers();
   try {
-    const removing = deleteLiteDBAsync(file, stuck).catch(e => e);
+    const removing = deleteLiteDBAsync(file, 'win32', stuck).catch(e => e);
     await vi.advanceTimersByTimeAsync(ASYNC_REMOVE_DEADLINE_MS + 1_000);
     const error = await removing;
     expect(error).toBeInstanceOf(AggregateError);

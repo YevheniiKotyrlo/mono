@@ -15,22 +15,40 @@ export const ASYNC_REMOVE_DEADLINE_MS = 8_000;
 const ASYNC_REMOVE_RETRY_DELAY_MS = 50;
 
 /**
- * How to remove one replica file.
+ * How to remove one replica file, per platform and per caller.
  *
- * No retries, on any platform, and the awaited version below is why. POSIX unlinks
- * a file that still has open handles, so it never needs one. Windows refuses, but
- * `rm`'s retries BLOCK — and the release they are waiting for is work on the event
- * loop, so they starve exactly what they need and expire against a file nothing is
- * free to unlock. Retrying is worth doing only where the loop keeps running, which
- * is one place, and it owns its own loop.
+ * The two retry policies here are not layers over the same problem, which is why
+ * both earn their place. They cover different holders:
  *
- * That leaves `force` alone: ignore a file that is already gone, and let anything
- * else be reported. `recursive` is deliberately absent — it was only ever here
- * because Node documents `maxRetries` as ignored without it, and it would turn a
- * misconfigured directory path into a silent tree delete instead of the kernel's
- * own refusal.
+ * - The blocking budget covers a handle THIS process just closed. Windows releases
+ *   one a moment after the close, at the kernel's pace and without needing the
+ *   event loop, so a short blocking wait is exactly the right instrument.
+ *   Measured: removing it turned 20 pg suites red on Windows.
+ * - The awaited loop below covers a handle ANOTHER process is dropping as it
+ *   exits. That release IS event-loop work here, so blocking would starve it —
+ *   which is why that path takes no budget from `rm` and owns its own.
+ *
+ * POSIX needs neither: unlink-while-open is legal, and the retry set includes
+ * EPERM, ENOTEMPTY, EMFILE and ENFILE, all of which occur there legitimately and
+ * none of which a delay can fix.
+ *
+ * `recursive` rides with the blocking budget because Node documents
+ * `maxRetries`/`retryDelay` as ignored without it. It also turns a removal into a
+ * tree delete, so where nothing is retried it buys nothing and costs the kernel's
+ * own refusal to unlink a directory — hence the guard below, which refuses one on
+ * every platform first.
  */
-const REMOVE_OPTIONS: RmOptions = {force: true};
+const SYNC_RETRY_BUDGET = {maxRetries: 5, retryDelay: 20} as const;
+
+function removeOptions(platform: NodeJS.Platform, retries: boolean): RmOptions {
+  const retry = retries && platform === 'win32';
+  return {
+    force: true,
+    recursive: retry,
+    maxRetries: retry ? SYNC_RETRY_BUDGET.maxRetries : 0,
+    retryDelay: retry ? SYNC_RETRY_BUDGET.retryDelay : 0,
+  };
+}
 
 /**
  * Throws unless `path` is a file or absent.
@@ -58,7 +76,9 @@ function assertNotADirectory(path: string): void {
  */
 export function deleteLiteDB(
   dbFile: string,
-  // Injected so the all-attempted behaviour is observable. A removal failure
+  platform: NodeJS.Platform = process.platform,
+  // Injected so both the per-platform options and the all-attempted behaviour are
+  // observable. A removal failure
   // cannot be provoked portably through the filesystem — the one fixture that can
   // be built is a directory, which the guard above rejects first — so without this
   // seam the aggregate path has no test that could fail.
@@ -72,7 +92,7 @@ export function deleteLiteDB(
   const failures: unknown[] = [];
   for (const path of paths) {
     try {
-      remove(path, REMOVE_OPTIONS);
+      remove(path, removeOptions(platform, true));
     } catch (error) {
       failures.push(error);
     }
@@ -100,6 +120,7 @@ export function deleteLiteDB(
  */
 export async function deleteLiteDBAsync(
   dbFile: string,
+  platform: NodeJS.Platform = process.platform,
   // Injected for the same reason as above.
   remove: (path: string, options: RmOptions) => Promise<void> = rm,
 ): Promise<void> {
@@ -123,7 +144,7 @@ export async function deleteLiteDBAsync(
     failures.length = 0;
     for (const path of remaining) {
       try {
-        await remove(path, REMOVE_OPTIONS);
+        await remove(path, removeOptions(platform, false));
       } catch (error) {
         // Only the paths still held are retried, so one that has already gone
         // cannot contribute a failure on a later pass.
