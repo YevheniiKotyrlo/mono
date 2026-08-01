@@ -31,13 +31,21 @@ const SETUP_DIR = join(REPO_ROOT, 'packages', 'zero-cache', 'test');
 
 const compose = readFileSync(COMPOSE_FILE, 'utf8');
 
-/** The `- item` values of a compose service's `command:` block. */
+/**
+ * The `- item` values of a compose service's `command:` block.
+ *
+ * Throws rather than asserts when the shape is absent. This runs while the suite
+ * is being collected, where there is no test to attach a failure to, and the
+ * absence is a precondition for the cases below meaning anything rather than a
+ * property of the thing under test.
+ */
 function commandOf(service: string): string[] {
   const header = compose.indexOf(`\n  ${service}:\n`);
-  expect(
-    header,
-    `.devcontainer/docker-compose.yml declares no ${service} service`,
-  ).toBeGreaterThan(-1);
+  if (header === -1) {
+    throw new Error(
+      `.devcontainer/docker-compose.yml declares no ${service} service`,
+    );
+  }
 
   // The service block ends at the next line indented two spaces, which is the
   // next service or a top-level key.
@@ -46,7 +54,9 @@ function commandOf(service: string): string[] {
   const block = end === -1 ? rest : rest.slice(0, end);
 
   const command = block.indexOf('command:');
-  expect(command, `${service} declares no command`).toBeGreaterThan(-1);
+  if (command === -1) {
+    throw new Error(`${service} declares no command`);
+  }
 
   const items: string[] = [];
   for (const line of block.slice(command).split('\n').slice(1)) {
@@ -69,11 +79,10 @@ function setupArgumentsFor(major: number): {image: string; timezone: string} {
   const call = /runPostgresContainer\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)/u.exec(
     source,
   );
-  expect(
-    call,
-    `pg-${major}.ts does not call runPostgresContainer`,
-  ).not.toBeNull();
-  return {image: call![1], timezone: call![2]};
+  if (!call) {
+    throw new Error(`pg-${major}.ts does not call runPostgresContainer`);
+  }
+  return {image: call[1], timezone: call[2]};
 }
 
 // Driven off the setup files rather than a literal list, so a new major joins by
@@ -87,7 +96,10 @@ test('every Postgres major with a setup file has a dev container service', () =>
   const declared = Array.from(compose.matchAll(/^ {2}pg(\d+):$/gmu), m =>
     Number(m[1]),
   );
-  expect(declared.toSorted()).toEqual([...MAJORS]);
+  // Numerically. The default comparator sorts by string, which happens to agree
+  // for 15-18 and would not the moment a single-digit major appears: [9, 15]
+  // sorts to [15, 9], and the mismatch would read as a missing service.
+  expect(declared.toSorted((a, b) => a - b)).toEqual([...MAJORS]);
 });
 
 describe.each(MAJORS)('pg%d', major => {

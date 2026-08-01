@@ -66,24 +66,27 @@ test('every pg project builds on the shared defaults', () => {
   // for packages and one for apps. Both must spread `pgProjectDefaults`, because
   // that is what makes their `maxWorkers` equal by construction rather than by
   // somebody remembering.
+  // Collected and asserted as a list, so a failure names every offender at once
+  // rather than stopping at the first — and so the diff carries the path without
+  // needing a per-assertion message.
+  const standalone: string[] = [];
   const builders = new Set<string>();
   for (const config of configs) {
     const source = readFileSync(config, 'utf8');
     const importedFrom = /from '([^']*vitest\.config\.ts)'/u.exec(source);
-    expect(
-      importedFrom,
-      `${config} should delegate to a configForVersion`,
-    ).not.toBeNull();
-    builders.add(join(dirname(config), importedFrom![1]));
+    if (importedFrom === null) {
+      standalone.push(`${config} does not delegate to a configForVersion`);
+      continue;
+    }
+    builders.add(join(dirname(config), importedFrom[1]));
   }
+  expect(standalone).toEqual([]);
 
   expect(builders.size).toBeGreaterThan(0);
-  for (const builder of builders) {
-    expect(
-      readFileSync(builder, 'utf8'),
-      `${builder} defines a pg project without the shared defaults`,
-    ).toContain('pgProjectDefaults()');
-  }
+  const undefaulted = [...builders].filter(
+    builder => !readFileSync(builder, 'utf8').includes('pgProjectDefaults()'),
+  );
+  expect(undefaulted).toEqual([]);
 });
 
 test('a pg project and a no-pg one never share a pool', () => {

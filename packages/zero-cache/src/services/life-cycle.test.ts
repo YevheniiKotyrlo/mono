@@ -295,7 +295,15 @@ describe('shutdown', () => {
     await Promise.resolve();
 
     expect(events).toEqual([]);
-    expect(syncer1.draining.promise).resolves.toBeUndefined; // not asserted, just unresolved
+
+    // And the drain has not merely emitted nothing — it has not been entered.
+    // Racing against an already-resolved sentinel is how to observe that a
+    // promise is still pending; `Promise.race` settles on the first of the two,
+    // so the sentinel wins only while the drain has not.
+    const pending = Symbol('pending');
+    expect(
+      await Promise.race([syncer1.draining.promise, Promise.resolve(pending)]),
+    ).toBe(pending);
   });
 
   test.each([['SIGTERM'], ['SIGINT']])(
