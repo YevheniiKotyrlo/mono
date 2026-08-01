@@ -34,7 +34,13 @@ afterEach(async () => {
   }
 });
 
-function setup(name: string, resumeWatermark = '02') {
+function setup(
+  name: string,
+  resumeWatermark = '02',
+  // Called from within `onDisabled`, so a case can observe the state the callback
+  // runs in rather than only the state it leaves behind.
+  whenDisabled?: (file: DbFile) => void,
+) {
   const sink = new TestLogSink();
   const lc = new LogContext('debug', undefined, sink);
   const file = new DbFile(name);
@@ -45,7 +51,10 @@ function setup(name: string, resumeWatermark = '02') {
     replicaFile: file.path,
     identity: IDENTITY,
     onCommit: watermark => commits.push(watermark),
-    onDisabled: () => disabled++,
+    onDisabled: () => {
+      disabled++;
+      whenDisabled?.(file);
+    },
     now: () => 1_700_000_000_000,
   });
   writer.reconcile(resumeWatermark);
@@ -131,6 +140,31 @@ describe('change-streamer/sqlite-change-log-writer', () => {
   // §3.7: nothing in the log is not either already durable in the replica's
   // backup or re-derivable from the slot, so a write failure must cost catchup
   // reach rather than the shard's replication.
+  test('the disable callback runs before the file is deleted', () => {
+    // `onDisabled` closes the catchup reader, which holds its own handle on this
+    // file. Deleting first therefore asks the platform to unlink an open file:
+    // POSIX allows that, so the wrong order is invisible here, and Windows refuses
+    // it, so the file survives and the writer only logs the refusal. Asserting the
+    // ORDER rather than the outcome is what makes this catchable on either one.
+    let existedWhenDisabled: boolean | undefined;
+    using fixture = setup('change-log-writer-disable-order', '02', file => {
+      existedWhenDisabled = existsSync(changeLogFileName(file.path));
+    });
+    {
+      using other = openChangeLogDB(fixture.lc, fixture.file.path, {
+        readonly: false,
+      });
+      other.exec(`DROP TABLE "${CHANGE_LOG_STREAM_TABLE}"`);
+    }
+
+    transaction(fixture.writer, '04');
+
+    expect(fixture.disabledCount()).toBe(1);
+    expect(existedWhenDisabled).toBe(true);
+    // And gone by the time the writer is done with it.
+    expect(existsSync(changeLogFileName(fixture.file.path))).toBe(false);
+  });
+
   test('a write error disables the writer, deletes the file, and keeps going', () => {
     using fixture = setup('change-log-writer-fail-soft');
     // Pulls the table out from under the writer's prepared statements, which is

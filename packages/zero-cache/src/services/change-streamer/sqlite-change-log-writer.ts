@@ -260,12 +260,17 @@ export class SQLiteChangeLogWriter {
       e,
     );
     this.close();
+    // Before the delete, not after. `onDisabled` closes the catchup reader, which
+    // holds its own handle on this same file — and Windows refuses to unlink a file
+    // that is still open, so the old order asked it to do the impossible and then
+    // logged the refusal. POSIX unlinks a file with open handles, which is why the
+    // order never mattered there.
+    this.#opts.onDisabled?.();
     try {
       deleteChangeLogDB(this.#opts.replicaFile);
     } catch (deleteError) {
       this.#lc.error?.(`unable to delete ${file}`, deleteError);
     }
-    this.#opts.onDisabled?.();
   }
 }
 
