@@ -30,7 +30,12 @@ const SHARD_NUM = 1;
 // edit has to be undone before committing, which is its own way to lose work.
 const RUN = !!process.env.TOASTED_VALUES;
 
-describe.skipIf(!RUN)('toasted values', {timeout: 30000, retry: 3}, () => {
+// No suite-wide timeout: this is the heaviest lane in the project, so the last
+// thing it should do is grant itself LESS time than its siblings. The project's
+// budget already doubles in CI; a literal here would have capped it at the local
+// value on both. `retry` stays — TOASTED storage decisions are the thing under
+// characterisation, and Postgres makes some of them by size heuristics.
+describe.skipIf(!RUN)('toasted values', {retry: 3}, () => {
   let lc: LogContext;
   let upstream: PostgresDB;
   let upstreamURI: string;

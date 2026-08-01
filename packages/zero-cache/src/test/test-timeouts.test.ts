@@ -56,12 +56,44 @@ function pgTestFiles(): string[] {
   return found;
 }
 
+/**
+ * Lines that open a suite AND carry a time budget in its options object.
+ *
+ * Found loosely on purpose. The value is read by a precise pattern below, and a
+ * candidate that pattern cannot read is reported rather than skipped — otherwise
+ * the matcher decides what counts as a violation, which is how the first version
+ * of this went blind: it anchored on `describe(` and so could never see
+ * `describe.skipIf(!RUN)('…', {timeout: 30000}`, which is exactly the shape a
+ * suite takes once it moves behind an opt-in flag.
+ */
+function suiteTimeoutCandidates(
+  source: string,
+): {line: number; text: string}[] {
+  return source
+    .split('\n')
+    .map((text, index) => ({line: index + 1, text}))
+    .filter(
+      ({text}) => /\bdescribe\b/u.test(text) && /\{[^}]*\btimeout:/u.test(text),
+    );
+}
+
+/** Any modifier chain is allowed between `describe` and its arguments. */
+const SUITE_TIMEOUT =
+  /\bdescribe(?:\.\w+)*(?:\([^()]*\))?\(\s*[^,]+,\s*\{[^}]*timeout:\s*([\d_]+)/u;
+
 /** Suite-level `{timeout: N}` options, which apply to every case in the file. */
 function suiteTimeouts(source: string): number[] {
-  return Array.from(
-    source.matchAll(/\bdescribe\([^,]+,\s*\{[^}]*timeout:\s*([\d_]+)/gu),
-    match => Number(match[1].replaceAll('_', '')),
-  ).filter(value => Number.isFinite(value));
+  return suiteTimeoutCandidates(source).flatMap(({text}) => {
+    const value = Number(SUITE_TIMEOUT.exec(text)?.[1].replaceAll('_', ''));
+    return Number.isFinite(value) ? [value] : [];
+  });
+}
+
+/** Candidates the precise pattern could not read — a blind spot, not a pass. */
+function unreadSuiteTimeouts(source: string): string[] {
+  return suiteTimeoutCandidates(source)
+    .filter(({text}) => !SUITE_TIMEOUT.test(text))
+    .map(({line, text}) => `${line}: ${text.trim()}`);
 }
 
 const files = pgTestFiles();
@@ -113,4 +145,43 @@ test('the scan reads a suite timeout where one exists', () => {
     20000,
   ]);
   expect(suiteTimeouts("describe('x', () => {});")).toEqual([]);
+  // Modifier chains, which is what a suite behind an opt-in flag looks like.
+  expect(
+    suiteTimeouts("describe.skipIf(!RUN)('x', {timeout: 30000}, () => {});"),
+  ).toEqual([30000]);
+  expect(
+    suiteTimeouts("describe.skip('x', {timeout: 25000}, () => {});"),
+  ).toEqual([25000]);
+});
+
+test('no suite timeout escapes the matcher', () => {
+  // The matcher cannot also be the thing that decides what counts. A line that
+  // opens a suite and carries a timeout, but that the precise pattern cannot
+  // read, fails here rather than passing silently.
+  const unread = files.flatMap(file =>
+    unreadSuiteTimeouts(readFileSync(file, 'utf8')).map(
+      hit => `${relative(REPO_ROOT, file).replaceAll('\\', '/')}:${hit}`,
+    ),
+  );
+  expect(unread).toEqual([]);
+});
+
+test('an unreadable candidate is reported rather than skipped', () => {
+  // Proof the case above can fire. The candidate finder over-approximates on
+  // purpose, so it also flags a line that merely mentions both — and that is the
+  // trade it is making: an over-approximation nobody can read is surfaced for a
+  // human to judge, rather than a matcher quietly deciding a suite has no budget.
+  // No such line exists in the repo, which is why the case above is green.
+  expect(
+    unreadSuiteTimeouts('describe(name, options); // {timeout: 5000}'),
+  ).toHaveLength(1);
+  expect(
+    unreadSuiteTimeouts("describe('x', {timeout: 5000}, () => {});"),
+  ).toEqual([]);
+  // Modifier chains are read, so they are never reported as unreadable.
+  expect(
+    unreadSuiteTimeouts(
+      "describe.skipIf(!RUN)('x', {timeout: 5000}, () => {});",
+    ),
+  ).toEqual([]);
 });
