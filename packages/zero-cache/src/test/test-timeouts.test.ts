@@ -3,7 +3,7 @@ import {readdirSync} from 'node:fs';
 import {dirname, join, relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {expect, test} from 'vitest';
-import {pgProjectDefaults} from '../../../shared/src/tool/vitest-config.ts';
+import {MAX_PG_TEST_TIMEOUT_MS} from '../../../shared/src/tool/vitest-config.ts';
 
 /**
  * A Postgres-backed suite may raise its own time budget, never lower it.
@@ -65,7 +65,16 @@ function suiteTimeouts(source: string): number[] {
 }
 
 const files = pgTestFiles();
-const granted = pgProjectDefaults().testTimeout;
+
+/**
+ * Compared against the maximum the project ever grants, not against this run's.
+ *
+ * The grant doubles in CI because CI is slower, so a literal equal to the local
+ * value is below the CI value — and a check that reads the environment it runs in
+ * passes locally on exactly the literals that undercut CI. The first pass of this
+ * gate did that, and let a `{timeout: 30000}` through.
+ */
+const granted = MAX_PG_TEST_TIMEOUT_MS;
 
 test('the pg test files are found at all', () => {
   // Otherwise the case below passes over an empty list and proves nothing.
@@ -90,6 +99,8 @@ test('the granted budget is a real one', () => {
   // A tripwire on the comparison itself: were the grant zero or missing, every
   // literal would clear it and the case above would pass vacuously.
   expect(granted).toBeGreaterThanOrEqual(10_000);
+  // And it is the CI grant, not the local one.
+  expect(granted).toBe(60_000);
 });
 
 test('the scan reads a suite timeout where one exists', () => {

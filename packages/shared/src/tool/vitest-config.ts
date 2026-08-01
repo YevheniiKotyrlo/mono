@@ -41,8 +41,18 @@ export function maxConcurrentPgFiles(): number {
  * project that quietly kept the defaults is a project that fails differently from
  * its siblings for no stated reason.
  */
+/**
+ * The most a pg project ever grants a case, which is what CI gets.
+ *
+ * Exported so a check can compare a hardcoded literal against the maximum rather
+ * than against whatever the current run happens to get. A literal equal to the
+ * local grant is still below the CI one, and a check that reads the environment it
+ * runs in passes locally on exactly the literals that undercut CI.
+ */
+export const MAX_PG_TEST_TIMEOUT_MS = 60_000;
+
 export function pgProjectDefaults() {
-  const timeout = (CI ? 2 : 1) * 30_000;
+  const timeout = CI ? MAX_PG_TEST_TIMEOUT_MS : MAX_PG_TEST_TIMEOUT_MS / 2;
   return {
     browser: {enabled: false},
     silent: 'passed-only',
