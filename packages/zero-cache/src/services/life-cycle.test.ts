@@ -29,6 +29,7 @@ import {
   exitAfter,
   INTENTIONAL_SHUTDOWN_ERROR_CODE,
   ProcessManager,
+  SHUTDOWN_MESSAGE,
   recordStartupDurationMs,
   runUntilKilled,
   type WorkerType,
@@ -165,6 +166,62 @@ describe('shutdown', () => {
       ]);
     },
   );
+
+  test('a shutdown request over IPC drains exactly like SIGTERM', async () => {
+    // The only way to ask on Windows, where Node delivers no SIGTERM and a
+    // `kill()` terminates the process outright — running none of this and leaving
+    // these workers behind. The drain must be identical, so this asserts the same
+    // sequence the signal cases above do.
+    proc.emit('message', [...SHUTDOWN_MESSAGE]);
+
+    await syncer1.draining.promise;
+    await syncer2.draining.promise;
+    syncer1.finishDrain.resolve();
+    syncer2.finishDrain.resolve();
+
+    await changeStreamer.draining.promise;
+    await replicator.draining.promise;
+    changeStreamer.finishDrain.resolve();
+    replicator.finishDrain.resolve();
+
+    await Promise.all(all.map(w => w.stopped.promise));
+
+    expect(events).toEqual([
+      'drain user-facing',
+      'drain user-facing',
+      'stop user-facing',
+      'stop user-facing',
+      'drain supporting',
+      'drain supporting',
+      'stop supporting',
+      'stop supporting',
+    ]);
+  });
+
+  test('a shutdown request before any worker starts exits cleanly', async () => {
+    const {promise: exitCode, resolve} = resolver<number>();
+    proc = new EventEmitter();
+    proc.on('exit', resolve);
+
+    new ProcessManager(lc, proc);
+    proc.emit('message', [...SHUTDOWN_MESSAGE]);
+    expect(await exitCode).toBe(0);
+  });
+
+  test.each([
+    ['a different message type', ['ready', {ready: true}]],
+    ['a bare string', 'shutdown'],
+    ['the type without a payload', ['shutdown']],
+    ['null', null],
+  ])('%s does not drain', async (_name, message) => {
+    // The channel carries other traffic, so recognising a shutdown too loosely
+    // would turn an ordinary message into an outage.
+    proc.emit('message', message);
+    await Promise.resolve();
+
+    expect(events).toEqual([]);
+    expect(syncer1.draining.promise).resolves.toBeUndefined; // not asserted, just unresolved
+  });
 
   test.each([['SIGTERM'], ['SIGINT']])(
     'error during graceful shutdown: %s',

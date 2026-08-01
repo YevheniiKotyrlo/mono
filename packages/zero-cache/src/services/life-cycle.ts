@@ -33,9 +33,24 @@ import type {SingletonService} from './service.ts';
 export type WorkerType = 'user-facing' | 'supporting';
 
 export const GRACEFUL_SHUTDOWN = ['SIGTERM', 'SIGINT'] as const;
+
+/** The wire form of a shutdown request: a {@link Message} with no payload. */
+export const SHUTDOWN_MESSAGE = ['shutdown', {}] as const;
+
 export const FORCEFUL_SHUTDOWN = ['SIGQUIT', 'SIGABRT'] as const;
 
 type GracefulShutdownSignal = (typeof GRACEFUL_SHUTDOWN)[number];
+
+/** Whether this signal asks for a drain rather than an immediate stop. */
+function isGracefulSignal(signal: NodeJS.Signals): boolean {
+  return (GRACEFUL_SHUTDOWN as readonly string[]).includes(signal);
+}
+
+function isShutdownRequest(data: unknown): boolean {
+  return (
+    Array.isArray(data) && data.length === 2 && data[0] === SHUTDOWN_MESSAGE[0]
+  );
+}
 
 function workerStartupMetricName(name: string) {
   if (name === 'zero-cache') {
@@ -125,6 +140,19 @@ export class ProcessManager {
     for (const signal of GRACEFUL_SHUTDOWN) {
       proc.on(signal, () => this.#startDrain(signal));
     }
+
+    // The same drain, asked for rather than signalled. This is how a parent stops
+    // its own children (see `#kill`), and the only way to ask at all on Windows,
+    // where Node delivers no signals to a process: a `kill()` there is an immediate
+    // termination that runs none of this and leaves the workers below orphaned,
+    // still holding their files and connections. Signals stay the external contract
+    // for operators and container runtimes.
+    proc.on('message', (data: unknown) => {
+      if (isShutdownRequest(data)) {
+        this.#lc.info?.('received shutdown request');
+        this.#startDrain('SIGTERM');
+      }
+    });
 
     // ... which will result in sending `SIGTERM` to the remaining workers.
     proc.on('exit', code =>
@@ -323,7 +351,27 @@ export class ProcessManager {
   #kill(workers: Iterable<Subprocess>, signal: NodeJS.Signals) {
     for (const worker of workers) {
       try {
-        worker.kill(signal);
+        if (isGracefulSignal(signal)) {
+          // Asked, not signalled — on every platform, over the channel the fork
+          // already has.
+          //
+          // A signal is not a portable way to request anything: Node does not
+          // deliver them to processes on Windows, so `kill('SIGTERM')` there
+          // terminates a worker where it stands. It never drains, never releases
+          // what it holds, and never propagates to workers of its own. Branching on
+          // the platform would leave the portable path untested wherever CI runs,
+          // which is how a difference like that survives; one path is exercised
+          // everywhere.
+          //
+          // Signals remain the EXTERNAL contract, because that is what an operator
+          // and a container runtime send. They are just not how this process talks
+          // to its own children.
+          worker.send([...SHUTDOWN_MESSAGE]);
+        } else {
+          // `SIGQUIT` and `SIGABRT` mean stop now, without draining, so
+          // terminating is the intent rather than a substitute for asking.
+          worker.kill(signal);
+        }
       } catch (e) {
         this.#lc.error?.(e);
       }
@@ -347,20 +395,34 @@ export async function runUntilKilled(
   if (services.length === 0) {
     return;
   }
-  for (const signal of [...GRACEFUL_SHUTDOWN, ...FORCEFUL_SHUTDOWN]) {
-    parent.once(signal, () => {
-      const GRACEFUL_SIGNALS = GRACEFUL_SHUTDOWN as readonly NodeJS.Signals[];
+  const stopServices = (signal: NodeJS.Signals) => {
+    const GRACEFUL_SIGNALS = GRACEFUL_SHUTDOWN as readonly NodeJS.Signals[];
 
-      services.forEach(async svc => {
-        if (GRACEFUL_SIGNALS.includes(signal) && svc.drain) {
-          lc.info?.(`draining ${svc.constructor.name} ${svc.id} (${signal})`);
-          await svc.drain();
-        }
-        lc.info?.(`stopping ${svc.constructor.name} ${svc.id} (${signal})`);
-        await svc.stop();
-      });
+    services.forEach(async svc => {
+      if (GRACEFUL_SIGNALS.includes(signal) && svc.drain) {
+        lc.info?.(`draining ${svc.constructor.name} ${svc.id} (${signal})`);
+        await svc.drain();
+      }
+      lc.info?.(`stopping ${svc.constructor.name} ${svc.id} (${signal})`);
+      await svc.stop();
     });
+  };
+
+  for (const signal of [...GRACEFUL_SHUTDOWN, ...FORCEFUL_SHUTDOWN]) {
+    parent.once(signal, () => stopServices(signal));
   }
+
+  // The other half of the manager asking over IPC rather than by signal. A worker
+  // that only listened for signals would simply not stop on a platform that does
+  // not deliver them, so the manager would wait out its drain and then terminate
+  // it — losing the drain this exists to perform.
+  const onShutdownRequest = (data: unknown) => {
+    if (isShutdownRequest(data)) {
+      parent.off('message', onShutdownRequest);
+      stopServices(GRACEFUL_SHUTDOWN[0]);
+    }
+  };
+  parent.on('message', onShutdownRequest);
 
   try {
     // Run all services and resolve when any of them stops.
