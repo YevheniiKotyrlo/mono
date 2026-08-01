@@ -4,70 +4,41 @@ import {sleep} from '../../../shared/src/sleep.ts';
 import {SQLITE_FILE_SUFFIXES} from '../../../shared/src/sqlite-file-suffixes.ts';
 
 /**
- * Small on purpose: every attempt blocks, so this is a hiccup budget, not a wait.
- * The backoff is linear, making 5 tries at 20ms about 300ms worst case per file.
- */
-export const SYNC_RETRY_BUDGET = {maxRetries: 5, retryDelay: 20} as const;
-
-/**
- * The awaited path retries itself, over one deadline for the whole database, so it
- * hands `rm` no budget of its own.
- */
-export const NO_RETRIES = {maxRetries: 0, retryDelay: 0} as const;
-
-/**
  * How long the awaited removal keeps trying before reporting what is still held.
  *
- * Generous, because waiting costs nothing when the loop keeps running — that is the
- * whole difference from the synchronous path, and a Windows handle dropped by a
- * departing process becomes free within a moment of it going. Still bounded well
- * inside a test hook's timeout: a handle nobody will release does not become
- * releasable with more waiting, and a wait that outlasts its caller turns a precise
- * `EBUSY` naming the file into `Hook timed out`, which names nothing.
+ * One deadline for the database rather than a budget per file: `rm`'s own
+ * `maxRetries` is per call, so five sidecars multiply it, and a wait long enough
+ * for the last file stops fitting inside the timeout of whatever is waiting. What
+ * a caller wants to bound is how long until the database is gone.
  */
 export const ASYNC_REMOVE_DEADLINE_MS = 8_000;
 const ASYNC_REMOVE_RETRY_DELAY_MS = 50;
 
 /**
- * How to remove one replica file, per platform.
+ * How to remove one replica file.
  *
- * POSIX unlinks a file that still has open handles, so it needs no retries and
- * must not have any: the retry set includes EPERM, ENOTEMPTY, EMFILE and ENFILE,
- * all of which occur legitimately there (read-only mount, wrong owner, fd
- * exhaustion) and none of which a delay can fix. Retrying would only convert a
- * fast, accurate failure into a wait.
+ * No retries, on any platform, and the awaited version below is why. POSIX unlinks
+ * a file that still has open handles, so it never needs one. Windows refuses, but
+ * `rm`'s retries BLOCK — and the release they are waiting for is work on the event
+ * loop, so they starve exactly what they need and expire against a file nothing is
+ * free to unlock. Retrying is worth doing only where the loop keeps running, which
+ * is one place, and it owns its own loop.
  *
- * Windows refuses to unlink a file with an open handle, and SQLite unmaps lazily,
- * so the file can stay busy for a moment after `close()`. There the retries earn
- * their keep — how much is worth spending on them is the caller's, since it
- * depends on whether waiting blocks the release; see the budget and the
- * deadline above.
- *
- * `recursive` rides with the retry budget, because Node documents
- * `maxRetries`/`retryDelay` as ignored without it — and only there. It also turns
- * a removal into a tree delete, so where no retries are wanted it buys nothing and
- * costs the kernel's own `EISDIR` refusal. The callers below refuse a directory on
- * every platform regardless; this keeps the kernel as a second line where it can.
+ * That leaves `force` alone: ignore a file that is already gone, and let anything
+ * else be reported. `recursive` is deliberately absent — it was only ever here
+ * because Node documents `maxRetries` as ignored without it, and it would turn a
+ * misconfigured directory path into a silent tree delete instead of the kernel's
+ * own refusal.
  */
-function removeOptions(
-  platform: NodeJS.Platform,
-  budget: {maxRetries: number; retryDelay: number} = SYNC_RETRY_BUDGET,
-): RmOptions {
-  const retry = platform === 'win32';
-  return {
-    force: true,
-    recursive: retry,
-    maxRetries: retry ? budget.maxRetries : 0,
-    retryDelay: retry ? budget.retryDelay : 0,
-  };
-}
+const REMOVE_OPTIONS: RmOptions = {force: true};
 
 /**
  * Throws unless `path` is a file or absent.
  *
  * These paths come from operator config, so a directory is reachable by
- * misconfiguration — and the removal options are recursive, which would make that
- * a silent tree delete where it used to be a loud EISDIR.
+ * misconfiguration. The kernel refuses to unlink one anyway, but its error names
+ * the path rather than the mistake, and a caller reading `EISDIR` from a replica
+ * removal has to work out why a directory was there at all.
  */
 function assertNotADirectory(path: string): void {
   if (statSync(path, {throwIfNoEntry: false})?.isDirectory()) {
@@ -87,12 +58,10 @@ function assertNotADirectory(path: string): void {
  */
 export function deleteLiteDB(
   dbFile: string,
-  platform: NodeJS.Platform = process.platform,
-  // Injected so both the per-platform options and the all-attempted behaviour are
-  // observable. A removal failure cannot be provoked portably through the
-  // filesystem — the one fixture that can be built is a directory, which the guard
-  // above rejects first — so without this seam the aggregate path has no test that
-  // could fail.
+  // Injected so the all-attempted behaviour is observable. A removal failure
+  // cannot be provoked portably through the filesystem — the one fixture that can
+  // be built is a directory, which the guard above rejects first — so without this
+  // seam the aggregate path has no test that could fail.
   remove: (path: string, options: RmOptions) => void = rmSync,
 ) {
   const paths = SQLITE_FILE_SUFFIXES.map(suffix => `${dbFile}${suffix}`);
@@ -100,11 +69,10 @@ export function deleteLiteDB(
     assertNotADirectory(path);
   }
 
-  const options = removeOptions(platform);
   const failures: unknown[] = [];
   for (const path of paths) {
     try {
-      remove(path, options);
+      remove(path, REMOVE_OPTIONS);
     } catch (error) {
       failures.push(error);
     }
@@ -132,7 +100,6 @@ export function deleteLiteDB(
  */
 export async function deleteLiteDBAsync(
   dbFile: string,
-  platform: NodeJS.Platform = process.platform,
   // Injected for the same reason as above.
   remove: (path: string, options: RmOptions) => Promise<void> = rm,
 ): Promise<void> {
@@ -147,7 +114,6 @@ export async function deleteLiteDBAsync(
   // case, which is how a wait long enough to work stops fitting inside the timeout
   // of whatever is waiting for it. What a caller wants to bound is how long until
   // the database is gone.
-  const options = removeOptions(platform, NO_RETRIES);
   const deadline = Date.now() + ASYNC_REMOVE_DEADLINE_MS;
   let remaining = paths;
   const failures: unknown[] = [];
@@ -157,7 +123,7 @@ export async function deleteLiteDBAsync(
     failures.length = 0;
     for (const path of remaining) {
       try {
-        await remove(path, options);
+        await remove(path, REMOVE_OPTIONS);
       } catch (error) {
         // Only the paths still held are retried, so one that has already gone
         // cannot contribute a failure on a later pass.
