@@ -1,9 +1,8 @@
 import type {LogContext} from '@rocicorp/logger';
-import {afterEach, beforeEach, describe, expect, test} from 'vitest';
+import {vi, afterEach, beforeEach, describe, expect, test} from 'vitest';
 import {createSilentLogContext} from '../../../../../../shared/src/logging-test-utils.ts';
 import {must} from '../../../../../../shared/src/must.ts';
 import {Queue} from '../../../../../../shared/src/queue.ts';
-import {sleep} from '../../../../../../shared/src/sleep.ts';
 import {dropReplicationSlots, testDBs} from '../../../../test/db.ts';
 import type {PostgresDB} from '../../../../types/pg.ts';
 import type {Source} from '../../../../types/streams.ts';
@@ -93,21 +92,18 @@ describe('pg/logic-replication', () => {
 
     // Since there's no reliable mechanism to wait for the ack to have
     // been processed by postgres, add retries with sleeps in between.
-    const MAX_ATTEMPTS = 10;
-
-    for (let i = 0; i < MAX_ATTEMPTS; i++) {
-      const [{confirmed}] = await db<{confirmed: string}[]>`
+    // Waits for the flush rather than for ten fixed polls: the old loop gave up
+    // after a budget that a busy machine outlasts, and reported the last value it
+    // happened to read.
+    await vi.waitFor(
+      async () => {
+        const [{confirmed}] = await db<{confirmed: string}[]>`
         SELECT confirmed_flush_lsn as confirmed FROM pg_replication_slots
           WHERE slot_name = ${SLOT}`;
-      if (confirmed === expected) {
-        return;
-      }
-      if (i < MAX_ATTEMPTS - 1) {
-        await sleep(100);
-      } else {
         expect(confirmed).toBe(expected);
-      }
-    }
+      },
+      {interval: 100, timeout: 10_000},
+    );
   }
 
   test('logical replication messages', async () => {
