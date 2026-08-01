@@ -287,7 +287,13 @@ const REPLICATED_ZERO_MUTATIONS_SPEC: LiteTableSpec = {
 
 const WATERMARK_REGEX = /[0-9a-z]{4,}/;
 
-describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
+// No suite-wide timeout: the project sets one, and capping the whole file below it
+// made healthy cases fail under load rather than fail honestly. Measured on a
+// 32-core Windows checkout, every case here runs in under a second alone, and three
+// of them cross ten seconds when the project's 21 files run in parallel — the pg
+// projects fork per file and run `availableParallelism() - 1` at once. A tight
+// timeout is a detector for the one case that uses it as one; see `timeoutMs`.
+describe('change-source/pg/initial-sync', () => {
   type Case = {
     name: string;
     setupUpstreamQuery?: string;
@@ -300,6 +306,13 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
     replicatedData: Record<string, object[]>;
     resultingPublications: string[];
     minPgVersion?: number;
+    /**
+     * A deadline this case uses to DETECT something, rather than a limit on how
+     * long it may take. Only the crafted COPY case has one: its failure mode is an
+     * unresponsive Postgres, so it reports as a timeout by design and a short
+     * deadline is what makes that quick instead of a wait.
+     */
+    timeoutMs?: number;
   };
 
   const cases: Case[] = [
@@ -2421,6 +2434,9 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
     },
     {
       name: 'multiple copy commands per copy worker',
+      // Detector, not a limit: the bug below leaves Postgres unresponsive, so this
+      // is how long to wait before saying so.
+      timeoutMs: 10_000,
       setupUpstreamQuery: Array.from({length: 10}, (_, i) =>
         [
           // This is a carefully crafted test that hits a bug in Postgres in which
@@ -2595,7 +2611,11 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
   });
 
   for (const c of cases) {
-    test(c.name, async ({skip}) => {
+    // Spread rather than `{timeout: c.timeoutMs}`: under exactOptionalPropertyTypes
+    // an explicit `undefined` is not the same as an absent option, and absent is
+    // what makes the case inherit the project's timeout.
+    const options = c.timeoutMs === undefined ? {} : {timeout: c.timeoutMs};
+    test(c.name, options, async ({skip}) => {
       if (pgVersion < (c.minPgVersion ?? 0)) {
         skip();
       }
