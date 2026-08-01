@@ -265,7 +265,15 @@ export class SQLiteChangeLogWriter {
     // that is still open, so the old order asked it to do the impossible and then
     // logged the refusal. POSIX unlinks a file with open handles, which is why the
     // order never mattered there.
-    this.#opts.onDisabled?.();
+    //
+    // Guarded, because moving it ahead of the delete would otherwise let a throwing
+    // callback skip the delete entirely and escape into the write path this is
+    // failing softly for. Both steps run, whatever either does.
+    try {
+      this.#opts.onDisabled?.();
+    } catch (disableError) {
+      this.#lc.error?.(`error disabling catchup for ${file}`, disableError);
+    }
     try {
       deleteChangeLogDB(this.#opts.replicaFile);
     } catch (deleteError) {

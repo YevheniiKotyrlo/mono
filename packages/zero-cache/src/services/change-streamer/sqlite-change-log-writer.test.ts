@@ -140,6 +140,29 @@ describe('change-streamer/sqlite-change-log-writer', () => {
   // §3.7: nothing in the log is not either already durable in the replica's
   // backup or re-derivable from the slot, so a write failure must cost catchup
   // reach rather than the shard's replication.
+  test('a throwing disable callback still leaves the file deleted', () => {
+    // `onDisabled` closes the catchup reader, and it runs before the delete so the
+    // reader's handle is gone first. That ordering must not make the delete
+    // conditional on the callback succeeding: this method exists to fail SOFTLY, so
+    // a throw from either step cannot skip the other or escape into the write path.
+    using fixture = setup('change-log-writer-disable-throws', '02', () => {
+      throw new Error('closing catchup failed');
+    });
+    {
+      using other = openChangeLogDB(fixture.lc, fixture.file.path, {
+        readonly: false,
+      });
+      other.exec(`DROP TABLE "${CHANGE_LOG_STREAM_TABLE}"`);
+    }
+
+    expect(() => transaction(fixture.writer, '04')).not.toThrow();
+    expect(existsSync(changeLogFileName(fixture.file.path))).toBe(false);
+    expect(fixture.errors().join('\n')).toContain('error disabling catchup');
+    // And replication still continues, which is the whole point of failing soft.
+    expect(fixture.writer.enabled).toBe(false);
+    expect(() => transaction(fixture.writer, '06')).not.toThrow();
+  });
+
   test('the disable callback runs before the file is deleted', () => {
     // `onDisabled` closes the catchup reader, which holds its own handle on this
     // file. Deleting first therefore asks the platform to unlink an open file:
