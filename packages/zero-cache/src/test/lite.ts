@@ -40,6 +40,19 @@ export class DbFile {
    * runs out against a file nothing is free to unlock. The integration suites
    * fail exactly that way — measurably, for 30s — and pass on the second
    * asynchronous attempt.
+   *
+   * Reported rather than thrown when the removal does not win that race. This is
+   * a file under `os.tmpdir()`, so what is at stake is housekeeping, not the
+   * behaviour any caller is testing — and on Windows the last handle on a replica
+   * can outlive every process that opened it by longer than a hook is allowed to
+   * take. Measured: files that no surviving process holds, that no deadline short
+   * enough to fit a 30s hook can outlast, and that delete without complaint a
+   * minute later. Failing there reports "replication is broken" about a
+   * filesystem that is merely slow to let go, which is a worse answer than
+   * saying what actually happened.
+   *
+   * Production keeps the throwing form. `deleteLiteDB` is called where a replica
+   * that refuses to go is a real problem, and it still says so.
    */
   async delete(): Promise<void> {
     for (const db of this.#connections.splice(0)) {
@@ -50,7 +63,14 @@ export class DbFile {
         // not an error worth failing teardown over.
       }
     }
-    await deleteLiteDBAsync(this.path);
+    try {
+      await deleteLiteDBAsync(this.path);
+    } catch (error) {
+      console.warn(
+        `left ${this.path} behind: the operating system still had it open`,
+        error,
+      );
+    }
   }
 }
 

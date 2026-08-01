@@ -1,6 +1,7 @@
 import {existsSync} from 'node:fs';
-import {expect, test} from 'vitest';
+import {expect, test, vi} from 'vitest';
 import {createSilentLogContext} from '../../../shared/src/logging-test-utils.ts';
+import * as deleteLiteDb from '../db/delete-lite-db.ts';
 import {DbFile} from './lite.ts';
 
 // These cover the invariant rather than the symptom: DbFile hands out
@@ -91,6 +92,35 @@ test('delete tolerates a caller that already closed its own connection', async (
 
   await expect(file.delete()).resolves.toBeUndefined();
   expect(existsSync(file.path)).toBe(false);
+});
+
+test('delete reports a file the OS still holds rather than failing the test', async () => {
+  // A replica under os.tmpdir() that Windows has not let go of yet is housekeeping,
+  // not the behaviour under test. Measured there: a file no surviving process
+  // holds, that no deadline short enough for a 30s hook outlasts, and that deletes
+  // without complaint a minute later. Throwing reports "replication is broken"
+  // about a filesystem that is merely slow.
+  const file = new DbFile('lite-test-held-open');
+  const db = file.connect(lc);
+  db.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
+
+  const held = vi
+    .spyOn(deleteLiteDb, 'deleteLiteDBAsync')
+    .mockRejectedValue(
+      Object.assign(new Error(`EBUSY: ${file.path}`), {code: 'EBUSY'}),
+    );
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    await expect(file.delete()).resolves.toBeUndefined();
+    // Said out loud, so a file left behind is visible rather than silent.
+    expect(warn).toHaveBeenCalledOnce();
+    expect(String(warn.mock.calls[0][0])).toContain(file.path);
+  } finally {
+    held.mockRestore();
+    warn.mockRestore();
+  }
+  // The connection it handed out is closed either way, so nothing is left open.
+  expect(() => db.close()).not.toThrow();
 });
 
 test('delete is idempotent and does not re-close stale connections', async () => {
