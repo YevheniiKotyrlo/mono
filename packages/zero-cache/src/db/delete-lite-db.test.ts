@@ -9,7 +9,12 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {expect, test} from 'vitest';
 import {SQLITE_FILE_SUFFIXES} from '../../../shared/src/sqlite-file-suffixes.ts';
-import {deleteLiteDB} from './delete-lite-db.ts';
+import {
+  ASYNC_RETRY_BUDGET,
+  SYNC_RETRY_BUDGET,
+  deleteLiteDB,
+  deleteLiteDBAsync,
+} from './delete-lite-db.ts';
 
 // The suffixes are written out literally rather than taken from the module.
 // Seeding a fixture from the same constant an assertion iterates makes the two
@@ -111,4 +116,90 @@ test('attempts every suffix, then reports the failures together', () => {
   );
   expect(caught).toBeInstanceOf(AggregateError);
   expect((caught as AggregateError).errors).toHaveLength(2);
+});
+
+// The awaited sibling. Its reason for existing is a retry budget that can only
+// work asynchronously: `rmSync` blocks the loop that would release the handle it
+// is waiting for, so on Windows it can spin out its whole budget against a file
+// nothing is free to unlock. Measured there, a replica a synchronous loop could
+// not remove in 30 seconds and 600 attempts is removed on the second async try.
+
+test('async: deletes the database and every sidecar', async () => {
+  const dbFile = makeDbWithSidecars();
+  await deleteLiteDBAsync(dbFile);
+  const remaining = EXPECTED_SUFFIXES.filter(suffix =>
+    existsSync(`${dbFile}${suffix}`),
+  );
+  expect(remaining).toEqual([]);
+});
+
+test('async: is a no-op when nothing is there', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'delete-lite-db-'));
+  await expect(
+    deleteLiteDBAsync(join(dir, 'absent.db')),
+  ).resolves.toBeUndefined();
+});
+
+test('async: refuses a directory before removing anything', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'delete-lite-db-'));
+  const dbFile = join(dir, 'replica.db');
+  writeFileSync(dbFile, '');
+  mkdirSync(`${dbFile}-shm`);
+
+  await expect(deleteLiteDBAsync(dbFile)).rejects.toThrow(/is a directory/);
+  // Refused up front, so the database it would have orphaned is still there.
+  expect(existsSync(dbFile)).toBe(true);
+});
+
+test('async: attempts every suffix, then reports the failures together', async () => {
+  const attempted: string[] = [];
+  const failing = (path: string): Promise<void> => {
+    attempted.push(path);
+    return Promise.reject(
+      Object.assign(new Error(`EPERM: ${path}`), {code: 'EPERM'}),
+    );
+  };
+
+  const file = join(mkdtempSync(join(tmpdir(), 'delete-lite-db-')), 'r.db');
+  let caught: unknown;
+  try {
+    await deleteLiteDBAsync(file, 'win32', failing);
+  } catch (error) {
+    caught = error;
+  }
+
+  expect(attempted).toEqual(SQLITE_FILE_SUFFIXES.map(s => `${file}${s}`));
+  expect(caught).toBeInstanceOf(AggregateError);
+  expect((caught as AggregateError).errors).toHaveLength(
+    SQLITE_FILE_SUFFIXES.length,
+  );
+  // The first failure's text reaches the message, not just the errors array.
+  expect((caught as AggregateError).message).toContain('EPERM');
+});
+
+test('async: spends a real retry budget on Windows and none elsewhere', async () => {
+  // The whole point of the async variant: retries that the loop can run between.
+  // A budget of zero would make it identical to the synchronous one.
+  const seen: RmOptions[] = [];
+  const record = (_path: string, options: RmOptions): Promise<void> => {
+    seen.push(options);
+    return Promise.resolve();
+  };
+
+  const budgetFile = join(
+    mkdtempSync(join(tmpdir(), 'delete-lite-db-')),
+    'r.db',
+  );
+  await deleteLiteDBAsync(budgetFile, 'win32', record);
+  // Against the synchronous budget rather than a literal: the invariant is that
+  // waiting asynchronously is worth more than waiting synchronously, and a
+  // hard-coded floor keeps passing if the two are ever collapsed onto one value.
+  expect(seen[0].maxRetries).toBeGreaterThan(SYNC_RETRY_BUDGET.maxRetries);
+  expect(ASYNC_RETRY_BUDGET.maxRetries).toBeGreaterThan(
+    SYNC_RETRY_BUDGET.maxRetries,
+  );
+
+  seen.length = 0;
+  await deleteLiteDBAsync(budgetFile, 'linux', record);
+  expect(seen[0].maxRetries).toBe(0);
 });

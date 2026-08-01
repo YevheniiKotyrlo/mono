@@ -4,7 +4,7 @@ import type {LogContext} from '@rocicorp/logger';
 import {expect} from 'vitest';
 import {randInt} from '../../../shared/src/rand.ts';
 import {Database} from '../../../zqlite/src/db.ts';
-import {deleteLiteDB} from '../db/delete-lite-db.ts';
+import {deleteLiteDBAsync} from '../db/delete-lite-db.ts';
 import {id} from '../types/sql.ts';
 
 export class DbFile {
@@ -32,8 +32,16 @@ export class DbFile {
    * a `delete()` that left connections open worked there and failed here —
    * which is why the file that hands out the connections is what closes them,
    * rather than asking every test to remember.
+   *
+   * Awaited for the handles this process does NOT own. A test that spawned
+   * zero-cache and killed it is racing the operating system's release of that
+   * process's handles, and only an asynchronous retry can win: the synchronous
+   * one blocks the loop that performs the release, so it spins until its budget
+   * runs out against a file nothing is free to unlock. The integration suites
+   * fail exactly that way — measurably, for 30s — and pass on the second
+   * asynchronous attempt.
    */
-  delete() {
+  async delete(): Promise<void> {
     for (const db of this.#connections.splice(0)) {
       try {
         db.close();
@@ -42,7 +50,7 @@ export class DbFile {
         // not an error worth failing teardown over.
       }
     }
-    deleteLiteDB(this.path);
+    await deleteLiteDBAsync(this.path);
   }
 }
 

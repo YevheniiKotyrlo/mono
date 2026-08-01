@@ -97,7 +97,7 @@ describe('change-source/pg/end-to-mid-test', {timeout: 30000}, () => {
   afterAll(async () => {
     changes?.cancel();
     await testDBs.drop(upstream);
-    replicaDbFile.delete();
+    await replicaDbFile.delete();
   });
 
   function drainToQueue(

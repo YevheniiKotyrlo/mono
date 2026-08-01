@@ -87,7 +87,7 @@ describe('view-syncer/yield-during-hydrate', () => {
       await vs.stop();
       await viewSyncerDone;
       await testDBs.drop(cvrDB, upstreamDb);
-      replicaDbFile.delete();
+      await replicaDbFile.delete();
     };
   });
 

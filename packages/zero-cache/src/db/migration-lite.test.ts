@@ -213,8 +213,8 @@ describe('db/migration-lite', () => {
     db.close();
   });
 
-  afterEach(() => {
-    dbFile.delete();
+  afterEach(async () => {
+    await dbFile.delete();
   });
 
   for (const c of cases) {

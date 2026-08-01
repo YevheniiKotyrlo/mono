@@ -81,7 +81,7 @@ describe('view-syncer/yield-during-advance', () => {
       await vs.stop();
       await viewSyncerDone;
       await testDBs.drop(cvrDB, upstreamDb);
-      replicaDbFile.delete();
+      await replicaDbFile.delete();
     };
   });
 

@@ -91,13 +91,13 @@ describe('view-syncer/pipeline-driver', () => {
     replicator = fakeReplicator(lc, db);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     // See pipeline-driver.test.ts: the driver holds replica connections that
     // have to be closed before the file can be unlinked on Windows.
     try {
       pipelines.destroy();
     } finally {
-      dbFile.delete();
+      await dbFile.delete();
     }
   });
 

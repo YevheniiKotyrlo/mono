@@ -79,7 +79,7 @@ for (const {fixture, table, indexes, id} of [
           samplesValidated: 3,
         });
       } finally {
-        replicaFile.delete();
+        await replicaFile.delete();
         await testDBs.drop(upstream);
       }
     },

@@ -52,7 +52,7 @@ describe.skip('toasted values', {timeout: 30000, retry: 3}, () => {
     return async () => {
       streams.forEach(s => s.changes.cancel());
       await testDBs.drop(upstream);
-      replicaDbFile.delete();
+      await replicaDbFile.delete();
     };
   }, 30000);
 

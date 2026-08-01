@@ -502,8 +502,8 @@ describe('integration', {timeout: 30000}, () => {
         (await Promise.all(zerosExited)).forEach(code => expect(code).toBe(0));
       } finally {
         await testDBs.drop(upDB, cvrDB, changeDB);
-        replicaDbFile.delete();
-        replicaDbFile2.delete();
+        await replicaDbFile.delete();
+        await replicaDbFile2.delete();
       }
     };
   }, 30000);

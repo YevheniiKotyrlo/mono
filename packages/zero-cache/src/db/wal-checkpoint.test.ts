@@ -37,7 +37,7 @@ describe('db/wal-checkpoint', () => {
     } finally {
       // In a `finally` so a failing terminate still removes the replica, and the
       // handle is cleared first so the next test cannot inherit a stale one.
-      dbFile.delete();
+      await dbFile.delete();
     }
   });
 

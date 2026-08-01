@@ -150,7 +150,7 @@ test('change-streamer startup publishes Postgres config errors and rethrows Conf
     process.env.SINGLE_PROCESS = originalSingleProcess;
     process.env.TEST_CLOUD_EVENT_SINK = originalTestCloudEventSink;
     await eventSink.stop().catch(() => {});
-    replicaFile.delete();
+    await replicaFile.delete();
     await testDBs.drop(upstream);
   }
 });
@@ -277,7 +277,7 @@ test('change-streamer startup does not deadlock on autoreset retry when change a
   } finally {
     await initialSource?.stop().catch(() => {});
     deleteChangeLogDB(replicaFile.path);
-    replicaFile.delete();
+    await replicaFile.delete();
     await testDBs.drop(upstream);
   }
 });

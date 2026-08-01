@@ -52,11 +52,11 @@ const SIDECARS = ['', '-wal', '-wal2', '-shm', '-journal'];
 
 const dbFiles: DbFile[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   let file: DbFile | undefined;
   while ((file = dbFiles.pop())) {
     deleteChangeLogDB(file.path);
-    file.delete();
+    await file.delete();
   }
 });
 

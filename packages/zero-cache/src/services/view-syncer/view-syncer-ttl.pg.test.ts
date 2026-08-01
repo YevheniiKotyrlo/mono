@@ -114,7 +114,7 @@ beforeEach<PgTest>(async ({testDBs}) => {
     await vs.stop();
     await viewSyncerDone;
     await testDBs.drop(cvrDB, upstreamDb);
-    replicaDbFile.delete();
+    await replicaDbFile.delete();
   };
 });
 

@@ -409,10 +409,10 @@ describe('SQLite change-log observability', () => {
 describe('SQLite change-log observability on disk', () => {
   let dbFile: DbFile | undefined;
 
-  afterEach(() => {
+  afterEach(async () => {
     if (dbFile) {
       deleteChangeLogDB(dbFile.path);
-      dbFile.delete();
+      await dbFile.delete();
       dbFile = undefined;
     }
   });

@@ -17,16 +17,16 @@ function seed(file: DbFile): void {
   db.close();
 }
 
-test('delete removes the database file', () => {
+test('delete removes the database file', async () => {
   const file = new DbFile('lite-test-removes');
   seed(file);
   expect(existsSync(file.path)).toBe(true);
 
-  file.delete();
+  await file.delete();
   expect(existsSync(file.path)).toBe(false);
 });
 
-test('delete removes the sidecars, which only exist while a connection is open', () => {
+test('delete removes the sidecars, which only exist while a connection is open', async () => {
   const file = new DbFile('lite-test-sidecars');
   const db = file.connect(lc);
   db.exec('PRAGMA journal_mode = WAL');
@@ -42,7 +42,7 @@ test('delete removes the sidecars, which only exist while a connection is open',
   // depend on SQLite's coordination strategy rather than on `delete()`.
   expect(existsSync(`${file.path}-wal`)).toBe(true);
 
-  file.delete();
+  await file.delete();
 
   // Only the database itself is attributable to `delete()`: closing the
   // connections — which `delete()` does first, and which the case below covers —
@@ -53,27 +53,27 @@ test('delete removes the sidecars, which only exist while a connection is open',
   expect(existsSync(`${file.path}-wal`)).toBe(false);
 });
 
-test('delete closes a connection the caller left open', () => {
+test('delete closes a connection the caller left open', async () => {
   const file = new DbFile('lite-test-closes-open');
   const db = file.connect(lc);
   db.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
 
   // Deliberately not closed by the caller — this is the case that failed on
   // Windows with EPERM, and the reason closing belongs here.
-  file.delete();
+  await file.delete();
 
   expect(() => db.prepare('SELECT 1')).toThrow(/not open/i);
   expect(existsSync(file.path)).toBe(false);
 });
 
-test('delete closes every connection handed out, not just the last', () => {
+test('delete closes every connection handed out, not just the last', async () => {
   const file = new DbFile('lite-test-closes-all');
   const first = file.connect(lc);
   first.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
   const second = file.connect(lc);
   const third = file.connect(lc);
 
-  file.delete();
+  await file.delete();
 
   // The structural claim: tracking is per-connection. A fix that only closed
   // the most recent one would pass the previous test and fail this.
@@ -83,35 +83,35 @@ test('delete closes every connection handed out, not just the last', () => {
   expect(existsSync(file.path)).toBe(false);
 });
 
-test('delete tolerates a caller that already closed its own connection', () => {
+test('delete tolerates a caller that already closed its own connection', async () => {
   const file = new DbFile('lite-test-double-close');
   const db = file.connect(lc);
   db.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
   db.close();
 
-  expect(() => file.delete()).not.toThrow();
+  await expect(file.delete()).resolves.toBeUndefined();
   expect(existsSync(file.path)).toBe(false);
 });
 
-test('delete is idempotent and does not re-close stale connections', () => {
+test('delete is idempotent and does not re-close stale connections', async () => {
   const file = new DbFile('lite-test-idempotent');
   seed(file);
 
-  file.delete();
+  await file.delete();
   // The tracked set is drained on the first call, so a second delete has
   // nothing to close and no file to remove.
-  expect(() => file.delete()).not.toThrow();
+  await expect(file.delete()).resolves.toBeUndefined();
   expect(existsSync(file.path)).toBe(false);
 });
 
-test('a connection opened after delete is tracked by the next delete', () => {
+test('a connection opened after delete is tracked by the next delete', async () => {
   const file = new DbFile('lite-test-reopen');
   seed(file);
-  file.delete();
+  await file.delete();
 
   const reopened = file.connect(lc);
   reopened.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
-  file.delete();
+  await file.delete();
 
   expect(() => reopened.prepare('SELECT 1')).toThrow(/not open/i);
   expect(existsSync(file.path)).toBe(false);

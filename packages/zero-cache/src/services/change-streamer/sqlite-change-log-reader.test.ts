@@ -29,10 +29,10 @@ import {
 const lc = createSilentLogContext();
 const files: DbFile[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   for (const file of files.splice(0)) {
     deleteChangeLogDB(file.path);
-    file.delete();
+    await file.delete();
   }
 });
 

@@ -98,7 +98,7 @@ describe('change-streamer/pg/sync-schema', () => {
 
     return async () => {
       await testDBs.drop(upstream);
-      replicaFile.delete();
+      await replicaFile.delete();
     };
   });
 

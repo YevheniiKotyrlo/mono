@@ -119,7 +119,7 @@ describe.each([
     return async () => {
       changes?.cancel();
       await testDBs.drop(upstream);
-      replicaDbFile.delete();
+      await replicaDbFile.delete();
     };
   }, 30000);
 

@@ -50,7 +50,7 @@ describe('write-worker', () => {
   afterEach(async () => {
     await worker.stop();
     mainDb.close();
-    dbFile.delete();
+    await dbFile.delete();
   });
 
   test('getSubscriptionState returns correct state', async () => {
