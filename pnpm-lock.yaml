@@ -19,7 +19,7 @@ overrides:
   webpackbar: ^7.0.0
 
 patchedDependencies:
-  postgres@3.4.7: 15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53
+  postgres@3.4.7: 0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2
 
 importers:
 
@@ -168,7 +168,7 @@ importers:
         version: 8.20.0
       postgres:
         specifier: 3.4.7
-        version: 3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53)
+        version: 3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2)
       react:
         specifier: ^19.2.6
         version: 19.2.6
@@ -250,7 +250,7 @@ importers:
         version: 0.31.10
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@15.2.14(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.20.0)(expo-sqlite@55.0.16(expo@55.0.24)(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6))(kysely@0.28.17)(mysql2@3.15.3)(pg@8.20.0)(postgres@3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53))(prisma@7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3))
+        version: 0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@15.2.14(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.20.0)(expo-sqlite@55.0.16(expo@55.0.24)(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6))(kysely@0.28.17)(mysql2@3.15.3)(pg@8.20.0)(postgres@3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2))(prisma@7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3))
       oxfmt:
         specifier: ^0.45.0
         version: 0.45.0
@@ -292,7 +292,7 @@ importers:
         version: link:../../packages/zero
       postgres:
         specifier: 3.4.7
-        version: 3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53)
+        version: 3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2)
       ws:
         specifier: ^8.18.1
         version: 8.20.1
@@ -806,7 +806,7 @@ importers:
         version: 8.20.0
       postgres:
         specifier: 3.4.7
-        version: 3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53)
+        version: 3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2)
       shared:
         specifier: workspace:*
         version: link:../shared
@@ -965,7 +965,7 @@ importers:
         version: pg-format-fix@1.0.5
       postgres:
         specifier: 3.4.7
-        version: 3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53)
+        version: 3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2)
       semver:
         specifier: ^7.5.4
         version: 7.8.0
@@ -1149,7 +1149,7 @@ importers:
         version: pg-format-fix@1.0.5
       postgres:
         specifier: 3.4.7
-        version: 3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53)
+        version: 3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2)
       url-pattern:
         specifier: ^1.0.3
         version: 1.0.3
@@ -1487,7 +1487,7 @@ importers:
         version: 4.1.6
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@15.2.14(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.20.0)(expo-sqlite@55.0.16(expo@55.0.24)(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6))(kysely@0.28.17)(mysql2@3.15.3)(pg@8.20.0)(postgres@3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53))(prisma@7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3))
+        version: 0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@15.2.14(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.20.0)(expo-sqlite@55.0.16(expo@55.0.24)(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6))(kysely@0.28.17)(mysql2@3.15.3)(pg@8.20.0)(postgres@3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2))(prisma@7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3))
       kysely:
         specifier: ^0.28.17
         version: 0.28.17
@@ -1499,7 +1499,7 @@ importers:
         version: 8.20.0
       postgres:
         specifier: 3.4.7
-        version: 3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53)
+        version: 3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2)
       prisma:
         specifier: ^7.7.0
         version: 7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3)
@@ -1876,7 +1876,7 @@ importers:
         version: pg-format-fix@1.0.5
       postgres:
         specifier: 3.4.7
-        version: 3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53)
+        version: 3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2)
     devDependencies:
       '@types/pg-format':
         specifier: ^1.0.5
@@ -20837,7 +20837,7 @@ snapshots:
       esbuild: 0.27.7
       tsx: 4.22.0
 
-  drizzle-orm@0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@15.2.14(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.20.0)(expo-sqlite@55.0.16(expo@55.0.24)(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6))(kysely@0.28.17)(mysql2@3.15.3)(pg@8.20.0)(postgres@3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53))(prisma@7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3)):
+  drizzle-orm@0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@15.2.14(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.20.0)(expo-sqlite@55.0.16(expo@55.0.24)(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6))(kysely@0.28.17)(mysql2@3.15.3)(pg@8.20.0)(postgres@3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2))(prisma@7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3)):
     optionalDependencies:
       '@electric-sql/pglite': 0.4.1
       '@op-engineering/op-sqlite': 15.2.14(react-native@0.85.3(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.6))(react@19.2.6)
@@ -20848,7 +20848,7 @@ snapshots:
       kysely: 0.28.17
       mysql2: 3.15.3
       pg: 8.20.0
-      postgres: 3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53)
+      postgres: 3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2)
       prisma: 7.8.0(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(magicast@0.5.3)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(typescript@6.0.3)
 
   dunder-proto@1.0.1:
@@ -24795,7 +24795,7 @@ snapshots:
     dependencies:
       xtend: 4.0.2
 
-  postgres@3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53): {}
+  postgres@3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2): {}
 
   prebuild-install@7.1.3:
     dependencies:
@@ -24844,7 +24844,7 @@ snapshots:
       '@prisma/engines': 7.8.0
       '@prisma/studio-core': 0.27.3(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       mysql2: 3.15.3
-      postgres: 3.4.7(patch_hash=15855fc3151f92c24a594d204755c9ac81f75372b1bc13f08a2abaf2e52dac53)
+      postgres: 3.4.7(patch_hash=0ff1994b72341fe0e60b64423fc5bad9c5e1fbe047905663b29b9219a68c11f2)
     optionalDependencies:
       typescript: 6.0.3
     transitivePeerDependencies:
