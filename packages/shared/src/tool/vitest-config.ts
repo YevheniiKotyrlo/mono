@@ -51,12 +51,32 @@ export function maxConcurrentPgFiles(): number {
  */
 export const MAX_PG_TEST_TIMEOUT_MS = 60_000;
 
+/**
+ * The group Postgres-backed projects run in, after the default-group ones.
+ *
+ * Any value other than the default separates them; later means the fast suites
+ * report first.
+ */
+export const PG_PROJECT_GROUP_ORDER = 1;
+
 export function pgProjectDefaults() {
   const timeout = CI ? MAX_PG_TEST_TIMEOUT_MS : MAX_PG_TEST_TIMEOUT_MS / 2;
   return {
     browser: {enabled: false},
     silent: 'passed-only',
     maxWorkers: maxConcurrentPgFiles(),
+    // Their own group, because they contend on something the others do not.
+    //
+    // vitest runs one group at a time and requires every project inside a group
+    // to agree on `maxWorkers`, since they share its pool -- so a bounded pg
+    // project sitting beside an unbounded no-pg one is refused outright
+    // ("Projects X and Y have different 'maxWorkers'"), which is what a bare
+    // `vitest run` enumerating every project would hit. Separating them is not
+    // just the way to satisfy that: the bound exists because these projects queue
+    // on ONE Postgres, and no-pg files queue on nothing, so making them share a
+    // pool would drag the whole no-pg suite down to a limit it has no reason to
+    // obey. No-pg runs first at full width; pg follows at the bound.
+    sequence: {groupOrder: PG_PROJECT_GROUP_ORDER},
     retry: CI ? 2 : 0,
     testTimeout: timeout,
     hookTimeout: timeout,

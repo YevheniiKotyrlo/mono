@@ -5,8 +5,10 @@ import {fileURLToPath} from 'node:url';
 import {expect, test} from 'vitest';
 import {
   maxConcurrentPgFiles,
+  PG_PROJECT_GROUP_ORDER,
   pgProjectDefaults,
 } from '../../../shared/src/tool/vitest-config.ts';
+import {configForNoPg, configForVersion} from '../../vitest.config.ts';
 
 /**
  * Every Postgres-backed project has to agree on how many files run at once.
@@ -84,11 +86,26 @@ test('every pg project builds on the shared defaults', () => {
   }
 });
 
+test('a pg project and a no-pg one never share a pool', () => {
+  // The pairing vitest actually rejects, and the one the checks above cannot see:
+  // they compare pg projects with each other, while the conflict is between a pg
+  // project and its no-pg SIBLING in the same package. A bare `vitest run`
+  // enumerates every project at once -- which is what the repo's own `test` script
+  // does -- so this is reachable without setting TEST_PG_MODE at all, and both
+  // TEST_PG_MODE runs hide it by filtering one side away.
+  const pg = configForVersion(16, import.meta.url).test;
+  const noPg = configForNoPg(import.meta.url).test;
+  expect(pg.maxWorkers).not.toBe(noPg.maxWorkers);
+  expect(pg.sequence?.groupOrder ?? 0).not.toBe(noPg.sequence?.groupOrder ?? 0);
+});
+
 test('the shared defaults carry what has to match', () => {
   // A tripwire on the source of truth: were `maxWorkers` dropped from it, every
   // config above would still spread it and the check would pass vacuously.
   const defaults = pgProjectDefaults();
   expect(defaults.maxWorkers).toBe(maxConcurrentPgFiles());
+  expect(defaults.sequence.groupOrder).toBe(PG_PROJECT_GROUP_ORDER);
+  expect(PG_PROJECT_GROUP_ORDER).not.toBe(0);
   expect(defaults.maxWorkers).toBeGreaterThan(0);
   expect(defaults.testTimeout).toBeGreaterThan(0);
   expect(defaults.hookTimeout).toBeGreaterThan(0);
