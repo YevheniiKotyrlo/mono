@@ -416,10 +416,10 @@ describe('SQLite change-log observability', () => {
 describe('SQLite change-log observability on disk', () => {
   let dbFile: DbFile | undefined;
 
-  afterEach(() => {
+  afterEach(async () => {
     if (dbFile) {
       deleteChangeLogDB(dbFile.path);
-      dbFile.delete();
+      await dbFile.delete();
       dbFile = undefined;
     }
   });
@@ -513,11 +513,23 @@ describe('SQLite change-log observability on disk', () => {
 
   test('file bytes warn on a stat failure that is not a missing file', async () => {
     using files = setupFiles();
-    // A path under a regular file: ENOTDIR, not ENOENT. Absence is expected
-    // and silent; anything else says something is wrong with the environment.
-    const bad = `${changeLogFileName(files.file)}/under-a-file`;
+    const bad = changeLogFileName(files.file);
 
-    expect(await sqliteFileBytes(files.lc, bad)).toBe(0);
+    // The failure is injected rather than provoked through the filesystem.
+    // POSIX yields ENOTDIR for a path under a regular file, but Windows reports
+    // ENOENT for that and for every other malformed shape — and ENOENT is the
+    // case this asserts is silent, so no portable path reaches the branch.
+    // Injecting states the intent directly: a stat error that is not a missing
+    // file gets warned about.
+    const failure = Object.assign(new Error('EACCES: permission denied'), {
+      code: 'EACCES',
+    });
+    // Typed, not cast: the narrow parameter exists so a double like this needs no
+    // `as unknown as`, and an annotation still checks it against the contract.
+    const statFile: Parameters<typeof sqliteFileBytes>[2] = () =>
+      Promise.reject(failure);
+
+    expect(await sqliteFileBytes(files.lc, bad, statFile)).toBe(0);
     // Unordered: the three files are stat'd concurrently.
     expect(
       fileBytesWarnings(files.sink.messages).sort((a, b) =>
