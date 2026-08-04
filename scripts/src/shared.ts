@@ -1,5 +1,6 @@
 import {execFileSync} from 'node:child_process';
-import {appendFileSync, readFileSync, writeFileSync} from 'node:fs';
+import {appendFileSync, existsSync, readFileSync, writeFileSync} from 'node:fs';
+import {dirname, join} from 'node:path';
 
 export const zeroPackageName = '@rocicorp/zero';
 export const zeroPackageJsonPath = 'packages/zero/package.json';
@@ -30,13 +31,82 @@ export type ZeroTag<V extends ZeroVersion = ZeroVersion> = `zero/v${V}`;
 export type MaintenanceZeroBranch = `maint/zero/${string}`;
 export type ReleaseBranch = 'main' | MaintenanceZeroBranch;
 
-export const defaultExec: Exec = (command, args, options) =>
-  String(
-    execFileSync(command, [...args], {
-      encoding: 'utf8',
-      ...options,
-    }) ?? '',
+/**
+ * On Windows `npm` is `npm.cmd`, and `CreateProcess` only ever appends `.exe` —
+ * so `execFileSync('npm', …)` throws ENOENT. `shell: true` would work but
+ * concatenates arguments rather than escaping them (Node DEP0190), and these
+ * arguments include filesystem paths, so run npm's own JS entrypoint under the
+ * current Node instead. npm ships beside the Node binary.
+ *
+ * When that layout does not hold, this throws naming the path it looked for.
+ * Returning the bare name instead would hand back the one invocation this
+ * function exists to avoid, and the ENOENT it produces names neither npm's
+ * location nor this decision.
+ *
+ * `docker`, `git` and `tar` are real executables on Windows and need none of
+ * this.
+ */
+export function resolveNodeShimCommand(
+  command: Command,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+  fileExists: (path: string) => boolean = existsSync,
+): {command: string; args: string[]} {
+  if (command !== 'npm' || platform !== 'win32') {
+    return {command, args: [...args]};
+  }
+  const npmCli = join(
+    dirname(process.execPath),
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
   );
+  if (!fileExists(npmCli)) {
+    throw new Error(
+      `Cannot run npm on Windows: expected npm's entrypoint at ${npmCli}. ` +
+        `Spawning 'npm' by name cannot work here — it is npm.cmd, which ` +
+        `CreateProcess will not resolve.`,
+    );
+  }
+  return {command: process.execPath, args: [npmCli, ...args]};
+}
+
+/**
+ * The one place that knows how to actually run a command.
+ *
+ * The three seams exist so a test can watch what was spawned. Observing the
+ * routing needs all of them: with only `execFile` injected, the sole command
+ * whose resolution differs is npm on Windows, so the assertion would have to
+ * depend on the host it runs on — and passing through a command that needs no
+ * rewriting looks identical whether the routing happened or not.
+ */
+export function createExec({
+  execFile = execFileSync,
+  platform = process.platform,
+  fileExists = existsSync,
+}: {
+  execFile?: typeof execFileSync;
+  platform?: NodeJS.Platform;
+  fileExists?: (path: string) => boolean;
+} = {}): Exec {
+  return (command, args, options) => {
+    const resolved = resolveNodeShimCommand(
+      command,
+      args,
+      platform,
+      fileExists,
+    );
+    return String(
+      execFile(resolved.command, resolved.args, {
+        encoding: 'utf8',
+        ...options,
+      }) ?? '',
+    );
+  };
+}
+
+export const defaultExec: Exec = createExec();
 
 const stableZeroVersionPattern = /^\d+\.\d+\.\d+$/;
 export const headVersionShaLength = 8;
@@ -188,8 +258,14 @@ export function npmZeroVersionExists(version: ZeroVersion, exec = defaultExec) {
     ) {
       return false;
     }
+    // Fall back to the message and keep the cause: a failure that never reached
+    // npm carries no `stderr`, so reporting only that produces a sentence ending
+    // in a colon and discards the one explanation available.
+    const reason =
+      stderr.trim() || (error instanceof Error ? error.message : '');
     throw new Error(
-      `Could not check npm for ${zeroPackageName}@${version}: ${stderr}`,
+      `Could not check npm for ${zeroPackageName}@${version}: ${reason}`,
+      {cause: error},
     );
   }
 }
