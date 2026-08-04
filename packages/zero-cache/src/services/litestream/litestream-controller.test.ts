@@ -16,8 +16,25 @@ type Handler = (
   req: IncomingMessage,
 ) => Promise<{status: number; body: unknown}>;
 
+/**
+ * An address the host can actually bind a stream server to.
+ *
+ * `socketPath` names a filesystem socket on POSIX and a named pipe on Windows,
+ * which has no filesystem sockets — binding a `.sock` path there fails and every
+ * request against it hangs until its own timeout, so the suite reports a wall of
+ * timeouts rather than anything about the controller. The two spellings are the
+ * same address to `node:http`, and one helper is what keeps the difference from
+ * being restated per case.
+ */
+function controlSocketAddress(): string {
+  const unique = `litestream-controller-test-${randInt(1_000_000, 9_999_999)}`;
+  return process.platform === 'win32'
+    ? `\\\\.\\pipe\\${unique}`
+    : `${tmpdir()}/${unique}.sock`;
+}
+
 async function startFakeServer(handler: Handler): Promise<Server> {
-  const socketPath = `${tmpdir()}/litestream-controller-test-${randInt(1_000_000, 9_999_999)}.sock`;
+  const socketPath = controlSocketAddress();
   const server = createServer((req, res) => {
     void handler(req).then(({status, body}) => {
       res.writeHead(status, {'content-type': 'application/json'});
@@ -31,7 +48,7 @@ async function startFakeServer(handler: Handler): Promise<Server> {
 function socketPathOf(server: Server): string {
   const addr = server.address();
   if (typeof addr !== 'string') {
-    throw new Error('expected a Unix socket server');
+    throw new Error('expected a stream socket server');
   }
   return addr;
 }
@@ -129,10 +146,7 @@ describe('litestream/litestream-controller', () => {
       res.end('not json');
     });
     await new Promise<void>(resolve =>
-      server?.listen(
-        `${tmpdir()}/litestream-controller-test-${randInt(1_000_000, 9_999_999)}.sock`,
-        resolve,
-      ),
+      server?.listen(controlSocketAddress(), resolve),
     );
     const client = new LitestreamController(
       lc,
@@ -150,10 +164,7 @@ describe('litestream/litestream-controller', () => {
       setTimeout(() => res.end('{}'), 10_000);
     });
     await new Promise<void>(resolve =>
-      server?.listen(
-        `${tmpdir()}/litestream-controller-test-${randInt(1_000_000, 9_999_999)}.sock`,
-        resolve,
-      ),
+      server?.listen(controlSocketAddress(), resolve),
     );
     const client = new LitestreamController(
       lc,
