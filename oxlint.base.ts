@@ -1,9 +1,12 @@
+import {fileURLToPath} from 'node:url';
 import type {OxlintConfig} from 'oxlint';
 
-const zeroPlugin = new URL(
-  './tools/oxlint-plugin-zero/index.js',
-  import.meta.url,
-).pathname;
+// fileURLToPath, not URL.pathname: pathname is a URL path, so on Windows it is
+// '/C:/…' and oxlint cannot load the plugin from it — which aborts the whole
+// lint run rather than degrading.
+const zeroPlugin = fileURLToPath(
+  new URL('./tools/oxlint-plugin-zero/index.js', import.meta.url),
+);
 
 /**
  * Shared oxlint configuration for all packages in the monorepo.
@@ -181,6 +184,14 @@ export const baseConfig = {
         include: ['packages/zero-cache/src/'],
       },
     ],
+
+    // Portability rules. Both defects are invisible on POSIX, so nothing else
+    // catches a regression.
+    //
+    // `tool` in ignorePatterns matches at any depth, so neither rule reaches
+    // `packages/*/tool/**` or `packages/*/src/tool/**`; an override cannot narrow
+    // an ignore, so widening their reach means removing that pattern.
+    'zero/no-file-url-pathname': 'error',
   },
   overrides: [
     {
