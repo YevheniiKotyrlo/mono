@@ -257,8 +257,9 @@ async function makeDatabases<TSchema extends Schema>(
 
   await initialSync(
     lc,
-    // Same derivation as the other suites use: the app id names the replication
-    // slot, so it has to be slot-safe and distinct per database.
+    // Derived from the suite rather than used raw: the app id names the
+    // replication slot, so it has to be slot-safe ([a-z0-9_]) and distinct per
+    // database.
     {appID: appIdFor(suiteName), shardNum: 0, publications: []},
     sqlite,
     getConnectionURI(pg),
