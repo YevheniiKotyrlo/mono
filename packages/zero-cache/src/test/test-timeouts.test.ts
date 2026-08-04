@@ -127,6 +127,73 @@ test('no pg suite lowers the budget its project grants', () => {
   expect(lowered).toEqual([]);
 });
 
+/** Every `vitest.config*.ts` under a package, where projects are assembled. */
+function packageConfigs(): string[] {
+  const found: string[] = [];
+  const search = (dir: string, depth: number) => {
+    if (depth > 3) {
+      return;
+    }
+    for (const entry of readdirSync(dir, {withFileTypes: true})) {
+      if (entry.name === 'node_modules' || entry.name.startsWith('.')) {
+        continue;
+      }
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        search(path, depth + 1);
+      } else if (/^vitest\.config.*\.ts$/u.test(entry.name)) {
+        found.push(path);
+      }
+    }
+  };
+  for (const top of ['packages', 'apps']) {
+    search(join(REPO_ROOT, top), 0);
+  }
+  return found;
+}
+
+test('no config lowers a pg project’s budget on its way past', () => {
+  // The suite-level check above reads test FILES. A project's budget can also be
+  // cut where the project is assembled — `mergeConfig(configForVersion(16, url),
+  // {test: {testTimeout: 20_000}})` overrides the shared grant, and no test file
+  // says anything about it. One package did exactly that across every project it
+  // owned, which raised its no-pg budget (10s -> 20s, deliberate) and quietly
+  // lowered all four pg ones (60s -> 20s in CI, not deliberate at all).
+  //
+  // A raise scoped to the no-pg project is the legitimate shape, so the target of
+  // the merge is what decides: overriding `configForNoPg` is fine, overriding
+  // `configForVersion` is not.
+  const lowered: string[] = [];
+  for (const config of packageConfigs()) {
+    const source = readFileSync(config, 'utf8');
+    for (const match of source.matchAll(
+      /mergeConfig\(\s*(\w+)\([^)]*\)\s*,\s*\{[^}]*testTimeout:\s*([\d_]+)/gu,
+    )) {
+      const [, target, literal] = match;
+      const value = Number(literal.replaceAll('_', ''));
+      if (target !== 'configForNoPg' && value < granted) {
+        lowered.push(
+          `${relative(REPO_ROOT, config).replaceAll('\\', '/')}: ` +
+            `${target} merged down to ${value}ms < ${granted}ms`,
+        );
+      }
+    }
+  }
+  expect(lowered).toEqual([]);
+});
+
+test('the config scan finds the shape it is looking for', () => {
+  // A tripwire on the pattern: it has to see both the legitimate no-pg raise and
+  // the pg lowering, or the case above passes because the regex matched nothing.
+  expect(packageConfigs().length).toBeGreaterThan(8);
+  const seen = packageConfigs().some(config =>
+    /mergeConfig\(\s*configForNoPg\([^)]*\)\s*,\s*\{[^}]*testTimeout:/u.test(
+      readFileSync(config, 'utf8'),
+    ),
+  );
+  expect(seen).toBe(true);
+});
+
 test('the granted budget is a real one', () => {
   // A tripwire on the comparison itself: were the grant zero or missing, every
   // literal would clear it and the case above would pass vacuously.

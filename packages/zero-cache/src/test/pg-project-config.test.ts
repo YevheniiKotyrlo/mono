@@ -1,6 +1,6 @@
 import {readFileSync} from 'node:fs';
 import {readdirSync} from 'node:fs';
-import {dirname, join} from 'node:path';
+import {dirname, join, relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {expect, test} from 'vitest';
 import {
@@ -59,6 +59,46 @@ const configs = pgProjectConfigs();
 test('the pg projects are discovered at all', () => {
   // Otherwise the case below passes over an empty list and proves nothing.
   expect(configs.length).toBeGreaterThan(4);
+});
+
+test("a package's own config covers every major it has a config file for", () => {
+  // Two discovery paths, and they can disagree. The repo root walks the tree and
+  // picks up every `vitest.config.pg-<major>.ts`, so a major with a config file is
+  // live in a root run. A package's own `vitest.config.ts` lists its projects by
+  // hand, and a major missing from that list is simply absent when the package's
+  // own tests are run.
+  //
+  // Nothing fails when they diverge, which is the problem: `pnpm test` inside the
+  // package passes while covering less than CI does, and the difference is exactly
+  // the newest major — the one most likely to have something to say.
+  const missing: string[] = [];
+  for (const config of configs) {
+    const major = Number(/pg-(\d+)\.ts$/u.exec(config)?.[1]);
+    const own = join(dirname(config), 'vitest.config.ts');
+    let source: string;
+    try {
+      source = readFileSync(own, 'utf8');
+    } catch {
+      // No hand-written list to disagree with: the file IS the declaration.
+      continue;
+    }
+    // A glob over the config files cannot drift — a new major joins by existing,
+    // which is the shape most packages here use and the one worth preferring.
+    if (/projects:\s*\[\s*'vitest\.config\.\*\.ts'/u.test(source)) {
+      continue;
+    }
+    // Otherwise the list is by hand: either built by version or named directly.
+    if (
+      !source.includes(`configForVersion(${major}`) &&
+      !source.includes(`pg-${major}`)
+    ) {
+      missing.push(
+        `${relative(REPO_ROOT, own).replaceAll('\\', '/')} omits pg-${major}, ` +
+          `which ${relative(REPO_ROOT, config).replaceAll('\\', '/')} defines`,
+      );
+    }
+  }
+  expect(missing).toEqual([]);
 });
 
 test('every pg project builds on the shared defaults', () => {
