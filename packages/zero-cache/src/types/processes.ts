@@ -25,6 +25,13 @@ export const MESSAGE_TYPES = {
   ready: 'ready',
   backupWatermarkRequest: 'backupWatermarkRequest',
   backupWatermarkResponse: 'backupWatermarkResponse',
+  // A request to shut down gracefully, for callers that cannot send a signal.
+  // Windows has no SIGTERM: Node does not deliver it to a process, and
+  // `child.kill('SIGTERM')` there terminates the child outright — so a parent
+  // killed that way never drains and never propagates to its own workers, which
+  // are left running. This carries the same intent over the channel the parent
+  // already has.
+  shutdown: 'shutdown',
 } as const;
 
 export type Message<Payload> = [keyof typeof MESSAGE_TYPES, Payload];

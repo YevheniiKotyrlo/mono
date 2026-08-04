@@ -29,8 +29,10 @@ import {
   exitAfter,
   INTENTIONAL_SHUTDOWN_ERROR_CODE,
   ProcessManager,
+  SHUTDOWN_MESSAGE,
   recordStartupDurationMs,
   runUntilKilled,
+  shutdownRequested,
   type WorkerType,
 } from '../services/life-cycle.ts';
 import type {SingletonService} from '../services/service.ts';
@@ -85,7 +87,15 @@ describe('shutdown', () => {
 
     processes.addWorker(parentPort, type, id);
 
-    void runUntilKilled(lc, childPort, worker).then(
+    // Armed exactly where a real worker arms it — before anything that could
+    // block — so this harness exercises the same single-arming-point arrangement
+    // production uses rather than a shape only the test has.
+    void runUntilKilled(
+      lc,
+      childPort,
+      shutdownRequested(childPort),
+      worker,
+    ).then(
       () => parentPort.emit('close', 0),
       () => parentPort.emit('close', -1),
     );
@@ -165,6 +175,145 @@ describe('shutdown', () => {
       ]);
     },
   );
+
+  test('a drained shutdown does not exit before its supporting workers stop', async () => {
+    // The replicator is a supporting worker and it holds the replica file open.
+    // Exiting while it runs lets a caller that sees this process close still race
+    // it — invisible on POSIX, where unlink-while-open is legal, and a failure on
+    // Windows, which refuses to unlink a file somebody has open.
+    const exited = resolver<number>();
+    proc.on('exit', code => exited.resolve(code));
+
+    proc.emit('message', [...SHUTDOWN_MESSAGE]);
+
+    await syncer1.draining.promise;
+    await syncer2.draining.promise;
+    syncer1.finishDrain.resolve();
+    syncer2.finishDrain.resolve();
+
+    await changeStreamer.draining.promise;
+    await replicator.draining.promise;
+    expect(
+      await Promise.race([
+        exited.promise.then(() => 'exited'),
+        new Promise(resolve => setTimeout(resolve, 250, 'still running')),
+      ]),
+    ).toBe('still running');
+
+    changeStreamer.finishDrain.resolve();
+    replicator.finishDrain.resolve();
+
+    expect(await exited.promise).toBe(0);
+    // Stopped, not merely asked.
+    expect(events.filter(e => e === 'stop supporting')).toHaveLength(2);
+  });
+
+  test('a supporting worker that never stops does not hold the process forever', async () => {
+    // A wait without a bound is worse than giving up: a container runtime would
+    // kill the process mid-shutdown for exceeding its grace period.
+    vi.useFakeTimers();
+    try {
+      const exited = resolver<number>();
+      proc.on('exit', code => exited.resolve(code));
+
+      proc.emit('message', [...SHUTDOWN_MESSAGE]);
+
+      await syncer1.draining.promise;
+      await syncer2.draining.promise;
+      syncer1.finishDrain.resolve();
+      syncer2.finishDrain.resolve();
+
+      await changeStreamer.draining.promise;
+      await replicator.draining.promise;
+      // Neither supporting worker ever finishes draining.
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await exited.promise).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('how it exits is decided when it is built, not when it exits', async () => {
+    // Because the exit can now happen a tick after the drain rather than inside
+    // it, and anything may have changed the environment by then. Re-reading the
+    // mode at exit turned an in-process exit into `process.exit()` — which, in a
+    // test runner, kills the worker running the suite.
+    const exited = resolver<number>();
+    const built = new EventEmitter();
+    built.on('exit', code => exited.resolve(code));
+    new ProcessManager(lc, built);
+
+    delete process.env['SINGLE_PROCESS'];
+    built.emit('message', [...SHUTDOWN_MESSAGE]);
+
+    // Reaches the emitter it was built with rather than the real process.
+    expect(await exited.promise).toBe(0);
+  });
+
+  test('a shutdown request over IPC drains exactly like SIGTERM', async () => {
+    // The only way to ask on Windows, where Node delivers no SIGTERM and a
+    // `kill()` terminates the process outright — running none of this and leaving
+    // these workers behind. The drain must be identical, so this asserts the same
+    // sequence the signal cases above do.
+    proc.emit('message', [...SHUTDOWN_MESSAGE]);
+
+    await syncer1.draining.promise;
+    await syncer2.draining.promise;
+    syncer1.finishDrain.resolve();
+    syncer2.finishDrain.resolve();
+
+    await changeStreamer.draining.promise;
+    await replicator.draining.promise;
+    changeStreamer.finishDrain.resolve();
+    replicator.finishDrain.resolve();
+
+    await Promise.all(all.map(w => w.stopped.promise));
+
+    expect(events).toEqual([
+      'drain user-facing',
+      'drain user-facing',
+      'stop user-facing',
+      'stop user-facing',
+      'drain supporting',
+      'drain supporting',
+      'stop supporting',
+      'stop supporting',
+    ]);
+  });
+
+  test('a shutdown request before any worker starts exits cleanly', async () => {
+    const {promise: exitCode, resolve} = resolver<number>();
+    proc = new EventEmitter();
+    proc.on('exit', resolve);
+
+    new ProcessManager(lc, proc);
+    proc.emit('message', [...SHUTDOWN_MESSAGE]);
+    expect(await exitCode).toBe(0);
+  });
+
+  test.each([
+    ['a different message type', ['ready', {ready: true}]],
+    ['a bare string', 'shutdown'],
+    ['the type without a payload', ['shutdown']],
+    ['null', null],
+  ])('%s does not drain', async (_name, message) => {
+    // The channel carries other traffic, so recognising a shutdown too loosely
+    // would turn an ordinary message into an outage.
+    proc.emit('message', message);
+    await Promise.resolve();
+
+    expect(events).toEqual([]);
+
+    // And the drain has not merely emitted nothing — it has not been entered.
+    // Racing against an already-resolved sentinel is how to observe that a
+    // promise is still pending; `Promise.race` settles on the first of the two,
+    // so the sentinel wins only while the drain has not.
+    const pending = Symbol('pending');
+    expect(
+      await Promise.race([syncer1.draining.promise, Promise.resolve(pending)]),
+    ).toBe(pending);
+  });
 
   test.each([['SIGTERM'], ['SIGINT']])(
     'error during graceful shutdown: %s',
@@ -374,5 +523,116 @@ describe('exitAfter', () => {
     flushDone.resolve();
     await expect(exiting).rejects.toMatchObject({code: -1});
     expect(exit).toHaveBeenCalledWith(-1);
+  });
+});
+
+describe('shutdownRequested', () => {
+  // These cover the window `runUntilKilled` cannot: it takes services, so it can
+  // only be called once they exist, and a worker whose startup blocks has not got
+  // there yet. Every other shutdown test in this file installs its listener before
+  // anything blocks, which is exactly why none of them would notice this gap.
+
+  test('aborts on a request arriving before any service exists', () => {
+    const parent = new EventEmitter();
+    const signal = shutdownRequested(parent);
+    expect(signal.aborted).toBe(false);
+
+    parent.emit('message', [...SHUTDOWN_MESSAGE]);
+    expect(signal.aborted).toBe(true);
+  });
+
+  test('aborts on a signal too, since that is the operator-facing contract', () => {
+    const parent = new EventEmitter();
+    const signal = shutdownRequested(parent);
+
+    parent.emit('SIGTERM');
+    expect(signal.aborted).toBe(true);
+  });
+
+  test('ignores messages that are not shutdown requests', () => {
+    const parent = new EventEmitter();
+    const signal = shutdownRequested(parent);
+
+    parent.emit('message', ['ready', {ready: true}]);
+    parent.emit('message', ['shutdown']); // wrong arity
+    parent.emit('message', 'shutdown'); // not an array
+    expect(signal.aborted).toBe(false);
+  });
+
+  test('unblocks work waiting on it, rather than only recording the request', async () => {
+    // The failure this pins is not "the request was missed" — Node holds an IPC
+    // message until a listener appears, so it does arrive. It is that nothing
+    // waiting had any reason to stop waiting, so the worker ran on holding its
+    // files while the manager gave up on it.
+    const parent = new EventEmitter();
+    const signal = shutdownRequested(parent);
+
+    const {promise: blocked, resolve} = resolver<'aborted' | 'finished'>();
+    signal.addEventListener('abort', () => resolve('aborted'), {once: true});
+
+    parent.emit('message', [...SHUTDOWN_MESSAGE]);
+    expect(await blocked).toBe('aborted');
+  });
+
+  test('a request arriving during startup still stops the services', async () => {
+    // The window between arming and having services to stop. It is the one the
+    // first version of this reopened: arming early consumes the queued IPC message,
+    // Node delivers it to that listener and to no other, so a listener installed
+    // alongside the services would never see it and the request would be recorded
+    // and then dropped. Which is why the signal is passed in rather than installed
+    // there — this asserts the request survives the gap.
+    const parent = new EventEmitter();
+    const shutdown = shutdownRequested(parent);
+
+    parent.emit('message', [...SHUTDOWN_MESSAGE]); // mid-startup
+    expect(shutdown.aborted).toBe(true);
+
+    // Shaped like the service that actually takes this branch, because a
+    // forgiving fixture hid a crash here: the replicator's `run()` never
+    // resolves, and its `stop()` awaits the promise `run()` assigns — so a
+    // `stop()` called first reads `undefined`, resumes immediately, and races
+    // the `run()` that follows.
+    let running: Promise<void> | undefined;
+    let started = false;
+    const service = {
+      id: 'startup-window',
+      run: () => {
+        started = true;
+        running = new Promise<void>(() => {}); // never resolves
+        return running;
+      },
+      stop: async () => {
+        await running;
+        if (started) {
+          throw new Error('stop() raced its own run()');
+        }
+      },
+    };
+
+    // Returns rather than rejecting: nothing was started, so nothing is stopped.
+    // A version that stopped an unstarted service would reject here, and in
+    // production that rejection is discarded and exits the worker 13.
+    await runUntilKilled(createSilentLogContext(), parent, shutdown, service);
+    expect(started).toBe(false);
+  });
+
+  test('a request arriving while running still stops the services', () => {
+    // The other side of the same branch: once `run()` has been called, the
+    // request has to reach `stop()`.
+    const parent = new EventEmitter();
+    const shutdown = shutdownRequested(parent);
+
+    const stopped = resolver<void>();
+    void runUntilKilled(createSilentLogContext(), parent, shutdown, {
+      id: 'running',
+      run: () => new Promise<void>(() => {}),
+      stop: () => {
+        stopped.resolve();
+        return promiseVoid;
+      },
+    });
+
+    parent.emit('message', [...SHUTDOWN_MESSAGE]);
+    return stopped.promise;
   });
 });

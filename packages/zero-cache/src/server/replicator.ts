@@ -16,7 +16,11 @@ import {initEventSink} from '../observability/events.ts';
 import {getOrCreateGauge} from '../observability/metrics.ts';
 import {ChangeStreamerHttpClient} from '../services/change-streamer/change-streamer-http.ts';
 import {reserveAndGetSnapshotStatus} from '../services/change-streamer/snapshot.ts';
-import {exitAfter, runUntilKilled} from '../services/life-cycle.ts';
+import {
+  exitAfter,
+  runUntilKilled,
+  shutdownRequested,
+} from '../services/life-cycle.ts';
 import {
   tryRestore,
   type RestoreResult,
@@ -75,11 +79,20 @@ export default async function runWorker(
     });
   initEventSink(lc, config);
 
+  // Armed before the restore, not after it: the restore is the one part of
+  // startup with no bound, so it is the part that has to be interruptible.
+  const shutdown = shutdownRequested(parent);
+
   if (
     fileMode === 'serving' &&
     (config.litestream.executable || config.litestream.executableV5)
   ) {
-    await restoreReplica(lc, config);
+    if (!(await restoreReplica(lc, config, shutdown))) {
+      // Asked to stop mid-restore. There is nothing to drain — no replica is open
+      // and no service has started — so returning is the whole shutdown.
+      lc.info?.('shutdown requested while restoring the replica');
+      return;
+    }
   }
 
   const {file: dbPath, walMode} = await setupReplica(
@@ -138,7 +151,10 @@ export default async function runWorker(
 
   setUpMessageHandlers(lc, replicator, parent);
 
-  const running = runUntilKilled(lc, parent, replicator);
+  // The signal armed before the restore, not a fresh one: a request that arrived
+  // during startup is already recorded in it, and this is the first point at which
+  // there is a service to hand it to.
+  const running = runUntilKilled(lc, parent, shutdown, replicator);
 
   // Signal readiness once the first ReplicaVersionReady notification is received.
   for await (const _ of replicator.subscribe()) {
@@ -207,13 +223,33 @@ const RETRY_INTERVAL_MS = 3000;
 // replica. The platform's startup probe budget (which scales with replica
 // size) is the backstop, so restoreReplica must not impose its own shorter
 // cap and self-terminate while the backup is still being produced.
-async function restoreReplica(lc: LogContext, config: NormalizedZeroConfig) {
+//
+// Unbounded is not the same as uninterruptible, though. `shutdown` ends the WAITING
+// early when the manager asks the worker to stop — the reservation and the retry
+// sleep both race it. A restore attempt already in flight is not interrupted:
+// litestream runs as a subprocess, so the request is acted on when that attempt
+// returns, which bounds the delay by one attempt rather than by the whole loop.
+//
+// @returns whether the replica was restored; `false` means shutdown was
+//     requested first, and no replica was opened.
+async function restoreReplica(
+  lc: LogContext,
+  config: NormalizedZeroConfig,
+  shutdown: AbortSignal,
+): Promise<boolean> {
   const start = performance.now();
   let backupURL: string | undefined;
   let result: RestoreResult | undefined;
   try {
-    for (;;) {
-      const snapshotStatus = await reserveAndGetSnapshotStatus(lc, config);
+    while (!shutdown.aborted) {
+      const snapshotStatus = await reserveAndGetSnapshotStatus(
+        lc,
+        config,
+        shutdown,
+      );
+      if (snapshotStatus === undefined) {
+        break; // asked to stop while waiting to reserve
+      }
       // The backupURL comes from the replication-manager's snapshot response.
       ({backupURL} = snapshotStatus);
       const litestream: LitestreamConfig = {...config.litestream, backupURL};
@@ -226,20 +262,29 @@ async function restoreReplica(lc: LogContext, config: NormalizedZeroConfig) {
       );
       if (attempt.restored) {
         result = attempt.result;
-        return;
+        return true;
       }
       lc.info?.(
         `replica not found. retrying in ${RETRY_INTERVAL_MS / 1000} seconds`,
       );
-      await sleep(RETRY_INTERVAL_MS);
+      // Swallowed rather than propagated: an abort here is the requested
+      // shutdown, not a failure, and the loop condition is what acts on it.
+      await sleep(RETRY_INTERVAL_MS, shutdown).catch(() => {});
     }
+    return false;
   } finally {
     const attrs = litestreamRestoreMetricAttrs(
       config.litestream,
       'view_syncer',
       backupURL,
     );
-    const labels = {...attrs, result: result ?? 'error'};
+    // A shutdown is neither a success nor a failure. Reporting it as 'error'
+    // would make the restore-failure metric fire on every rolling restart that
+    // catches a view-syncer mid-restore.
+    const labels = {
+      ...attrs,
+      result: result ?? (shutdown.aborted ? 'shutdown' : 'error'),
+    };
     litestreamRestoreRuns().add(1, labels);
     litestreamRestoreDuration().recordMs(performance.now() - start, labels);
   }

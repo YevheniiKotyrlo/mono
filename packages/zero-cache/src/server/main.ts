@@ -11,6 +11,7 @@ import {
   ProcessManager,
   recordStartupDurationMs,
   runUntilKilled,
+  shutdownRequested,
   type WorkerType,
 } from '../services/life-cycle.ts';
 import {
@@ -187,6 +188,7 @@ export default async function runWorker(
     await runUntilKilled(
       lc,
       parent,
+      shutdownRequested(parent),
       new WorkerDispatcher(
         lc,
         taskID,

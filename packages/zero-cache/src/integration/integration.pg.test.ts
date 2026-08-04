@@ -26,6 +26,7 @@ import {
   changeSourceUpstreamSchema,
   type ChangeSourceUpstream,
 } from '../services/change-source/protocol/current/upstream.ts';
+import {SHUTDOWN_MESSAGE} from '../services/life-cycle.ts';
 import {getConnectionURI, test, type PgTest} from '../test/db.ts';
 import {DbFile} from '../test/lite.ts';
 import type {PostgresDB} from '../types/pg.ts';
@@ -415,7 +416,7 @@ const INITIAL_CUSTOM_SETUP: ChangeStreamMessage[] = [
   ['commit', {tag: 'commit'}, {watermark: '101'}],
 ];
 
-describe('integration', {timeout: 30000}, () => {
+describe('integration', () => {
   let upDB: PostgresDB;
   let cvrDB: PostgresDB;
   let changeDB: PostgresDB;
@@ -498,15 +499,15 @@ describe('integration', {timeout: 30000}, () => {
 
     return async () => {
       try {
-        zeros.forEach(zero => zero.kill('SIGTERM')); // initiate and await graceful shutdown
+        zeros.forEach(requestGracefulShutdown); // initiate and await graceful shutdown
         (await Promise.all(zerosExited)).forEach(code => expect(code).toBe(0));
       } finally {
         await testDBs.drop(upDB, cvrDB, changeDB);
-        replicaDbFile.delete();
-        replicaDbFile2.delete();
+        await replicaDbFile.delete();
+        await replicaDbFile2.delete();
       }
     };
-  }, 30000);
+  });
 
   const FOO_QUERY: AST = {
     table: 'foo',
@@ -533,6 +534,19 @@ describe('integration', {timeout: 30000}, () => {
 
   // One or two zero-caches (i.e. multi-node)
   type Envs = [NodeJS.ProcessEnv] | [NodeJS.ProcessEnv, NodeJS.ProcessEnv];
+
+  /**
+   * Asks a zero-cache to drain and exit, the way the running platform allows.
+   *
+   * Over IPC rather than by signal, because a signal is not portable: Node does
+   * not deliver them to processes on Windows, where `kill('SIGTERM')` terminates
+   * the process outright — running none of its shutdown and leaving its workers
+   * holding the replica file. The same request works everywhere, so this exercises
+   * one path rather than one per platform.
+   */
+  function requestGracefulShutdown(zero: Worker) {
+    zero.send([...SHUTDOWN_MESSAGE]);
+  }
 
   async function startZero(envs: Envs) {
     assert(zeros.length === 0, 'Expected zeros to be empty before starting');

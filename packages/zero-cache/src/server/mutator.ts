@@ -2,7 +2,11 @@ import {consoleLogSink, LogContext} from '@rocicorp/logger';
 import {must} from '../../../shared/src/must.ts';
 import {getNormalizedZeroConfig} from '../config/zero-config.ts';
 import {initEventSink} from '../observability/events.ts';
-import {exitAfter, runUntilKilled} from '../services/life-cycle.ts';
+import {
+  exitAfter,
+  runUntilKilled,
+  shutdownRequested,
+} from '../services/life-cycle.ts';
 import {
   parentWorker,
   singleProcessMode,
@@ -26,7 +30,7 @@ function runWorker(
   initEventSink(lc, config);
 
   // TODO: create `PusherFactory`
-  return runUntilKilled(lc, parent, new Mutator());
+  return runUntilKilled(lc, parent, shutdownRequested(parent), new Mutator());
 }
 
 if (!singleProcessMode()) {
