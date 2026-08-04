@@ -1,5 +1,7 @@
 import * as childProcess from 'node:child_process';
+import {EventEmitter} from 'node:events';
 import {
+  copyFileSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -8,8 +10,10 @@ import {
 } from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {PassThrough} from 'node:stream';
 import {LogContext} from '@rocicorp/logger';
 import {afterEach, describe, expect, test, vi} from 'vitest';
+import {unreachable} from '../../../../shared/src/asserts.ts';
 import {
   createSilentLogContext,
   TestLogSink,
@@ -28,24 +32,138 @@ import {
 import * as litestreamMetrics from './metrics.ts';
 
 // Wrap (don't replace) node:child_process.spawn so tests can assert the args it
-// was called with while it still spawns the fake litestream executable. Node's
-// built-in module exports are non-configurable, so vi.spyOn cannot be used here.
+// was called with. Node's built-in module exports are non-configurable, so
+// vi.spyOn cannot be used here.
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof childProcess>();
   return {...actual, spawn: vi.fn(actual.spawn)};
 });
 
-// Writes a fake `litestream` executable that emits `sh` (a POSIX shell
-// snippet that can branch on `$1`, the litestream subcommand) and returns the
-// config pointing at it.
+/**
+ * What the fake `litestream` does, by subcommand.
+ *
+ * Declared rather than scripted: the child is faked, not the executable. What
+ * these suites cover is the output parsing, the exit-code handling and the
+ * timeout-and-kill path, none of which needs a real process — and a scripted
+ * fake would need one that the host can execute, which a `#!/bin/sh` file is
+ * not everywhere.
+ */
+type FakeLitestream =
+  | {kind: 'listing'; snapshots: readonly string[]; wal: readonly string[]}
+  | {kind: 'exit'; code: number}
+  | {kind: 'hang'}
+  | {kind: 'restore'; copyFrom?: string};
+
+/**
+ * Stands in for a spawned `litestream`, implementing only what the production
+ * code consumes: encoded stdout/stderr, `error`/`close`, and `kill`.
+ */
+function fakeChild(
+  behaviour: FakeLitestream,
+  args: readonly string[],
+  options: {stdio?: unknown} = {},
+) {
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: PassThrough | null;
+    stderr: PassThrough | null;
+    kill: ReturnType<typeof vi.fn>;
+  };
+
+  // Only piped slots get a stream, exactly as a real child does. That keeps the
+  // implicit guard a real child provides: reverting the production
+  // spawn to `stdio: 'inherit'` leaves stdout/stderr null and the code that
+  // reads them fails, rather than quietly losing INC-961's protection.
+  const stdio = Array.isArray(options.stdio) ? options.stdio : [];
+  child.stdout = stdio[1] === 'pipe' ? new PassThrough() : null;
+  child.stderr = stdio[2] === 'pipe' ? new PassThrough() : null;
+
+  let done = false;
+  const close = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (done) {
+      return;
+    }
+    done = true;
+    child.stdout?.end();
+    child.stderr?.end();
+    child.emit('close', code, signal);
+  };
+  // A vi.fn so the timeout test can assert the process was actually killed —
+  // the production code rejects before killing, so nothing else observes it.
+  child.kill = vi.fn((signal?: NodeJS.Signals) => {
+    close(null, signal ?? 'SIGKILL');
+    return true;
+  });
+
+  const subcommand = args[0];
+  setImmediate(() => {
+    // A late fire after teardown must not throw out of the immediate: an
+    // uncaught exception there is attributed to the file, not the test, and
+    // fails every case in it.
+    if (done) {
+      return;
+    }
+    switch (behaviour.kind) {
+      case 'listing': {
+        const rows =
+          subcommand === 'snapshots' ? behaviour.snapshots : behaviour.wal;
+        child.stdout?.write(`${rows.join('\n')}\n`);
+        close(0, null);
+        break;
+      }
+      case 'exit':
+        close(behaviour.code, null);
+        break;
+      case 'restore':
+        if (subcommand === 'restore') {
+          if (behaviour.copyFrom !== undefined) {
+            // The restore target is the trailing argument — the only one that is
+            // neither a flag nor a flag's value — so this survives another flag
+            // being added ahead of it, which an index would not.
+            copyFileSync(behaviour.copyFrom, must(args.at(-1)));
+          }
+          close(0, null);
+        } else {
+          close(1, null);
+        }
+        break;
+      case 'hang':
+        // Never closes on its own: the production timeout must kill it.
+        break;
+      default:
+        // A new variant with no arm here would emit no `close`, which is
+        // byte-for-byte how `hang` behaves — so the test would time out and read
+        // as deliberate. This makes it a compile error instead.
+        unreachable(behaviour);
+    }
+  });
+  return child as unknown as childProcess.ChildProcess;
+}
+
+/**
+ * Points the config at a `litestream` path that is never executed, and makes
+ * `spawn` return a fake child driven by `behaviour`.
+ */
 function configWithFakeLitestream(
-  sh: string,
+  behaviour: FakeLitestream,
   replicaFile?: string,
   litestreamOverrides?: Record<string, unknown>,
 ): NormalizedZeroConfig {
-  const dir = mkdtempSync(join(tmpdir(), 'litestream-test-'));
+  // Paths only — nothing here is created or executed. The child is faked, so the
+  // executable is never resolved and a replica file is never opened; a real temp
+  // directory would just be created and left behind on every call.
+  const dir = join(tmpdir(), 'litestream-test-fake');
   const executable = join(dir, 'fake-litestream');
-  writeFileSync(executable, `#!/bin/sh\n${sh}\n`, {mode: 0o755});
+  vi.mocked(childProcess.spawn).mockReset();
+  vi.mocked(childProcess.spawn).mockImplementation(((
+    _command: string,
+    args: readonly string[],
+    options: {stdio?: unknown},
+  ) =>
+    fakeChild(
+      behaviour,
+      args,
+      options,
+    )) as unknown as typeof childProcess.spawn);
   return {
     port: 4848,
     log: {format: 'text'},
@@ -165,30 +283,38 @@ describe('litestream/commands getLastBackupTime', () => {
   const lc = createSilentLogContext();
 
   test('returns the most recent created time across snapshots and wal', async () => {
-    const {litestream, replica} = configWithFakeLitestream(
-      `if [ "$1" = "snapshots" ]; then\n` +
-        `  echo "replica generation index size created"\n` +
-        `  echo "s3 gen 0 100 2025-04-24T00:00:00Z"\n` +
-        `else\n` +
-        `  echo "replica generation index offset size created"\n` +
-        `  echo "s3 gen 1 0 100 2025-04-24T00:05:00Z"\n` +
-        `  echo "s3 gen 2 0 100 2025-04-24T00:10:00Z"\n` +
-        `fi`,
-    );
+    const {litestream, replica} = configWithFakeLitestream({
+      kind: 'listing',
+      snapshots: [
+        'replica generation index size created',
+        's3 gen 0 100 2025-04-24T00:00:00Z',
+      ],
+      wal: [
+        'replica generation index offset size created',
+        's3 gen 1 0 100 2025-04-24T00:05:00Z',
+        's3 gen 2 0 100 2025-04-24T00:10:00Z',
+      ],
+    });
     expect(await getLastBackupTime(lc, litestream, replica.file)).toEqual(
       new Date('2025-04-24T00:10:00Z'),
     );
   });
 
   test('rejects when nothing is listed at the destination', async () => {
-    const {litestream, replica} = configWithFakeLitestream(`exit 0`);
+    const {litestream, replica} = configWithFakeLitestream({
+      kind: 'exit',
+      code: 0,
+    });
     await expect(
       getLastBackupTime(lc, litestream, replica.file),
     ).rejects.toThrow(/no snapshots or WAL segments listed/);
   });
 
   test('rejects when the litestream process exits non-zero', async () => {
-    const {litestream, replica} = configWithFakeLitestream(`exit 1`);
+    const {litestream, replica} = configWithFakeLitestream({
+      kind: 'exit',
+      code: 1,
+    });
     await expect(
       getLastBackupTime(lc, litestream, replica.file),
     ).rejects.toThrow(/litestream (snapshots|wal) exited with code 1/);
@@ -196,7 +322,7 @@ describe('litestream/commands getLastBackupTime', () => {
 
   test('rejects (and kills the process) when listing times out', async () => {
     vi.useFakeTimers();
-    const {litestream, replica} = configWithFakeLitestream(`sleep 30`);
+    const {litestream, replica} = configWithFakeLitestream({kind: 'hang'});
     const result = getLastBackupTime(lc, litestream, replica.file);
     // Surface the rejection synchronously so the unhandled-rejection guard
     // does not fire before we await it below.
@@ -210,6 +336,23 @@ describe('litestream/commands getLastBackupTime', () => {
     expect(String(outcome.ok === false && outcome.e)).toMatch(
       /timed out listing backup state/,
     );
+
+    // The rejection alone does not prove the process was killed: the production
+    // code rejects first and kills after, so deleting the kill would leave the
+    // assertion above green and leak a process per timeout.
+    // Every child, not just the last: the listing runs two subcommands
+    // concurrently and both hang, so both have to be killed. Asserting one left
+    // the other's leak invisible, and which one `at(-1)` returned depended on the
+    // order `Promise.all` happened to evaluate its arguments in.
+    const {results} = vi.mocked(childProcess.spawn).mock;
+    expect(results.length).toBeGreaterThan(0);
+    for (const result of results) {
+      // Checked rather than cast: a spawn that threw carries the error here, and
+      // reading `.kill` off it would fail as "not a spy" rather than saying so.
+      expect(result.type).toBe('return');
+      const child = result.value as {kill: ReturnType<typeof vi.fn>};
+      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    }
   });
 });
 
@@ -231,14 +374,10 @@ describe('litestream/commands restoreReplica', () => {
     } as unknown as ReturnType<
       typeof litestreamMetrics.litestreamRestoredDbBytes
     >);
-    const {litestream} = configWithFakeLitestream(
-      `if [ "$1" = "restore" ]; then\n` +
-        `  cp "${source}" "$6"\n` +
-        `  exit 0\n` +
-        `fi\n` +
-        `exit 1`,
-      replica,
-    );
+    const {litestream} = configWithFakeLitestream({
+      kind: 'restore',
+      copyFrom: source,
+    });
 
     await tryRestore(
       lc,
@@ -268,14 +407,10 @@ describe('litestream/commands restoreReplica', () => {
     const staleLog = changeLogFileName(replica);
     writeFileSync(staleLog, '');
     writeFileSync(`${staleLog}-wal2`, '');
-    const {litestream} = configWithFakeLitestream(
-      `if [ "$1" = "restore" ]; then\n` +
-        `  cp "${source}" "$6"\n` +
-        `  exit 0\n` +
-        `fi\n` +
-        `exit 1`,
-      replica,
-    );
+    const {litestream} = configWithFakeLitestream({
+      kind: 'restore',
+      copyFrom: source,
+    });
 
     expect(
       await tryRestore(
@@ -302,10 +437,7 @@ describe('litestream/commands restoreReplica', () => {
     createRestorableReplica(replica, '01');
     const log = changeLogFileName(replica);
     writeFileSync(log, '');
-    const {litestream} = configWithFakeLitestream(
-      `if [ "$1" = "restore" ]; then\n` + `  exit 0\n` + `fi\n` + `exit 1`,
-      replica,
-    );
+    const {litestream} = configWithFakeLitestream({kind: 'restore'});
 
     await tryRestore(
       lc,
@@ -328,10 +460,7 @@ describe('litestream/commands restoreReplica', () => {
     } as unknown as ReturnType<
       typeof litestreamMetrics.litestreamRestoredDbBytes
     >);
-    const {litestream} = configWithFakeLitestream(
-      `if [ "$1" = "restore" ]; then\n` + `  exit 0\n` + `fi\n` + `exit 1`,
-      replica,
-    );
+    const {litestream} = configWithFakeLitestream({kind: 'restore'});
 
     await tryRestore(
       lc,
@@ -551,14 +680,10 @@ describe('litestream/commands restoreReplica', () => {
     } as unknown as ReturnType<
       typeof litestreamMetrics.litestreamRestoreValidationDuration
     >);
-    const {litestream} = configWithFakeLitestream(
-      `if [ "$1" = "restore" ]; then\n` +
-        `  cp "${source}" "$6"\n` +
-        `  exit 0\n` +
-        `fi\n` +
-        `exit 1`,
-      replica,
-    );
+    const {litestream} = configWithFakeLitestream({
+      kind: 'restore',
+      copyFrom: source,
+    });
     writeFileSync(changeLogFileName(replica), '');
 
     expect(
@@ -599,14 +724,10 @@ describe('litestream/commands restoreReplica', () => {
     const source = join(dir, 'source.db');
     const replica = join(dir, 'replica.db');
     createRestorableReplica(source, '01');
-    const {litestream} = configWithFakeLitestream(
-      `if [ "$1" = "restore" ]; then\n` +
-        `  cp "${source}" "$6"\n` +
-        `  exit 0\n` +
-        `fi\n` +
-        `exit 1`,
-      replica,
-    );
+    const {litestream} = configWithFakeLitestream({
+      kind: 'restore',
+      copyFrom: source,
+    });
 
     await tryRestore(
       lc,
@@ -687,7 +808,10 @@ describe('litestream/commands restoreReplica', () => {
       mkdtempSync(join(tmpdir(), 'litestream-config-test-')),
       'replica.db',
     );
-    const {litestream} = configWithFakeLitestream('exit 0', replica);
+    const {litestream} = configWithFakeLitestream(
+      {kind: 'exit', code: 0},
+      replica,
+    );
     // The variables `getLitestream` substitutes into the config it hands
     // litestream; `ZERO_REPLICA_FILE` is always the replica, never a path
     // derived from it.
