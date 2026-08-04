@@ -63,6 +63,14 @@ export type ReserveSnapshot = (
 export function reserveAndGetSnapshotStatus(
   lc: LogContext,
   config: NormalizedZeroConfig,
+  // Aborts the retry loop, alongside the signals below rather than instead of
+  // them: signals stay the external contract, but a worker that cannot be sent
+  // one is asked to stop over the IPC channel it already has. This loop is
+  // otherwise unbounded — it retries until a compatible replication-manager
+  // appears, which on a fresh stack is many minutes.
+  //
+  // Ahead of the test seam so a production caller never has to name one.
+  shutdown?: AbortSignal,
   reserve: ReserveSnapshot = reserveSnapshot, // for testing
 ): Promise<SnapshotStatus> {
   const {promise: status, resolve, reject} = resolver<SnapshotStatus>();
@@ -73,6 +81,10 @@ export function reserveAndGetSnapshotStatus(
     const onSignal = () => abort.abort();
     process.on('SIGINT', onSignal);
     process.on('SIGTERM', onSignal);
+    if (shutdown?.aborted) {
+      abort.abort();
+    }
+    shutdown?.addEventListener('abort', onSignal, {once: true});
 
     try {
       for (let i = 0; ; i++) {
@@ -132,6 +144,7 @@ export function reserveAndGetSnapshotStatus(
       // loop), so the signal handlers must not outlive the reservation.
       process.off('SIGINT', onSignal);
       process.off('SIGTERM', onSignal);
+      shutdown?.removeEventListener('abort', onSignal);
     }
   })();
 

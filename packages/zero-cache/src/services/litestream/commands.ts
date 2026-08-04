@@ -39,6 +39,10 @@ export type RestoreResult =
   | 'success'
   | 'no_backup'
   | 'invalid_replica'
+  // Asked to stop before the restore finished. Distinct from 'error' because a
+  // rolling restart catching a view-syncer mid-restore is routine, and folding it
+  // into the error label makes the restore-failure metric report every deploy.
+  | 'shutdown'
   | 'error';
 
 type RestoreAttempt = {
