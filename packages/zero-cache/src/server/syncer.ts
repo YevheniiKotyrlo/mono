@@ -17,7 +17,11 @@ import {CustomQueryTransformer} from '../custom-queries/transform-query.ts';
 import {registerSQLiteCorruptionDiagnosticTarget} from '../db/sqlite-corruption.ts';
 import {warmupConnections} from '../db/warmup.ts';
 import {initEventSink} from '../observability/events.ts';
-import {exitAfter, runUntilKilled} from '../services/life-cycle.ts';
+import {
+  exitAfter,
+  runUntilKilled,
+  shutdownRequested,
+} from '../services/life-cycle.ts';
 import {MutagenService} from '../services/mutagen/mutagen.ts';
 import {PusherService} from '../services/mutagen/pusher.ts';
 import type {ReplicaState} from '../services/replicator/replicator.ts';
@@ -285,7 +289,7 @@ export default async function runWorker(
 
   void dbWarmup.then(() => parent.send(['ready', {ready: true}]));
 
-  return runUntilKilled(lc, parent, syncer);
+  return runUntilKilled(lc, parent, shutdownRequested(parent), syncer);
 }
 
 // fork()

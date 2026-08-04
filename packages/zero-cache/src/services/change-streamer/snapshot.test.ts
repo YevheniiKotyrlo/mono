@@ -58,7 +58,7 @@ describe('change-streamer/snapshot', () => {
       .mockRejectedValueOnce(new Error('not yet'))
       .mockResolvedValueOnce(stream);
 
-    const result = reserveAndGetSnapshotStatus(lc, config, reserve);
+    const result = reserveAndGetSnapshotStatus(lc, config, undefined, reserve);
     // The listeners are registered while the reservation is in progress...
     expectListenersAdded(1);
 
@@ -85,7 +85,7 @@ describe('change-streamer/snapshot', () => {
       .mockRejectedValue(new Error('not yet'));
 
     const sigtermListeners = new Set(process.listeners('SIGTERM'));
-    const result = reserveAndGetSnapshotStatus(lc, config, reserve);
+    const result = reserveAndGetSnapshotStatus(lc, config, undefined, reserve);
     // Attach a rejection handler immediately to prevent unhandledRejections.
     result.catch(() => {});
     await vi.advanceTimersByTimeAsync(1000);
@@ -104,7 +104,7 @@ describe('change-streamer/snapshot', () => {
       .mockReturnValue(reservation.promise);
 
     const sigtermListeners = new Set(process.listeners('SIGTERM'));
-    const result = reserveAndGetSnapshotStatus(lc, config, reserve);
+    const result = reserveAndGetSnapshotStatus(lc, config, undefined, reserve);
     result.catch(() => {});
     await vi.advanceTimersByTimeAsync(0);
     expectListenersAdded(1);
@@ -128,7 +128,7 @@ describe('change-streamer/snapshot', () => {
       .mockResolvedValue(stream);
 
     const sigtermListeners = new Set(process.listeners('SIGTERM'));
-    const result = reserveAndGetSnapshotStatus(lc, config, reserve);
+    const result = reserveAndGetSnapshotStatus(lc, config, undefined, reserve);
     stream.push(['status', status]);
     expect(await result).toEqual(status);
     expectListenersAdded(1);
