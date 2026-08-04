@@ -683,7 +683,13 @@ type BenchDBs = {
 
 function setupDBs(c: BenchCase, testName: string): BenchDBs {
   const dbFile = new DbFile(testName);
-  cleanup.push(() => dbFile.delete());
+  // The synchronous removal, because this cleanup list is drained synchronously
+  // from `finally` blocks in sync helpers. `DbFile.delete()` returns a promise
+  // that nothing here can await, and a `() => void` slot accepts it silently —
+  // so the file would simply leak. This is the same two-policy split the helper
+  // documents: await where a foreign process may hold the file, spin where the
+  // holder is this process's own just-closed handle.
+  cleanup.push(() => deleteLiteDB(dbFile.path));
 
   const replica = new Database(lc, dbFile.path);
   replica.pragma(`journal_mode = ${REPLICA_JOURNAL_MODE}`);

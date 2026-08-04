@@ -607,7 +607,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -699,7 +699,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -783,7 +783,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 

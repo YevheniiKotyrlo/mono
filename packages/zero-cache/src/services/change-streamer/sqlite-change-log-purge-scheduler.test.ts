@@ -40,10 +40,10 @@ const LONG_AGO = 10_000_000;
 
 const files: DbFile[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   for (const file of files.splice(0)) {
     deleteChangeLogDB(file.path);
-    file.delete();
+    await file.delete();
   }
 });
 
@@ -1247,7 +1247,7 @@ describe('change-streamer/sqlite-change-log-purge-scheduler', () => {
                 files.splice(index, 1);
               }
               deleteChangeLogDB(file.path);
-              file.delete();
+              await file.delete();
             }
           },
         ),
