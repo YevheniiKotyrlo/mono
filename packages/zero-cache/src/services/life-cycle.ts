@@ -471,9 +471,10 @@ export class ProcessManager {
  * A signal that aborts when the manager asks this worker to shut down, armed
  * before the worker has any services to stop.
  *
- * {@link runUntilKilled} listens for the request, but only once there are
- * services to hand it to. That is too late for a worker whose startup itself
- * blocks: a view-syncer restoring its replica waits for the replication-manager
+ * This is the ONLY place a worker listens for the request; {@link runUntilKilled}
+ * consumes the signal rather than listening itself. Arming has to happen before
+ * startup, because a worker whose startup blocks would otherwise never reach a
+ * listener: a view-syncer restoring its replica waits for the replication-manager
  * to publish a restorable backup, which this repo documents as taking many
  * minutes. A request arriving in that window is held by the IPC channel and
  * delivered once a listener appears — but nothing in the startup path has any
@@ -546,18 +547,26 @@ export async function runUntilKilled(
     parent.once(signal, () => stopServices(signal));
   }
 
-  // Already requested, during the caller's startup. The services exist now, so
-  // this is the first moment the request can be honoured — and it must be, or a
-  // worker that was asked to stop mid-startup runs on holding its files.
+  // Already requested, during the caller's startup: return without starting
+  // anything, which IS the shutdown. Nothing has run, so there is nothing to
+  // drain and nothing holding a file — the same argument the callers make when
+  // they return early from their own startup.
+  //
+  // Not `stopServices()` here. Stopping a service that has never run is not a
+  // no-op: a service whose `stop()` waits on the promise its `run()` assigns
+  // reads `undefined`, resumes immediately, and races the `run()` this function
+  // is about to start — the replicator's stop then collides with its own
+  // startup on the write worker's single-flight slot and throws. That rejection
+  // would be discarded by the `forEach` above, surface as an unhandled
+  // rejection, and exit this worker 13, which makes the manager SIGABRT its
+  // siblings undrained. A requested shutdown must not be louder than a crash.
   if (shutdown.aborted) {
-    stopServices(GRACEFUL_SHUTDOWN[0]);
-  } else {
-    shutdown.addEventListener(
-      'abort',
-      () => stopServices(GRACEFUL_SHUTDOWN[0]),
-      {once: true},
-    );
+    lc.info?.('shutdown requested before services started; not starting them');
+    return;
   }
+  shutdown.addEventListener('abort', () => stopServices(GRACEFUL_SHUTDOWN[0]), {
+    once: true,
+  });
 
   try {
     // Run all services and resolve when any of them stops.

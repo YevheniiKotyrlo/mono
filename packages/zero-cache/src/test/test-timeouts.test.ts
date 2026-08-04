@@ -107,29 +107,39 @@ type TimeoutDeclaration = {
 /**
  * A number if the expression is statically one, else `undefined`.
  *
- * Covers what a budget is ever written as: a literal in any base, a negation, and
- * arithmetic over those (`90 * 1000`, `2 * 60 * 1000`). An identifier or a call is
- * deliberately NOT resolved — a value this cannot see is reported rather than
- * guessed, because guessing is how a matcher ends up deciding what counts as a
- * violation.
+ * Covers what a budget is ever written as: a literal in any base, a negation,
+ * arithmetic over those (`90 * 1000`, `2 * 60 * 1000`), and a file-local `const`
+ * holding any of them. A value from further away — a call, an import, a member
+ * access — is NOT resolved: it is reported rather than guessed, because guessing is
+ * how a matcher ends up deciding what counts as a violation.
  */
-function staticNumber(node: ts.Expression): number | undefined {
+function staticNumber(
+  node: ts.Expression,
+  constants: ReadonlyMap<string, number> = new Map(),
+): number | undefined {
   if (ts.isNumericLiteral(node)) {
     return Number(node.text.replaceAll('_', ''));
   }
+  // A budget named by a file-local constant is still a budget this can read, and
+  // reading it beats exempting it: `const TIMEOUT_MS = 120_000` is a RAISE, and a
+  // gate told to trust the name would go on trusting it if the value became
+  // 5_000. Fifteen sites in this repo are written that way.
+  if (ts.isIdentifier(node)) {
+    return constants.get(node.text);
+  }
   if (ts.isParenthesizedExpression(node)) {
-    return staticNumber(node.expression);
+    return staticNumber(node.expression, constants);
   }
   if (
     ts.isPrefixUnaryExpression(node) &&
     node.operator === ts.SyntaxKind.MinusToken
   ) {
-    const operand = staticNumber(node.operand);
+    const operand = staticNumber(node.operand, constants);
     return operand === undefined ? undefined : -operand;
   }
   if (ts.isBinaryExpression(node)) {
-    const left = staticNumber(node.left);
-    const right = staticNumber(node.right);
+    const left = staticNumber(node.left, constants);
+    const right = staticNumber(node.right, constants);
     if (left === undefined || right === undefined) {
       return undefined;
     }
@@ -185,6 +195,25 @@ function timeoutDeclarations(
   const lineOf = (position: number) =>
     parsed.getLineAndCharacterOfPosition(position).line + 1;
 
+  // File-scope numeric constants, so a budget named by one is read rather than
+  // reported. Only `const`, and only where the initializer is itself static.
+  const constants = new Map<string, number>();
+  for (const statement of parsed.statements) {
+    if (
+      ts.isVariableStatement(statement) &&
+      (statement.declarationList.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.initializer) {
+          const value = staticNumber(declaration.initializer);
+          if (value !== undefined) {
+            constants.set(declaration.name.text, value);
+          }
+        }
+      }
+    }
+  }
+
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
       const construct = rootIdentifier(node.expression);
@@ -204,27 +233,42 @@ function timeoutDeclarations(
                   line: lineOf(property.getStart(parsed)),
                   construct,
                   form: 'options',
-                  ms: staticNumber(property.initializer) ?? null,
+                  ms: staticNumber(property.initializer, constants) ?? null,
                   text: property.initializer.getText(parsed),
                 });
               }
             }
           }
         }
-        // A bare numeric final argument is only ever the timeout — every other
-        // position takes a name, an options object, or a function.
-        const last = node.arguments.at(-1);
+        // The trailing budget, recognised by POSITION rather than by whether its
+        // value can be read. Keying on readability would make the check its own
+        // exemption: `beforeEach(fn, HOOK_TIMEOUT_MS)` halves the CI grant and
+        // would produce no output at all, and five of the literals this gate
+        // first found were in exactly that position.
+        //
+        // Position is unambiguous when the argument before it is the BODY:
+        // `test(name, fn, T)` and `beforeEach(fn, T)` qualify. Requiring a
+        // function there rather than "anything but a number" is what separates
+        // those from `describe(name, {timeout: T}, body)`, where the last
+        // argument is a body referred to by name and no trailing budget exists.
+        //
+        // A body passed by name with a trailing budget — `test(name, fn, T)`
+        // where `fn` is an identifier — is outside this, and stated rather than
+        // silent: the two shapes are indistinguishable without resolving the
+        // name, and no test in this repo is written that way.
+        const [last, previous] = [node.arguments.at(-1), node.arguments.at(-2)];
         if (
           last !== undefined &&
+          previous !== undefined &&
           !ts.isObjectLiteralExpression(last) &&
           !ts.isFunctionLike(last) &&
-          staticNumber(last) !== undefined
+          ts.isFunctionLike(previous)
         ) {
           found.push({
             line: lineOf(last.getStart(parsed)),
             construct,
             form: 'trailing',
-            ms: staticNumber(last) ?? null,
+            ms: staticNumber(last, constants) ?? null,
             text: last.getText(parsed),
           });
         }
@@ -247,6 +291,9 @@ const files = pgTestFiles();
  * gate did that, and let a `{timeout: 30000}` through.
  */
 const granted = MAX_PG_TEST_TIMEOUT_MS;
+
+/** Repo-relative and slash-normalised, so a report reads the same on any host. */
+const rel = (file: string) => relative(REPO_ROOT, file).replaceAll('\\', '/');
 
 test('the pg test files are found at all', () => {
   // Otherwise the case below passes over an empty list and proves nothing.
@@ -288,12 +335,15 @@ test('a budget this cannot evaluate is reported, not skipped', () => {
   // surfaced for a human rather than passed silently — otherwise illegibility
   // becomes an exemption nobody granted.
   //
-  // The entries below are the sanctioned ones. Each is a RAISE or a documented
-  // detector; a new name appearing here is a decision, not a formality.
+  // Keyed by FILE as well as by the expression. A bare name exempts itself
+  // everywhere at any value, so a later `const TIMEOUT_MS = 5_000` in some other
+  // file would inherit the exemption — the same illegibility-as-exemption this
+  // refuses, one level up. Each entry is a RAISE or a documented detector.
   const SANCTIONED = new Set([
-    'TIMEOUT_MS', // 120_000 / 600_000 raises, declared in their own files
-    'c.timeoutMs', // the crafted COPY detector, documented at its call site
-    'timeoutMs', // the same value, as the option is assembled
+    // The crafted COPY detector: a per-case value, so no constant to resolve.
+    // Documented at its call site and in this file's header.
+    'packages/zero-cache/src/services/change-source/pg/initial-sync.pg.test.ts :: c.timeoutMs',
+    'packages/zero-cache/src/services/change-source/pg/initial-sync.pg.test.ts :: timeoutMs',
   ]);
 
   const unreadable: string[] = [];
@@ -302,10 +352,9 @@ test('a budget this cannot evaluate is reported, not skipped', () => {
       readFileSync(file, 'utf8'),
       file,
     )) {
-      if (ms === null && !SANCTIONED.has(text)) {
-        unreadable.push(
-          `${relative(REPO_ROOT, file).replaceAll('\\', '/')}:${line}: ${text}`,
-        );
+      const key = `${rel(file)} :: ${text}`;
+      if (ms === null && !SANCTIONED.has(key)) {
+        unreadable.push(`${key} (line ${line})`);
       }
     }
   }
@@ -547,10 +596,9 @@ test('the scan reads every form a budget is written in', () => {
 });
 
 test('a value the scan cannot evaluate is surfaced as such', () => {
-  const declarations = timeoutDeclarations(
-    "test('x', {timeout: TIMEOUT_MS}, () => {});",
-  );
-  expect(declarations).toEqual([
+  expect(
+    timeoutDeclarations("test('x', {timeout: TIMEOUT_MS}, () => {});"),
+  ).toEqual([
     {
       line: 1,
       construct: 'test',
@@ -559,6 +607,42 @@ test('a value the scan cannot evaluate is surfaced as such', () => {
       text: 'TIMEOUT_MS',
     },
   ]);
+
+  // The trailing form too, and this is the half that matters most: five of the
+  // budgets this gate first found sat in exactly this position, and a version
+  // that keyed "is this a timeout" on "can I read it" emitted nothing here at
+  // all. A budget hidden behind a name would then be the one shape that reads
+  // as compliant.
+  expect(
+    timeoutDeclarations('beforeEach(async () => {}, HOOK_TIMEOUT_MS);'),
+  ).toEqual([
+    {
+      line: 1,
+      construct: 'beforeEach',
+      form: 'trailing',
+      ms: null,
+      text: 'HOOK_TIMEOUT_MS',
+    },
+  ]);
+  expect(
+    timeoutDeclarations("test('x', async () => {}, slow ? 30_000 : 10_000);"),
+  ).toEqual([
+    {
+      line: 1,
+      construct: 'test',
+      form: 'trailing',
+      ms: null,
+      text: 'slow ? 30_000 : 10_000',
+    },
+  ]);
+
+  // And a body referred to by name after an options object is NOT a trailing
+  // budget — the shape that separates the two.
+  expect(
+    timeoutDeclarations("describe('x', {timeout: 90_000}, body);").map(
+      ({form}) => form,
+    ),
+  ).toEqual(['options']);
 });
 
 test('prose and regex literals cannot move the scan', () => {

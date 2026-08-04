@@ -587,19 +587,52 @@ describe('shutdownRequested', () => {
     parent.emit('message', [...SHUTDOWN_MESSAGE]); // mid-startup
     expect(shutdown.aborted).toBe(true);
 
-    const stopped = resolver<void>();
+    // Shaped like the service that actually takes this branch, because a
+    // forgiving fixture hid a crash here: the replicator's `run()` never
+    // resolves, and its `stop()` awaits the promise `run()` assigns — so a
+    // `stop()` called first reads `undefined`, resumes immediately, and races
+    // the `run()` that follows.
+    let running: Promise<void> | undefined;
+    let started = false;
     const service = {
       id: 'startup-window',
-      run: () => promiseVoid,
+      run: () => {
+        started = true;
+        running = new Promise<void>(() => {}); // never resolves
+        return running;
+      },
+      stop: async () => {
+        await running;
+        if (started) {
+          throw new Error('stop() raced its own run()');
+        }
+      },
+    };
+
+    // Returns rather than rejecting: nothing was started, so nothing is stopped.
+    // A version that stopped an unstarted service would reject here, and in
+    // production that rejection is discarded and exits the worker 13.
+    await runUntilKilled(createSilentLogContext(), parent, shutdown, service);
+    expect(started).toBe(false);
+  });
+
+  test('a request arriving while running still stops the services', () => {
+    // The other side of the same branch: once `run()` has been called, the
+    // request has to reach `stop()`.
+    const parent = new EventEmitter();
+    const shutdown = shutdownRequested(parent);
+
+    const stopped = resolver<void>();
+    void runUntilKilled(createSilentLogContext(), parent, shutdown, {
+      id: 'running',
+      run: () => new Promise<void>(() => {}),
       stop: () => {
         stopped.resolve();
         return promiseVoid;
       },
-    };
-    void runUntilKilled(createSilentLogContext(), parent, shutdown, service);
+    });
 
-    // Resolves only if the already-aborted signal is acted on; a version that
-    // ignored it would leave this pending and fail on the suite's own budget.
-    await stopped.promise;
+    parent.emit('message', [...SHUTDOWN_MESSAGE]);
+    return stopped.promise;
   });
 });
