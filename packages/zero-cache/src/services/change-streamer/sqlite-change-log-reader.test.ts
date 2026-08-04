@@ -3,6 +3,7 @@ import SQLite3Database from '@rocicorp/zero-sqlite3';
 import {afterEach, describe, expect, test} from 'vitest';
 import {AbortError} from '../../../../shared/src/abort-error.ts';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
+import {SQLITE_FILE_SUFFIXES} from '../../../../shared/src/sqlite-file-suffixes.ts';
 import type {Database, Statement} from '../../../../zqlite/src/db.ts';
 import {StatementRunner} from '../../db/statements.ts';
 import {DbFile} from '../../test/lite.ts';
@@ -28,10 +29,10 @@ import {
 const lc = createSilentLogContext();
 const files: DbFile[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   for (const file of files.splice(0)) {
     deleteChangeLogDB(file.path);
-    file.delete();
+    await file.delete();
   }
 });
 
@@ -200,7 +201,7 @@ describe('sqlite change log reader', () => {
     expect(reader.plan('02')).toMatchObject({headWatermark: '06'});
 
     // The reader never touched the replica path, which does not even exist.
-    for (const suffix of ['', '-wal', '-wal2', '-shm']) {
+    for (const suffix of SQLITE_FILE_SUFFIXES) {
       expect(existsSync(file.path + suffix)).toBe(false);
     }
   });

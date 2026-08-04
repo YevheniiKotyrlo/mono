@@ -143,8 +143,12 @@ export function changeLogFileName(replicaFile: string): string {
 }
 
 /**
- * Removes the change-log database and its `-wal` / `-wal2` / `-shm` sidecars.
+ * Removes the change-log database and every sidecar file that can belong to it.
  * Safe to call when the file does not exist.
+ *
+ * The sidecar list lives with `deleteLiteDB`; enumerating it here too would leave
+ * two lists to keep in step, and the prose copy has no way to fall over when it
+ * goes stale.
  */
 export function deleteChangeLogDB(replicaFile: string): void {
   deleteLiteDB(changeLogFileName(replicaFile));

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import type {LogContext} from '@rocicorp/logger';
 import {afterAll, expect} from 'vitest';
 import {testLogConfig} from '../../../otel/src/test-log-config.ts';
 import {unreachable} from '../../../shared/src/asserts.ts';
@@ -65,6 +66,7 @@ import {
   newQueryDelegate,
 } from '../../../zqlite/src/test/source-factory.ts';
 import '../helpers/comparePg.ts';
+import {appIdFor} from './app-id.ts';
 export {testLogConfig};
 
 export const lc = createSilentLogContext();
@@ -89,12 +91,123 @@ type Queries<TSchema extends Schema> = {
   [K in keyof TSchema['tables'] & string]: Query<K, TSchema>;
 };
 
-let tempDir: string | undefined;
-afterAll(async () => {
-  if (tempDir) {
-    await fs.rm(tempDir, {recursive: true, force: true});
+/**
+ * Temp directories created by `bootstrap`, one per suite.
+ *
+ * A list rather than a single slot for the same reason `suiteDatabases` is one:
+ * a file with two suites creates two, and a single slot would silently orphan
+ * the first — its handles would still be closed, so nothing would report it.
+ */
+const tempDirs: string[] = [];
+
+/**
+ * Suite-level handles on files under those directories.
+ *
+ * They live as long as the suite, so teardown is the only place that can close
+ * them — and it has to, because a directory cannot be removed while a handle on
+ * a file inside it is open. (POSIX permits unlink-while-open, which is why
+ * leaving them open went unnoticed.)
+ *
+ * Per-case handles are deliberately absent: each is owned by the `finally` of
+ * the case that opened it, so tracking them here would only retain closed
+ * objects for the rest of the run.
+ */
+const suiteDatabases: Database[] = [];
+
+/**
+ * Opens a handle that lives as long as the suite, so teardown can close it.
+ *
+ * Every suite-lifetime handle on a file under a temp directory comes from here:
+ * the directory cannot be removed while one is open, and a handle opened
+ * directly is invisible to teardown however carefully the rest is tracked.
+ */
+export function openSuiteDatabase(
+  logContext: LogContext,
+  file: string,
+): Database {
+  const db = new Database(logContext, file);
+  suiteDatabases.push(db);
+  return db;
+}
+
+/**
+ * A connection for one case — a comparison run or a benchmark — holding an open
+ * `BEGIN CONCURRENT`.
+ *
+ * The caller owns it and must close it in a `finally`. That is not only about
+ * teardown: these are opened per case, so holding them to the end of the file
+ * means hundreds of live connections, each pinning a WAL2 read snapshot that can
+ * then never be checkpointed.
+ */
+function openScopedDatabase(file: string): Database {
+  const db = new Database(lc, file);
+  try {
+    db.exec('BEGIN CONCURRENT');
+  } catch (error) {
+    // The handle is not returned, so nothing else can ever close it.
+    closeQuietly(db);
+    throw error;
   }
-  tempDir = undefined;
+  return db;
+}
+
+/**
+ * Closes a connection without letting a close failure escape.
+ *
+ * Called from `finally` blocks, where throwing would replace the error the case
+ * actually failed with — so the close failure is dropped, deliberately and in
+ * full: `lc` here is a silent context, which discards every level, so routing it
+ * through the logger would only look like reporting. What a real close failure
+ * (an unfinalized statement, a locked database) does surface as is the removal
+ * error from teardown.
+ */
+function closeQuietly(db: Database): void {
+  try {
+    db.close();
+  } catch {
+    // See above: nothing useful can be done with this here.
+  }
+}
+
+/**
+ * Retries for removing a suite's temp DIRECTORY, which is a different problem
+ * from unlinking one file.
+ *
+ * A recursive walk can hit `ENOTEMPTY` on any platform when something appears
+ * under a directory between the listing and the removal, and on Windows a handle
+ * released moments earlier keeps its file busy. Both are genuinely transient, so
+ * the budget applies everywhere here — unlike the single-file case in
+ * `delete-lite-db.ts`, where every retryable errno on POSIX is permanent.
+ */
+const REMOVE_RETRIES = 10;
+const REMOVE_RETRY_DELAY_MS = 50;
+
+afterAll(async () => {
+  for (const db of suiteDatabases.splice(0)) {
+    closeQuietly(db);
+  }
+  // Each directory is dropped from the list only once its removal has settled,
+  // and failures are collected rather than thrown from the loop: draining the
+  // list up front meant one busy directory abandoned every later suite's — each
+  // a full seeded replica — with nothing still tracking them.
+  const failures: unknown[] = [];
+  while (tempDirs.length > 0) {
+    const dir = tempDirs[0];
+    try {
+      await fs.rm(dir, {
+        recursive: true,
+        force: true,
+        maxRetries: REMOVE_RETRIES,
+        retryDelay: REMOVE_RETRY_DELAY_MS,
+      });
+    } catch (error) {
+      failures.push(error);
+    }
+    tempDirs.shift();
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'Could not remove every temp directory');
+  }
 });
 
 async function makeDatabases<TSchema extends Schema>(
@@ -134,14 +247,19 @@ async function makeDatabases<TSchema extends Schema>(
     });
   }
 
-  tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zero-integration-tests'));
+  const tempDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'zero-integration-tests'),
+  );
+  tempDirs.push(tempDir);
   const tempFile = path.join(tempDir, `${suiteName}.db`);
-  const sqlite = new Database(lc, tempFile);
+  const sqlite = openSuiteDatabase(lc, tempFile);
   sqlite.pragma('journal_mode = WAL2');
 
   await initialSync(
     lc,
-    {appID: suiteName, shardNum: 0, publications: []},
+    // Same derivation as the other suites use: the app id names the replication
+    // slot, so it has to be slot-safe and distinct per database.
+    {appID: appIdFor(suiteName), shardNum: 0, publications: []},
     sqlite,
     getConnectionURI(pg),
     {tableCopyWorkers: 1},
@@ -382,25 +500,28 @@ export async function bootstrap<TSchema extends Schema>({
         }),
       );
 
-      const scopedDelegates: Delegates = {
-        ...delegates,
-        pg: new TestPGQueryDelegate(tx, zqlSchema, dbs.pgSchema),
-        memory: new TestMemoryQueryDelegate({
-          sources: forkedMemorySources,
-        }),
-        sqlite: newQueryDelegate(
-          lc,
-          testLogConfig,
-          (() => {
-            const db = new Database(lc, dbs.sqliteFile);
-            db.exec('BEGIN CONCURRENT');
-            return db;
-          })(),
-          zqlSchema,
-          sourceWrapper,
-        ),
-      };
-      await cb(scopedDelegates);
+      // The `try` opens on the line after the handle is acquired, so no path
+      // between acquisition and use can skip the close.
+      const scopedSqlite = openScopedDatabase(dbs.sqliteFile);
+      try {
+        const scopedDelegates: Delegates = {
+          ...delegates,
+          pg: new TestPGQueryDelegate(tx, zqlSchema, dbs.pgSchema),
+          memory: new TestMemoryQueryDelegate({
+            sources: forkedMemorySources,
+          }),
+          sqlite: newQueryDelegate(
+            lc,
+            testLogConfig,
+            scopedSqlite,
+            zqlSchema,
+            sourceWrapper,
+          ),
+        };
+        await cb(scopedDelegates);
+      } finally {
+        closeQuietly(scopedSqlite);
+      }
     });
   }
 
@@ -435,6 +556,13 @@ function makeBenchmark<TSchema extends Schema>({
     case 'push': {
       // isolate delegates to own transactions
       // so push benchmarks are isolated from each other.
+      //
+      // Suite lifetime, not case lifetime: `benchPush` REGISTERS a benchmark, and
+      // the body that queries through these delegates runs afterwards. A scope
+      // that closed at the end of this function would close the connection during
+      // collection, before any benchmark had run.
+      const benchmarkSqlite = openSuiteDatabase(lc, dbs.sqliteFile);
+      benchmarkSqlite.exec('BEGIN CONCURRENT');
       const newDelegates = {
         ...delegates,
         memory: new TestMemoryQueryDelegate({
@@ -445,16 +573,7 @@ function makeBenchmark<TSchema extends Schema>({
             ]),
           ),
         }),
-        sqlite: newQueryDelegate(
-          lc,
-          testLogConfig,
-          (() => {
-            const db = new Database(lc, dbs.sqliteFile);
-            db.exec('BEGIN CONCURRENT');
-            return db;
-          })(),
-          zqlSchema,
-        ),
+        sqlite: newQueryDelegate(lc, testLogConfig, benchmarkSqlite, zqlSchema),
       };
       const queries = makeQueries(zqlSchema);
       const query = createQuery(queries);
@@ -566,37 +685,45 @@ function makeTest<TSchema extends Schema>(
 ) {
   return async () => {
     await dbs.pg.begin(async tx => {
-      // Isolate the test from other tests by putting each test in its own transaction.
-      delegates = {
-        ...delegates,
-        pg: new TestPGQueryDelegate(tx, zqlSchema, dbs.pgSchema),
-        memory: new TestMemoryQueryDelegate({
-          sources: Object.fromEntries(
-            Object.entries(dbs.memory).map(([key, source]) => [
-              key,
-              source.fork(),
-            ]),
-          ),
-        }),
-        sqlite: newQueryDelegate(
-          lc,
-          testLogConfig,
-          (() => {
-            const db = new Database(lc, dbs.sqliteFile);
-            db.exec('BEGIN CONCURRENT');
-            return db;
-          })(),
+      const scopedSqlite = openScopedDatabase(dbs.sqliteFile);
+      try {
+        // Isolate the test from other tests by putting each test in its own
+        // transaction. These are a local rather than a reassignment of the
+        // `delegates` parameter: the returned function closes over that
+        // parameter, so reassigning it would outlive the case whose connection
+        // the sqlite delegate holds.
+        const caseDelegates: Delegates = {
+          ...delegates,
+          pg: new TestPGQueryDelegate(tx, zqlSchema, dbs.pgSchema),
+          memory: new TestMemoryQueryDelegate({
+            sources: Object.fromEntries(
+              Object.entries(dbs.memory).map(([key, source]) => [
+                key,
+                source.fork(),
+              ]),
+            ),
+          }),
+          sqlite: newQueryDelegate(lc, testLogConfig, scopedSqlite, zqlSchema),
+        };
+
+        const queryBuilders = makeQueries(zqlSchema);
+        const query = createQuery(queryBuilders);
+
+        await runAndCompare(
           zqlSchema,
-        ),
-      };
+          caseDelegates,
+          query,
+          manualVerification,
+        );
 
-      const queryBuilders = makeQueries(zqlSchema);
-      const query = createQuery(queryBuilders);
-
-      await runAndCompare(zqlSchema, delegates, query, manualVerification);
-
-      if (pushEvery > 0) {
-        await checkPush(zqlSchema, delegates, query, pushEvery);
+        if (pushEvery > 0) {
+          await checkPush(zqlSchema, caseDelegates, query, pushEvery);
+        }
+      } finally {
+        // The scope is the whole case, not the first comparison: `checkPush`
+        // pushes through the same delegates, so closing between the two would
+        // leave it querying a closed connection.
+        closeQuietly(scopedSqlite);
       }
     });
   };

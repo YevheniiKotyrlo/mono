@@ -4,6 +4,7 @@ import {createWriteStream, mkdirSync, type WriteStream} from 'node:fs';
 import {rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {SQLITE_FILE_SUFFIXES} from '../../../packages/shared/src/sqlite-file-suffixes.ts';
 import type {BenchmarkConfig} from './config.ts';
 import {appPath, appRoot, repoRoot} from './config.ts';
 import {
@@ -156,9 +157,12 @@ export function queryPlanAnalysisLogPath(config: BenchmarkConfig): string {
 }
 
 export async function removeReplicaFiles(replicaFile: string): Promise<void> {
+  // `-wal2` is what this was missing: the replica runs in WAL2, so a stale sidecar
+  // survived beside the next run's replica. No `recursive`, so a path that names a
+  // directory still fails loudly.
   await Promise.all(
-    [replicaFile, `${replicaFile}-shm`, `${replicaFile}-wal`].map(file =>
-      rm(file, {force: true}),
+    SQLITE_FILE_SUFFIXES.map(suffix =>
+      rm(`${replicaFile}${suffix}`, {force: true}),
     ),
   );
 }

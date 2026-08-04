@@ -14,8 +14,8 @@ describe('db/begin-concurrent', () => {
     conn.close();
   });
 
-  afterEach(() => {
-    dbFile.delete();
+  afterEach(async () => {
+    await dbFile.delete();
   });
 
   test('independent, concurrent actions before commit', () => {
