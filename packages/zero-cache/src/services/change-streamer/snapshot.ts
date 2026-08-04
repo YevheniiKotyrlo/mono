@@ -77,9 +77,13 @@ export function reserveAndGetSnapshotStatus(
   }
   const onShutdown = () => resolve(undefined);
   shutdown.addEventListener('abort', onShutdown, {once: true});
-  // Released when this call settles: the signal outlives the call, and this is
-  // reached once per retry.
-  void status.finally(() => shutdown.removeEventListener('abort', onShutdown));
+  // Released when this call settles, either way: the signal outlives the call and
+  // this is reached once per retry. `then(f, f)` rather than `finally(f)` because
+  // `finally` returns a promise that rejects with the same reason, and nothing holds
+  // that one — so a rejecting reservation would ALSO surface as an unhandled
+  // rejection, on top of being propagated to the caller.
+  const release = () => shutdown.removeEventListener('abort', onShutdown);
+  void status.then(release, release);
 
   void (async function () {
     for (let i = 0; ; i++) {

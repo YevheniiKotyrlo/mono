@@ -224,9 +224,11 @@ const RETRY_INTERVAL_MS = 3000;
 // size) is the backstop, so restoreReplica must not impose its own shorter
 // cap and self-terminate while the backup is still being produced.
 //
-// Unbounded is not the same as uninterruptible, though. `shutdown` is how the
-// wait ends early when the manager asks the worker to stop, which it can do at
-// any point in those minutes.
+// Unbounded is not the same as uninterruptible, though. `shutdown` ends the WAITING
+// early when the manager asks the worker to stop — the reservation and the retry
+// sleep both race it. A restore attempt already in flight is not interrupted:
+// litestream runs as a subprocess, so the request is acted on when that attempt
+// returns, which bounds the delay by one attempt rather than by the whole loop.
 //
 // @returns whether the replica was restored; `false` means shutdown was
 //     requested first, and no replica was opened.

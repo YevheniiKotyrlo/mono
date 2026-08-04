@@ -67,6 +67,7 @@ function pgTestFiles(): string[] {
  */
 const TIMEOUT_BEARING = new Set([
   'describe',
+  'suite', // a real vitest export, and this repo writes suites with it
   'test',
   'it',
   'bench',
@@ -74,7 +75,19 @@ const TIMEOUT_BEARING = new Set([
   'beforeAll',
   'afterEach',
   'afterAll',
+  'aroundEach',
+  'aroundAll',
 ]);
+
+/**
+ * The smallest budget worth reporting.
+ *
+ * `{timeout: 0}` is vitest's "no timeout at all" — verified against the runner: a
+ * case declaring it runs past any deadline and passes. So zero is the strongest
+ * possible RAISE, and comparing it numerically reports it as the strongest possible
+ * lowering. Negatives behave the same way (`timeout <= 0` disables it).
+ */
+const DISABLES_TIMEOUT = 0;
 
 /**
  * Parsed rather than pattern-matched, because every interesting form here defeats
@@ -175,7 +188,57 @@ function rootIdentifier(node: ts.Expression): string | undefined {
   if (ts.isCallExpression(node)) {
     return rootIdentifier(node.expression); // the curried `describe.skipIf(x)(…)`
   }
+  if (ts.isTaggedTemplateExpression(node)) {
+    return rootIdentifier(node.tag); // the ``describe.each`…` `` table form
+  }
   return undefined;
+}
+
+/**
+ * Every `const` name bound to a static number, minus any bound more than once.
+ *
+ * Collected over the whole tree rather than file scope, and a re-declared name is
+ * dropped rather than resolved to whichever binding was seen. Resolving it would be
+ * worse than not resolving it at all: an inner `const T = 30_000` shadowing an outer
+ * `const T = 120_000` would be reported as 120000, which CLEARS the grant — a wrong
+ * number, not a missing one, so the "unreadable is reported" backstop never fires.
+ * Dropped names come back as `null` and are reported.
+ */
+function fileConstants(parsed: ts.SourceFile): ReadonlyMap<string, number> {
+  const seen = new Map<string, number>();
+  const ambiguous = new Set<string>();
+
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isVariableStatement(node) &&
+      (node.declarationList.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      for (const declaration of node.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name)) {
+          continue;
+        }
+        const name = declaration.name.text;
+        if (seen.has(name) || ambiguous.has(name)) {
+          ambiguous.add(name);
+          seen.delete(name);
+          continue;
+        }
+        const value = declaration.initializer
+          ? staticNumber(declaration.initializer)
+          : undefined;
+        if (value !== undefined) {
+          seen.set(name, value);
+        } else {
+          // A name bound to something unreadable must not fall through to an
+          // outer binding of the same name either.
+          ambiguous.add(name);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  return seen;
 }
 
 /** Every time budget declared in `source`, in either form vitest accepts. */
@@ -195,24 +258,7 @@ function timeoutDeclarations(
   const lineOf = (position: number) =>
     parsed.getLineAndCharacterOfPosition(position).line + 1;
 
-  // File-scope numeric constants, so a budget named by one is read rather than
-  // reported. Only `const`, and only where the initializer is itself static.
-  const constants = new Map<string, number>();
-  for (const statement of parsed.statements) {
-    if (
-      ts.isVariableStatement(statement) &&
-      (statement.declarationList.flags & ts.NodeFlags.Const) !== 0
-    ) {
-      for (const declaration of statement.declarationList.declarations) {
-        if (ts.isIdentifier(declaration.name) && declaration.initializer) {
-          const value = staticNumber(declaration.initializer);
-          if (value !== undefined) {
-            constants.set(declaration.name.text, value);
-          }
-        }
-      }
-    }
-  }
+  const constants = fileConstants(parsed);
 
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
@@ -223,18 +269,38 @@ function timeoutDeclarations(
           // inside is some other API's budget, not this call's.
           if (ts.isObjectLiteralExpression(argument)) {
             for (const property of argument.properties) {
-              if (
-                ts.isPropertyAssignment(property) &&
+              // `{timeout: T}`, and `{timeout}` — the same declaration written
+              // shorter, where the value is the name itself. A spread has no name
+              // at all, which is why the kind is narrowed before reading one.
+              const named =
+                (ts.isPropertyAssignment(property) ||
+                  ts.isShorthandPropertyAssignment(property)) &&
                 (ts.isIdentifier(property.name) ||
                   ts.isStringLiteral(property.name)) &&
-                property.name.text === 'timeout'
-              ) {
+                property.name.text === 'timeout';
+              const value = ts.isPropertyAssignment(property)
+                ? property.initializer
+                : ts.isShorthandPropertyAssignment(property)
+                  ? property.name
+                  : undefined;
+              if (named && value !== undefined) {
                 found.push({
                   line: lineOf(property.getStart(parsed)),
                   construct,
                   form: 'options',
-                  ms: staticNumber(property.initializer, constants) ?? null,
-                  text: property.initializer.getText(parsed),
+                  ms: staticNumber(value, constants) ?? null,
+                  text: value.getText(parsed),
+                });
+              } else if (ts.isSpreadAssignment(property)) {
+                // Options merged in from elsewhere may carry a budget this cannot
+                // see. Reported rather than passed: a shared options object is the
+                // natural shape the moment two suites want the same settings.
+                found.push({
+                  line: lineOf(property.getStart(parsed)),
+                  construct,
+                  form: 'options',
+                  ms: null,
+                  text: property.getText(parsed),
                 });
               }
             }
@@ -318,7 +384,8 @@ test('no pg test lowers the budget its project grants', () => {
       readFileSync(file, 'utf8'),
       file,
     )) {
-      if (ms !== null && ms < granted) {
+      // `ms === DISABLES_TIMEOUT` is the strongest raise, not the smallest budget.
+      if (ms !== null && ms > DISABLES_TIMEOUT && ms < granted) {
         lowered.push(
           `${relative(REPO_ROOT, file).replaceAll('\\', '/')}:${line}: ` +
             `${construct} (${form}) ${ms}ms < ${granted}ms`,
@@ -417,7 +484,7 @@ function loweredMergeTargets(
   source: string,
   limit: number,
   fileName = 'vitest.config.ts',
-): {line: number; target: string; key: string; ms: number}[] {
+): {line: number; target: string; key: string; ms: number | null}[] {
   const parsed = ts.createSourceFile(
     fileName,
     source,
@@ -425,7 +492,13 @@ function loweredMergeTargets(
     false,
     ts.ScriptKind.TS,
   );
-  const found: {line: number; target: string; key: string; ms: number}[] = [];
+  const found: {
+    line: number;
+    target: string;
+    key: string;
+    ms: number | null;
+  }[] = [];
+  const constants = fileConstants(parsed);
 
   const visit = (node: ts.Node): void => {
     if (
@@ -446,15 +519,21 @@ function loweredMergeTargets(
               (inner.name.text === 'testTimeout' ||
                 inner.name.text === 'hookTimeout')
             ) {
-              const ms = staticNumber(inner.initializer);
-              if (ms !== undefined && ms < limit) {
+              // Resolved against the file's own constants, and REPORTED when
+              // it cannot be: dropping an unreadable value here would leave
+              // illegibility as an exemption in the one place a budget is most
+              // likely to be named rather than written.
+              const ms = staticNumber(inner.initializer, constants);
+              const lowered =
+                ms === undefined || (ms > DISABLES_TIMEOUT && ms < limit);
+              if (lowered) {
                 found.push({
                   line:
                     parsed.getLineAndCharacterOfPosition(inner.getStart(parsed))
                       .line + 1,
                   target,
                   key: inner.name.text,
-                  ms,
+                  ms: ms ?? null,
                 });
               }
             }
@@ -486,7 +565,9 @@ test('no config lowers a pg project’s budget on its way past', () => {
     )) {
       lowered.push(
         `${relative(REPO_ROOT, config).replaceAll('\\', '/')}:${line}: ` +
-          `${target} merged ${key} down to ${ms}ms < ${granted}ms`,
+          (ms === null
+            ? `${target} merges ${key} from a value this cannot read`
+            : `${target} merged ${key} down to ${ms}ms < ${granted}ms`),
       );
     }
   }
@@ -593,6 +674,74 @@ test('the scan reads every form a budget is written in', () => {
   expect(read("test('x', () => { setTimeout(fn, 5000); });")).toEqual([]);
   expect(read('foo.test(bar, 100);')).toEqual([]);
   expect(read('suite.bench(name, 250);')).toEqual([]);
+});
+
+test('a shadowed name is reported rather than resolved to the wrong one', () => {
+  // The dangerous shape, because it produces a WRONG NUMBER rather than none: an
+  // inner binding is the real budget, and resolving the outer one reports 120000 —
+  // which clears the grant, so the unreadable-value backstop never fires either.
+  expect(
+    timeoutDeclarations(`const T = 120_000;
+describe('outer', () => {
+  const T = 30_000;
+  test('x', {timeout: T}, () => {});
+});`).map(({ms, text}) => ({ms, text})),
+  ).toEqual([{ms: null, text: 'T'}]);
+
+  // A single binding still resolves, which is the whole point of resolving at all.
+  expect(
+    timeoutDeclarations(`const T = 120_000;
+test('x', {timeout: T}, () => {});`).map(({ms}) => ms),
+  ).toEqual([120000]);
+});
+
+test('every construct vitest gives a budget to is in scope', () => {
+  const read = (source: string) => timeoutDeclarations(source).map(d => d.ms);
+
+  // `suite` is a real vitest export and this repo writes suites with it.
+  expect(read("suite('x', {timeout: 30_000}, () => {});")).toEqual([30000]);
+  expect(read("suite('x', () => {}, 30_000);")).toEqual([30000]);
+  expect(read('aroundEach(async () => {}, 30_000);')).toEqual([30000]);
+  // The tagged-template table form of `each`. Assembled rather than written
+  // inline, so the backtick and `${}` inside the FIXTURE are not read as this
+  // file's own template syntax.
+  const backtick = String.fromCharCode(96);
+  expect(
+    read(
+      `describe.each${backtick}` +
+        `\n  a\n  ${1}\n` +
+        `${backtick}('x', {timeout: 30_000}, f);`,
+    ),
+  ).toEqual([30000]);
+});
+
+test('a budget written shorter, or merged in, is still seen', () => {
+  const read = (source: string) =>
+    timeoutDeclarations(source).map(({ms, text}) => ({ms, text}));
+
+  // `{timeout}` is `{timeout: timeout}`.
+  expect(
+    read(`const timeout = 30_000;
+test('x', {timeout}, () => {});`),
+  ).toEqual([{ms: 30000, text: 'timeout'}]);
+  // Options merged from elsewhere may carry a budget this cannot see, so it is
+  // reported. A shared options object is the natural shape once two suites want
+  // the same settings.
+  expect(read("test('x', {...OPTS}, () => {});")).toEqual([
+    {ms: null, text: '...OPTS'},
+  ]);
+});
+
+test('a disabled timeout is a raise, not the smallest budget', () => {
+  // Verified against the runner: `{timeout: 0}` disables the deadline entirely, so
+  // a numeric comparison reports the strongest possible raise as the strongest
+  // possible lowering.
+  expect(timeoutDeclarations("test('x', {timeout: 0}, () => {});")).toEqual([
+    {line: 1, construct: 'test', form: 'options', ms: 0, text: '0'},
+  ]);
+  // And the gate's own corpus scan must not flag it — asserted through the same
+  // predicate the scan uses.
+  expect(0 > DISABLES_TIMEOUT).toBe(false);
 });
 
 test('a value the scan cannot evaluate is surfaced as such', () => {
@@ -731,4 +880,27 @@ test('the merge-target scan sees an indirect target', () => {
       'mergeConfig(configForVersion(16, url), {test: {testTimeout: 90_000}})',
     ),
   ).toEqual([]);
+
+  // A named constant resolves, exactly as on the test-file side.
+  expect(
+    read(`const SHORT = 20_000;
+mergeConfig(configForVersion(16, url), {test: {testTimeout: SHORT}})`),
+  ).toEqual([
+    {target: 'configForVersion(16, url)', key: 'testTimeout', ms: 20000},
+  ]);
+  expect(
+    read(`const LONG = 90_000;
+mergeConfig(configForVersion(16, url), {test: {testTimeout: LONG}})`),
+  ).toEqual([]);
+
+  // And a value it cannot read is REPORTED rather than dropped. A config is the
+  // more likely place for a budget to be computed instead of written, so leaving
+  // this side silent would put the exemption where it is easiest to reach.
+  expect(
+    read(
+      'mergeConfig(configForVersion(16, url), {test: {testTimeout: seconds(20)}})',
+    ),
+  ).toEqual([
+    {target: 'configForVersion(16, url)', key: 'testTimeout', ms: null},
+  ]);
 });

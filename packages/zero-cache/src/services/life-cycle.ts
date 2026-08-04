@@ -511,8 +511,10 @@ export function shutdownRequested(parent: EventEmitter): AbortSignal {
  * an optional {@link SingletonService.drain drain()}, or stopping them
  * without draining for `SIGQUIT`.
  *
- * @param shutdown from {@link shutdownRequested}, armed by the caller BEFORE its
- *     startup work. Taken rather than installed here because the two cannot be
+ * @param shutdown from {@link shutdownRequested}. A caller whose startup can block
+ *     arms it before that work — today only the replicator, whose replica restore is
+ *     unbounded; the rest arm it at this call, which is where the listener used to be
+ *     installed. Taken rather than installed here because the two cannot be
  *     separated: Node delivers a queued IPC message to the first listener
  *     installed and to no other, so a worker that arms early to interrupt its own
  *     startup would consume the request, and a listener installed here would then
