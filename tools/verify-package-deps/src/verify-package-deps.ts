@@ -1,11 +1,59 @@
+import {existsSync} from 'node:fs';
 /* eslint-disable no-console */
 import {readdir, readFile, writeFile} from 'node:fs/promises';
 import {dirname, join, relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parse} from 'oxc-parser';
+import {packageOfRelativePath} from './package-of-path.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const WORKSPACE_ROOT = join(__dirname, '../../..');
+
+/**
+ * The workspace to scan, overridable with `--root` so the verification can be
+ * pointed at a fixture and proven to report a violation it should. That proof is
+ * what distinguishes this gate passing from it not running: it reports success by
+ * finding nothing wrong, so anything that empties its input looks identical to a
+ * clean workspace.
+ *
+ * A flag rather than an environment variable, because an env var silently
+ * repoints a correctness gate — including when set to the empty string, which is
+ * a perfectly good value that resolves the scan against the process's cwd.
+ */
+function workspaceRootFromArgv(argv: readonly string[]): string {
+  // Scanned in order so the LAST occurrence wins, whichever spelling it uses.
+  // Preferring one spelling over the other meant `--root=/repo --root /fixture`
+  // chose /repo regardless of order — and with `--fix` that rewrites the manifests
+  // the operator believed they had pointed away from, which is the whole reason
+  // this is a flag and not an environment variable.
+  let value: string | undefined;
+  let seen = false;
+  for (let i = 0; i < argv.length; i++) {
+    const argument = argv[i];
+    if (argument === '--root') {
+      seen = true;
+      value = argv[i + 1];
+    } else if (argument.startsWith('--root=')) {
+      seen = true;
+      value = argument.slice('--root='.length);
+    }
+  }
+  if (!seen) {
+    return join(__dirname, '../../..');
+  }
+  // An empty value is rejected rather than defaulted: `join('', 'packages')` is a
+  // relative path, so it would resolve the scan against the process's cwd.
+  if (value === undefined || value.length === 0 || value.startsWith('-')) {
+    throw new Error('--root requires a directory');
+  }
+  if (!existsSync(join(value, 'pnpm-workspace.yaml'))) {
+    throw new Error(
+      `--root ${value} is not a workspace root: no pnpm-workspace.yaml there`,
+    );
+  }
+  return value;
+}
+
+const WORKSPACE_ROOT = workspaceRootFromArgv(process.argv);
 
 type PackageJson = {
   name?: string;
@@ -59,16 +107,7 @@ async function findTypeScriptFiles(dir: string): Promise<string[]> {
 }
 
 function getPackageName(filePath: string): string | undefined {
-  // Convert to relative path from workspace root
-  const relativePath = relative(WORKSPACE_ROOT, filePath);
-  const parts = relativePath.split('/');
-  if (
-    parts.length >= 2 &&
-    (parts[0] === 'packages' || parts[0] === 'apps' || parts[0] === 'tools')
-  ) {
-    return `${parts[0]}/${parts[1]}`;
-  }
-  return undefined;
+  return packageOfRelativePath(relative(WORKSPACE_ROOT, filePath));
 }
 
 async function extractImports(
@@ -167,6 +206,17 @@ async function analyzePackageDependencies(): Promise<AnalyzeResult> {
 
   console.log(`Found ${allFiles.length} TypeScript files to analyze`);
 
+  // Nothing to check is a failure, not a pass. This gate reports success by
+  // saying nothing was wrong, so every way of ending up with no input — a moved
+  // tool directory, a renamed source root, an unreadable subtree — otherwise
+  // reads as a clean workspace. That is the shape the separator bug took.
+  if (allFiles.length === 0) {
+    throw new Error(
+      `No TypeScript files found under ${WORKSPACE_ROOT}. Nothing was verified, ` +
+        `so a passing result would be meaningless.`,
+    );
+  }
+
   // Build a map from package name to package path
   const packageNameToPath = new Map<string, string>();
   for (const dir of ['packages', 'apps', 'tools']) {
@@ -174,7 +224,12 @@ async function analyzePackageDependencies(): Promise<AnalyzeResult> {
     const entries = await readdir(fullDir, {withFileTypes: true});
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        const pkgPath = join(dir, entry.name);
+        // A canonical `dir/name` identifier, not a filesystem path: it is
+        // compared against the keys `packageOfRelativePath` produces, which are
+        // always forward-slashed. Composing it with join() would follow the host
+        // separator, and a key that matches nothing makes the edges through it
+        // invisible rather than reported.
+        const pkgPath = `${dir}/${entry.name}`;
         const pkgJson = await getPackageJson(join(WORKSPACE_ROOT, pkgPath));
         if (pkgJson?.name) {
           packageNameToPath.set(pkgJson.name, pkgPath);
