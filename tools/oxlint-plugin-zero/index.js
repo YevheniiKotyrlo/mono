@@ -1,5 +1,47 @@
 const selectStar = /\bselect\b[\s\S]*?\*(?=\s*(?:,|\bfrom\b))[\s\S]*?\bfrom\b/i;
 
+// Commands that resolve to a `.CMD`/`.bat` shim on Windows rather than a real
+// executable image. `CreateProcess` only ever appends `.exe`, so spawning one of
+// these by bare name throws ENOENT on Windows even when the shim is on PATH.
+// `shell: true` "fixes" it but concatenates arguments instead of escaping them
+// (Node DEP0190), so the portable answer is to resolve the JS entrypoint and
+// spawn that with `process.execPath`.
+// Limited to what this repo actually runs: the two sites that prompted the rule
+// (`npm` from the release scripts, `tsc` from the zero build), the package manager
+// and Node's own launchers, and the CLIs it depends on. Names it has no
+// relationship with are left out — an error-level rule should not be enumerating
+// tools nobody here spawns.
+const shimCommands = new Set([
+  'npm',
+  'npx',
+  'pnpm',
+  'tsc',
+  'tsx',
+  'vite',
+  'vitest',
+  'oxlint',
+  'oxfmt',
+  'turbo',
+  'prisma',
+  'drizzle-kit',
+  'playwright',
+  'sst',
+]);
+
+// `exec` and `execSync` are absent because they always go through a shell, which
+// resolves `npm.cmd` itself.
+//
+// Reach: the command must be a string literal and the callee a plain or member
+// identifier, and the callee's origin is not tracked.
+const spawnFunctions = new Set([
+  'spawn',
+  'spawnSync',
+  'execFile',
+  'execFileSync',
+]);
+
+const whitespace = /\s+/;
+
 const plugin = {
   meta: {
     name: 'zero',
@@ -56,6 +98,59 @@ const plugin = {
         };
       },
     },
+
+    'no-file-url-pathname': {
+      meta: {
+        type: 'problem',
+        docs: {
+          description:
+            "Disallow using a file: URL's .pathname as a filesystem path; on Windows it yields a leading slash before the drive letter.",
+        },
+        schema: [],
+        messages: {
+          useFileUrlToPath:
+            "A file: URL's .pathname is a URL path, not a filesystem path — on Windows it is '/C:/…', which fs cannot open. Use fileURLToPath() from 'node:url'.",
+        },
+      },
+      create(context) {
+        return {
+          MemberExpression(node) {
+            if (isFileUrlPathnameAccess(node)) {
+              context.report({node, messageId: 'useFileUrlToPath'});
+            }
+          },
+        };
+      },
+    },
+
+    'no-bare-shim-spawn': {
+      meta: {
+        type: 'problem',
+        docs: {
+          description:
+            'Disallow spawning a command that is a .CMD shim on Windows by bare name; resolve its JS entrypoint and spawn it with process.execPath.',
+        },
+        schema: [],
+        messages: {
+          resolveEntrypoint:
+            "Spawning '{{command}}' by bare name throws ENOENT on Windows: it is a .CMD shim and CreateProcess only appends .exe. Do not reach for `shell: true` — it concatenates arguments instead of escaping them (Node DEP0190). Resolve the JS entrypoint (createRequire(...).resolve) and spawn it with process.execPath.",
+        },
+      },
+      create(context) {
+        return {
+          CallExpression(node) {
+            const command = bareShimSpawnCommand(node);
+            if (command !== undefined) {
+              context.report({
+                node,
+                messageId: 'resolveEntrypoint',
+                data: {command},
+              });
+            }
+          },
+        };
+      },
+    },
   },
 };
 
@@ -73,14 +168,179 @@ function hasSelectStar(source) {
   return selectStar.test(source);
 }
 
+/**
+ * Normalize a filesystem path to forward slashes, so the `/`-bearing comparisons
+ * in `shouldCheck` mean the same thing wherever the linter runs.
+ *
+ * Comparing against a raw filename makes every one of them false where paths use
+ * backslashes, and a rule that never matches a path never runs — which reads
+ * exactly like a codebase with nothing to report.
+ */
+function toPosixPath(filename) {
+  return filename.replaceAll('\\', '/');
+}
+
 function shouldCheck(filename, include) {
+  const path = toPosixPath(filename);
   return (
-    include.some(path => filename.includes(path)) &&
-    !filename.endsWith('.test.ts') &&
-    !filename.includes('/test/') &&
-    !filename.includes('/__snapshots__/') &&
-    !filename.endsWith('_generated.ts')
+    include.some(included => path.includes(toPosixPath(included))) &&
+    !path.endsWith('.test.ts') &&
+    !path.includes('/test/') &&
+    !path.includes('/__snapshots__/') &&
+    !path.endsWith('_generated.ts')
   );
 }
 
+/**
+ * Matches `.pathname` read off a URL that is known to be a `file:` URL:
+ * `new URL('./x', import.meta.url).pathname`, `new URL(import.meta.url).pathname`,
+ * or either with a spelled-out `file:` literal.
+ *
+ * Whichever argument settles the scheme is the one read: a specifier carrying its
+ * own scheme, otherwise the base. So `new URL('./v2/users', apiBaseUrl).pathname`
+ * is ordinary URL work and not a finding, while `new URL('https://x/y',
+ * 'file:///a').pathname` is not one either — the base is irrelevant there.
+ */
+function isFileUrlPathnameAccess(node) {
+  if (node.computed || node.property?.name !== 'pathname') {
+    return false;
+  }
+  const target = node.object;
+  if (target?.type !== 'NewExpression' || target.callee?.name !== 'URL') {
+    return false;
+  }
+  const [specifier, base] = target.arguments ?? [];
+  // The base sets the scheme only for a relative specifier. An absolute one
+  // carries its own, so `new URL('https://x/y', 'file:///a')` is not a file URL.
+  if (base !== undefined && !hasOwnScheme(specifier)) {
+    return isKnownFileUrl(base);
+  }
+  return isKnownFileUrl(specifier);
+}
+
+/**
+ * Whether a value node is knowably falsy: a falsy literal, or either spelling of
+ * undefined. `undefined` parses as an Identifier and `void 0` as a UnaryExpression,
+ * so neither is caught by a Literal check.
+ */
+function isStaticallyFalsy(node) {
+  if (node?.type === 'Literal') {
+    return !node.value;
+  }
+  if (node?.type === 'Identifier') {
+    return node.name === 'undefined';
+  }
+  return node?.type === 'UnaryExpression' && node.operator === 'void';
+}
+
+const urlScheme = /^[A-Za-z][A-Za-z\d+.-]*:/;
+
+/** Whether a specifier literal is an absolute URL, making any base irrelevant. */
+function hasOwnScheme(node) {
+  return (
+    node?.type === 'Literal' &&
+    typeof node.value === 'string' &&
+    urlScheme.test(node.value)
+  );
+}
+
+/** A node that is certainly a `file:` URL: `import.meta.url`, or a literal. */
+function isKnownFileUrl(node) {
+  return (
+    isImportMetaUrl(node) ||
+    (node?.type === 'Literal' &&
+      typeof node.value === 'string' &&
+      node.value.startsWith('file:'))
+  );
+}
+
+function isImportMetaUrl(node) {
+  return (
+    node?.type === 'MemberExpression' &&
+    node.property?.name === 'url' &&
+    node.object?.type === 'MetaProperty'
+  );
+}
+
+/**
+ * Returns the offending command name when `node` spawns a Windows shim command
+ * by bare name without a shell, otherwise undefined.
+ */
+function bareShimSpawnCommand(node) {
+  // Both spellings count: a bare `spawn(…)` and a `childProcess.spawn(…)` member
+  // call are equally common, and `cp['spawn'](…)` is out of reach either way.
+  const callee = node.callee;
+  const calleeName =
+    callee?.type === 'Identifier'
+      ? callee.name
+      : callee?.type === 'MemberExpression' && !callee.computed
+        ? callee.property?.name
+        : undefined;
+  if (calleeName === undefined || !spawnFunctions.has(calleeName)) {
+    return undefined;
+  }
+  const [commandArgument, ...rest] = node.arguments ?? [];
+  if (
+    commandArgument?.type !== 'Literal' ||
+    typeof commandArgument.value !== 'string'
+  ) {
+    return undefined;
+  }
+  const command = commandArgument.value.trim().split(whitespace)[0];
+  if (!shimCommands.has(command)) {
+    return undefined;
+  }
+  // The rule name is the scope: a shim spawned by bare name WITHOUT a shell
+  // cannot be resolved at all. `shell: true` does resolve it, at the different
+  // cost DEP0190 describes, which is Node's warning to give and not this rule's.
+  // So an explicit `shell` is a deliberate opt-out.
+  if (rest.some(hasShellOption)) {
+    return undefined;
+  }
+  return command;
+}
+
+/**
+ * Whether an argument is an options object that opts into a shell.
+ *
+ * The options bag is located by shape, not by position: `args` is optional in
+ * every one of these signatures, so `spawn('npm', {shell: true})` puts it at
+ * index 1 — reading index 2 reported those calls despite the opt-out. A spread
+ * is treated as opting in, because its contents are not knowable here and a
+ * false negative is cheaper than an error on correct code.
+ *
+ * The VALUE decides, not the key's presence: `{shell: false}` is exactly the
+ * configuration that fails, so reading only the key would exempt the call this
+ * rule exists to report.
+ */
+function hasShellOption(argument) {
+  if (argument?.type !== 'ObjectExpression') {
+    return false;
+  }
+  return argument.properties.some(property => {
+    if (property.type === 'SpreadElement') {
+      return true;
+    }
+    if (
+      property.type !== 'Property' ||
+      (property.key?.name !== 'shell' && property.key?.value !== 'shell')
+    ) {
+      return false;
+    }
+    // A statically falsy value is not an opt-out — `{shell: false}` is the very
+    // configuration that fails, and `{shell: undefined}` / `{shell: void 0}` are
+    // that same configuration spelled differently. Anything else — `true`, a
+    // variable, a call — is not knowably falsy, so it counts as deliberate.
+    return !isStaticallyFalsy(property.value);
+  });
+}
+
 export default plugin;
+export {
+  bareShimSpawnCommand,
+  hasSelectStar,
+  isFileUrlPathnameAccess,
+  shouldCheck,
+  stripCommentOnlyLines,
+  toPosixPath,
+};
