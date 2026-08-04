@@ -1991,6 +1991,9 @@ importers:
       oxfmt:
         specifier: ^0.65.0
         version: 0.65.0
+      scripts:
+        specifier: workspace:*
+        version: link:../../scripts
 
   tools/sqlite-io-yield-simulator:
     dependencies:
