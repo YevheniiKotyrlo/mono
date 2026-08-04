@@ -1,7 +1,9 @@
 import * as childProcess from 'node:child_process';
-import {mkdtempSync, writeFileSync} from 'node:fs';
+import {EventEmitter} from 'node:events';
+import {mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {PassThrough} from 'node:stream';
 import {afterEach, describe, expect, test, vi} from 'vitest';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
 import {Database} from '../../../../zqlite/src/db.ts';
@@ -18,13 +20,13 @@ import {
   type VfsPollerConfig,
 } from './vfs-watermark-poller.ts';
 
-// Wrap (don't replace) node:child_process.spawn so tests can assert the args
-// it was called with while it still spawns the fake vfs-query executable.
-// Node's built-in module exports are non-configurable, so vi.spyOn cannot be
-// used here. See litestream/commands.test.ts for the same pattern.
+// Replace node:child_process.spawn so the args it was called with can be
+// asserted and the child it returns is stood up in process. Node's built-in
+// module exports are non-configurable, so vi.spyOn cannot be used here. See
+// litestream/commands.test.ts for the same pattern.
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof childProcess>();
-  return {...actual, spawn: vi.fn(actual.spawn)};
+  return {...actual, spawn: vi.fn(() => fakeChild(nextBehaviour))};
 });
 const spawnMock = vi.mocked(childProcess.spawn);
 
@@ -35,20 +37,79 @@ function line(stateVersion: string, writeTimeMs: number, litestreamTime = '') {
   return `{"query_result":[{"stateVersion":"${stateVersion}","writeTimeMs":${writeTimeMs}}],"metadata":{${metadata.replace(/^,/, '')}}}`;
 }
 
-// Writes a fake `vfs-query` executable (a POSIX shell script) that ignores
-// its flags and just does whatever `sh` says: emit lines to stdout, then
-// block (so it stays alive until killed, like the real vfs-query watching
-// stdin/signals), or exit with a given code to simulate a crash.
-function fakeVfsQuery(sh: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'vfs-query-test-'));
-  const executable = join(dir, 'fake-vfs-query');
-  writeFileSync(executable, `#!/bin/sh\n${sh}\n`, {mode: 0o755});
-  return executable;
+/**
+ * What the fake `vfs-query` does, declared rather than scripted.
+ *
+ * A shell script is not an executable on every platform: the spawn fails, the
+ * child has no stdout to read, and every assertion about what the poller parsed
+ * is left asserting nothing at all. Standing the child up in process keeps the
+ * behaviour explicit and runs the same everywhere.
+ *
+ * `emits` mirrors the real vfs-query, which stays running between emissions —
+ * so the child does not close until it is killed.
+ */
+type FakeVfsQuery =
+  | {kind: 'emits'; lines: readonly string[]}
+  | {kind: 'exit'; code: number};
+
+/** Emits nothing and stays alive, which is the idle shape. */
+const BLOCK: FakeVfsQuery = {kind: 'emits', lines: []};
+
+/** The path the poller is configured with; nothing ever executes it. */
+const FAKE_EXECUTABLE = join('fake', 'bin', 'fake-vfs-query');
+
+/**
+ * Stands in for a spawned `vfs-query`, implementing only what the poller
+ * consumes: a readable stdout, `error`/`close`, `kill`, and a pid — the poller
+ * reads the pid to tell a running process from a spawn that never started.
+ */
+function fakeChild(behaviour: FakeVfsQuery) {
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: PassThrough;
+    stdin: PassThrough;
+    pid: number;
+    killed: boolean;
+    kill: ReturnType<typeof vi.fn>;
+  };
+  child.stdout = new PassThrough();
+  child.stdin = new PassThrough();
+  // Any number will do; that it is defined is what the poller reads.
+  child.pid = 4242;
+  child.killed = false;
+
+  let closed = false;
+  const close = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    child.stdout.end();
+    child.emit('close', code, signal);
+  };
+  child.kill = vi.fn((signal?: NodeJS.Signals) => {
+    child.killed = true;
+    close(null, signal ?? 'SIGTERM');
+    return true;
+  });
+
+  setImmediate(() => {
+    if (closed) {
+      return;
+    }
+    if (behaviour.kind === 'exit') {
+      close(behaviour.code, null);
+      return;
+    }
+    for (const line of behaviour.lines) {
+      child.stdout.write(`${line}\n`);
+    }
+    // Deliberately no close: the real process stays up between emissions.
+  });
+  return child as unknown as childProcess.ChildProcess;
 }
 
-// Blocks forever (until SIGTERM) after emitting its lines, mirroring the
-// real vfs-query, which stays running between emissions.
-const BLOCK = 'exec cat';
+/** The behaviour the next spawn will stand up, set by each case. */
+let nextBehaviour: FakeVfsQuery = BLOCK;
 
 describe('change-streamer/vfs-watermark-poller', () => {
   let dir: string;
@@ -59,14 +120,15 @@ describe('change-streamer/vfs-watermark-poller', () => {
   let consumeError: unknown;
 
   function makePoller(
-    executable: string,
+    behaviour: FakeVfsQuery,
     overrides: Partial<Omit<VfsPollerConfig, 'executable'>> = {},
   ) {
+    nextBehaviour = behaviour;
     const poller = new VfsWatermarkPoller(
       createSilentLogContext(),
       replicaFile,
       {
-        executable,
+        executable: FAKE_EXECUTABLE,
         remotePollIntervalMs: 50,
         backupURL: 's3://fake-bucket/backup',
         ...overrides,
@@ -111,13 +173,17 @@ describe('change-streamer/vfs-watermark-poller', () => {
   afterEach(() => {
     source?.cancel();
     spawnMock.mockClear();
+    // The replica lives in this directory, so it goes with the case. Left
+    // behind, one collects in the system temp directory per run and nothing
+    // else removes them.
+    rmSync(dir, {recursive: true, force: true});
   });
 
   test('spawns the remote poller with the expected args when local diverges from remote', () => {
     setUp();
     // start() runs an immediate checkLocalWatermark(); local ('00') differs
     // from remote (undefined at construction), so this alone spawns.
-    makePoller(fakeVfsQuery(BLOCK), {
+    makePoller(BLOCK, {
       remotePollIntervalMs: 250,
       logLevel: 'debug',
       logFormat: 'text',
@@ -142,14 +208,14 @@ describe('change-streamer/vfs-watermark-poller', () => {
 
   test('pushes watermark updates parsed from vfs-query stdout, deduped by stateVersion', async () => {
     setUp();
-    const poller = makePoller(
-      fakeVfsQuery(
-        `echo '${line('01', 100, '2025-01-01T00:00:00Z')}'\n` +
-          `echo '${line('01', 100, '2025-01-01T00:00:01Z')}'\n` + // duplicate watermark
-          `echo '${line('02', 200, '2025-01-01T00:00:02Z')}'\n` +
-          BLOCK,
-      ),
-    );
+    const poller = makePoller({
+      kind: 'emits',
+      lines: [
+        line('01', 100, '2025-01-01T00:00:00Z'),
+        line('01', 100, '2025-01-01T00:00:01Z'), // duplicate watermark
+        line('02', 200, '2025-01-01T00:00:02Z'),
+      ],
+    });
     poller.checkLocalWatermark();
 
     await vi.waitFor(() =>
@@ -163,12 +229,12 @@ describe('change-streamer/vfs-watermark-poller', () => {
     setUp();
     // No litestream_time in metadata at all (as vfs-query sends on a
     // metadata-read failure, since the Go field is `omitempty`).
-    const poller = makePoller(
-      fakeVfsQuery(
-        `echo '{"query_result":[{"stateVersion":"01","writeTimeMs":100}],"metadata":{}}'\n` +
-          BLOCK,
-      ),
-    );
+    const poller = makePoller({
+      kind: 'emits',
+      lines: [
+        '{"query_result":[{"stateVersion":"01","writeTimeMs":100}],"metadata":{}}',
+      ],
+    });
     const before = Date.now();
     poller.checkLocalWatermark();
 
@@ -180,14 +246,14 @@ describe('change-streamer/vfs-watermark-poller', () => {
 
   test('malformed output is logged and ignored, not thrown', async () => {
     setUp();
-    const poller = makePoller(
-      fakeVfsQuery(
-        `echo 'not json'\n` +
-          `echo '{"query_result":[],"metadata":{}}'\n` + // empty tuple: fails schema
-          `echo '${line('01', 100, '2025-01-01T00:00:00Z')}'\n` +
-          BLOCK,
-      ),
-    );
+    const poller = makePoller({
+      kind: 'emits',
+      lines: [
+        'not json',
+        '{"query_result":[],"metadata":{}}', // empty tuple: fails schema
+        line('01', 100, '2025-01-01T00:00:00Z'),
+      ],
+    });
     poller.checkLocalWatermark();
 
     await vi.waitFor(() => expect(pushed).toHaveLength(1));
@@ -197,11 +263,10 @@ describe('change-streamer/vfs-watermark-poller', () => {
 
   test('stops the remote poller once the local watermark catches up', async () => {
     setUp();
-    const poller = makePoller(
-      fakeVfsQuery(
-        `echo '${line('01', 100, '2025-01-01T00:00:00Z')}'\n${BLOCK}`,
-      ),
-    );
+    const poller = makePoller({
+      kind: 'emits',
+      lines: [line('01', 100, '2025-01-01T00:00:00Z')],
+    });
     poller.checkLocalWatermark();
     await vi.waitFor(() => expect(pushed).toHaveLength(1));
 
@@ -219,11 +284,10 @@ describe('change-streamer/vfs-watermark-poller', () => {
 
   test('a replacement spawned before the old child exits is not orphaned', async () => {
     setUp();
-    const poller = makePoller(
-      fakeVfsQuery(
-        `echo '${line('01', 100, '2025-01-01T00:00:00Z')}'\n${BLOCK}`,
-      ),
-    );
+    const poller = makePoller({
+      kind: 'emits',
+      lines: [line('01', 100, '2025-01-01T00:00:00Z')],
+    });
     poller.checkLocalWatermark();
     await vi.waitFor(() => expect(pushed).toHaveLength(1));
     const child1 = spawnMock.mock.results[0].value as childProcess.ChildProcess;
@@ -255,9 +319,12 @@ describe('change-streamer/vfs-watermark-poller', () => {
 
   test('an unexpected exit while still behind schedules a respawn', async () => {
     setUp();
-    const poller = makePoller(fakeVfsQuery('exit 1'), {
-      remotePollIntervalMs: 10,
-    });
+    const poller = makePoller(
+      {kind: 'exit', code: 1},
+      {
+        remotePollIntervalMs: 10,
+      },
+    );
     poller.checkLocalWatermark();
 
     await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
