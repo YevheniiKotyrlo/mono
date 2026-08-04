@@ -42,12 +42,21 @@ const NO_FLOOR = v(1_000_000);
 /** A clock far enough ahead that every fixture row is past retention. */
 const LONG_AGO = 10_000_000;
 
-const files: DbFile[] = [];
+/**
+ * Every fixture's file AND the handle opened on it.
+ *
+ * The handle is a writable connection to the change log, and it has to be closed
+ * before the file is removed: a platform that refuses to unlink an open file
+ * rejects the removal outright rather than deferring it. Tracking the file alone
+ * leaves the close to whichever test remembers to do it.
+ */
+const opened: {file: DbFile; db: Database}[] = [];
 
-afterEach(() => {
-  for (const file of files.splice(0)) {
+afterEach(async () => {
+  for (const {file, db} of opened.splice(0)) {
+    db.close();
     deleteChangeLogDB(file.path);
-    file.delete();
+    await file.delete();
   }
 });
 
@@ -136,7 +145,6 @@ function setup(
   } = {},
 ): Fixture {
   const file = new DbFile('sqlite-change-log-purge-scheduler');
-  files.push(file);
   const anchor: ChangeLogAnchor = {
     identity: {epoch: null, generation: '01', replicaID: null},
     resumeWatermark: opts.resumeWatermark ?? SEED_WATERMARK,
@@ -144,6 +152,7 @@ function setup(
     cookies: EMPTY_COOKIE_SET,
   };
   const {db} = openChangeLogDBForWriting(lc, file.path, () => anchor);
+  opened.push({file, db});
 
   let connection: Database | undefined =
     (opts.connected ?? true) ? db : undefined;
@@ -1247,12 +1256,15 @@ describe('change-streamer/sqlite-change-log-purge-scheduler', () => {
             } finally {
               scheduler.stop();
               parkedYields.splice(0).forEach(release => release());
-              const index = files.indexOf(file);
+              // This run cleans up after itself rather than leaving 1000 files to
+              // the hook, so it drops its own entry and closes its own handle.
+              const index = opened.findIndex(entry => entry.file === file);
               if (index >= 0) {
-                files.splice(index, 1);
+                opened.splice(index, 1);
               }
+              db.close();
               deleteChangeLogDB(file.path);
-              file.delete();
+              await file.delete();
             }
           },
         ),

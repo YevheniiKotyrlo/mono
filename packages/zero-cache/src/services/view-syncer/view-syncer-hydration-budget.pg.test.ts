@@ -340,7 +340,7 @@ test<PgTest>('evicts every optional query when the budget is spent before option
     await (restarted ?? initial).vs.stop();
     await (restarted ?? initial).viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -374,7 +374,7 @@ test<PgTest>('retains every optional query when the budget is not spent', async 
     await (restarted ?? initial).vs.stop();
     await (restarted ?? initial).viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -413,7 +413,7 @@ test<PgTest>('transform round trips do not spend the budget', async ({
     await (restarted ?? initial).vs.stop();
     await (restarted ?? initial).viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -445,7 +445,7 @@ test<PgTest>('a disabled budget never evicts an optional query', async ({
     await (restarted ?? initial).vs.stop();
     await (restarted ?? initial).viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -510,7 +510,7 @@ test<PgTest>('stops optional hydration at a query boundary and permits a re-requ
     await (restarted ?? initial).vs.stop();
     await (restarted ?? initial).viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -587,7 +587,7 @@ test<PgTest>('an active query is never evicted, even when another client inactiv
     await (restarted ?? initial).vs.stop();
     await (restarted ?? initial).viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -631,7 +631,7 @@ test<PgTest>('a never-gotten inactive query is hydrated when the budget is disab
     await initial.vs.stop();
     await initial.viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -684,7 +684,7 @@ test<PgTest>('a never-gotten inactive query is left intact when the budget is en
     await initial.vs.stop();
     await initial.viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -732,7 +732,7 @@ test<PgTest>('required and optional custom queries are transformed in one round 
     await initial.vs.stop();
     await initial.viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -785,7 +785,7 @@ test<PgTest>('a client reconnecting at its old cookie is told the evicted query 
     await (restarted ?? initial).vs.stop();
     await (restarted ?? initial).viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -831,7 +831,7 @@ test<PgTest>('an optional custom query that fails to transform is removed, not e
     await (restarted ?? initial).vs.stop();
     await (restarted ?? initial).viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -867,6 +867,6 @@ test<PgTest>('legacy client queries still follow the budget', async ({
     await (restarted ?? initial).vs.stop();
     await (restarted ?? initial).viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });

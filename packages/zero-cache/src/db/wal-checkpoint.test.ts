@@ -23,8 +23,22 @@ describe('db/wal-checkpoint', () => {
     conn.close();
   });
 
-  afterEach(() => {
-    dbFile.delete();
+  let worker: Worker | undefined;
+
+  afterEach(async () => {
+    // The worker holds its own connection to the replica, which DbFile cannot
+    // see, and Windows refuses to unlink a file with an open handle. The test
+    // starts the worker, so the test shuts it down — here rather than in each
+    // branch, so neither can forget.
+    const running = worker;
+    worker = undefined;
+    try {
+      await running?.terminate();
+    } finally {
+      // In a `finally` so a failing terminate still removes the replica, and the
+      // handle is cleared first so the next test cannot inherit a stale one.
+      await dbFile.delete();
+    }
   });
 
   type Checkpoint = {
@@ -48,13 +62,17 @@ describe('db/wal-checkpoint', () => {
       }
 
       // Simulate a concurrent transaction (e.g. replicator) in a different thread.
-      const worker = new Worker(
+      worker = new Worker(
         `
       const {parentPort} = require('worker_threads');
       const Database = require('@rocicorp/zero-sqlite3');
 
       // Acquire a read lock.
-      const reader = new Database('${dbFile.path}');
+      const {workerData} = require('worker_threads');
+      // The path arrives as workerData, not interpolated into this source: a
+      // Windows path is full of backslashes, which a source-level template
+      // turns into escape sequences and mangles.
+      const reader = new Database(workerData.dbPath);
       reader.pragma('busy_timeout = 5000');
       const count = reader.prepare('select count(*) as count from foo');
 
@@ -73,7 +91,7 @@ describe('db/wal-checkpoint', () => {
         parentPort.postMessage({before, after});
       });
     `,
-        {eval: true},
+        {eval: true, workerData: {dbPath: dbFile.path}},
       );
 
       const {promise: inTransaction, resolve: setRunning} = resolver();
@@ -86,7 +104,30 @@ describe('db/wal-checkpoint', () => {
         // litestream does not set a busy_timeout.
         const [result] = writer.pragma('wal_checkpoint(RESTART)') as Checkpoint;
         expect(result).toEqual({busy: 1, log: 10, checkpointed: 10});
+
+        // Wait for the commit to be acknowledged before returning. Otherwise
+        // teardown terminates the worker mid-COMMIT — and termination cannot
+        // interrupt native code, so the WAL write completes after the request
+        // and races the unlink on the next line.
+        const {
+          promise: committed,
+          resolve: setCommitted,
+          reject: failCommit,
+        } = resolver<unknown>();
+        worker.once('message', setCommitted);
+        // A COMMIT that exceeds the worker's busy_timeout throws there and posts
+        // nothing, so without this the wait never settles and the worker's error
+        // surfaces separately, attributed to the whole file rather than to this.
+        worker.once('error', failCommit);
         worker.postMessage('commit');
+        try {
+          await committed;
+        } finally {
+          // Detached once the wait is over: `once` only removes itself when it
+          // fires, so leaving it attached would swallow a later error during
+          // teardown by rejecting an already-settled promise.
+          worker.off('error', failCommit);
+        }
         return;
       }
 

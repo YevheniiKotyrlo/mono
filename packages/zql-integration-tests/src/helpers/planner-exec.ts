@@ -1,3 +1,4 @@
+import {basename, dirname, join} from 'node:path';
 // oxlint-disable no-console
 import {testLogConfig} from '../../../otel/src/test-log-config.ts';
 import {createSilentLogContext} from '../../../shared/src/logging-test-utils.ts';
@@ -25,11 +26,11 @@ import {
 import {AccumulatorDebugger} from '../../../zql/src/planner/planner-debug.ts';
 import {completeOrdering} from '../../../zql/src/query/complete-ordering.ts';
 import {asQueryInternals} from '../../../zql/src/query/query-internals.ts';
-import {Database} from '../../../zqlite/src/db.ts';
+import type {Database} from '../../../zqlite/src/db.ts';
 import {createSQLiteCostModel} from '../../../zqlite/src/sqlite-cost-model.ts';
 import {newQueryDelegate} from '../../../zqlite/src/test/source-factory.ts';
 import {spearmanCorrelation} from './correlation.ts';
-import {bootstrap} from './runner.ts';
+import {bootstrap, openSuiteDatabase} from './runner.ts';
 
 // =============================================================================
 // Type definitions
@@ -420,13 +421,21 @@ export async function createPlannerInfrastructure(config: {
   });
 
   // Create a copy of the baseline SQLite database for the indexed version
-  const indexedDbFile = dbs.sqliteFile.replace('.db', '-indexed.db');
+  // Suffixed on the basename, not the whole path: `replace` hits the first match
+  // anywhere, so a temp directory containing '.db' would retarget the copy outside
+  // the suite's directory — where teardown would not remove it.
+  const indexedDbFile = join(
+    dirname(dbs.sqliteFile),
+    basename(dbs.sqliteFile).replace('.db', '-indexed.db'),
+  );
 
   // Use VACUUM INTO to create a proper copy of the database (handles WAL files)
   dbs.sqlite.exec(`VACUUM INTO '${indexedDbFile}'`);
 
-  // Create a second Database connection to the indexed file
-  const indexedDb = new Database(createSilentLogContext(), indexedDbFile);
+  // Create a second Database connection to the indexed file. It lives as long as
+  // the suite and sits inside the suite's temp directory, so teardown has to know
+  // about it or the directory cannot be removed.
+  const indexedDb = openSuiteDatabase(createSilentLogContext(), indexedDbFile);
 
   // Set journal mode to WAL2 to match the original
   indexedDb.pragma('journal_mode = WAL2');

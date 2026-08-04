@@ -51,16 +51,22 @@ const ANCHOR: ChangeLogAnchor = {
   cookies: EMPTY_COOKIE_SET,
 };
 
-/** The main file and the sidecars `deleteLiteDB` removes. */
+/**
+ * Written out rather than taken from `SQLITE_FILE_SUFFIXES`, which these tests both
+ * seed fixtures from and assert over: sharing the constant would make the two agree
+ * by construction, so a dropped suffix would stop being created at the same moment
+ * it stopped being checked. That the production list is complete is pinned in
+ * delete-lite-db.test.ts, against its own literal.
+ */
 const SIDECARS = ['', '-wal', '-wal2', '-shm', '-journal'];
 
 const dbFiles: DbFile[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   let file: DbFile | undefined;
   while ((file = dbFiles.pop())) {
     deleteChangeLogDB(file.path);
-    file.delete();
+    await file.delete();
   }
 });
 

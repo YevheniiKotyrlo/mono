@@ -10,6 +10,7 @@ import {
 import {rm} from 'node:fs/promises';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {SQLITE_FILE_SUFFIXES} from '../../../packages/shared/src/sqlite-file-suffixes.ts';
 import type {BenchmarkConfig} from './config.ts';
 import {appPath, appRoot, repoRoot} from './config.ts';
 import {
@@ -207,22 +208,24 @@ export function queryPlanAnalysisLogPath(config: BenchmarkConfig): string {
 }
 
 export async function removeReplicaFiles(replicaFile: string): Promise<void> {
-  const files: string[] = [
-    replicaFile,
-    `${replicaFile}-shm`,
-    `${replicaFile}-wal`,
-    `${replicaFile}-rm`,
-    `${replicaFile}-rm-shm`,
-    `${replicaFile}-rm-wal`,
-  ];
+  // Every database the topology leaves behind, and every file each one consists
+  // of. The replicas run in WAL2 and `prepare()` switches to `journal_mode =
+  // delete`, so a `-wal2` or a rollback `-journal` can outlive a run and be found
+  // beside the next one's replica; `SQLITE_FILE_SUFFIXES` is the single list of
+  // what a SQLite database is made of, so a suffix cannot be missed here and
+  // present elsewhere. No `recursive`, so a path naming a directory still fails
+  // loudly.
+  const databases: string[] = [replicaFile, `${replicaFile}-rm`];
   for (let i = 0; i < 20; i++) {
-    files.push(
-      `${replicaFile}-vs${i}`,
-      `${replicaFile}-vs${i}-shm`,
-      `${replicaFile}-vs${i}-wal`,
-    );
+    databases.push(`${replicaFile}-vs${i}`);
   }
-  await Promise.all(files.map(file => rm(file, {force: true})));
+  await Promise.all(
+    databases.flatMap(database =>
+      SQLITE_FILE_SUFFIXES.map(suffix =>
+        rm(`${database}${suffix}`, {force: true}),
+      ),
+    ),
+  );
 }
 
 export type StartedTopology = {

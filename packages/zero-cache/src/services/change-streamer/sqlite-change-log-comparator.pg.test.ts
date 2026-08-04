@@ -112,7 +112,7 @@ describe('change-streamer/sqlite-change-log-comparator', () => {
       await storer.stop();
       await storerDone;
       writer.close();
-      logFile.delete();
+      await logFile.delete();
       await testDBs.drop(sql);
     };
   });
@@ -1159,7 +1159,7 @@ describe('change-streamer/sqlite-change-log-comparator', () => {
         } finally {
           runWriter.close();
           deleteChangeLogDB(runFile.path);
-          runFile.delete();
+          await runFile.delete();
         }
       }),
       {numRuns: 10},

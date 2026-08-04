@@ -77,9 +77,9 @@ describe('view-syncer/snapshotter', () => {
     s = new Snapshotter(lc, dbFile.path, {appID: 'my_app'}).init();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     s.destroy();
-    dbFile.delete();
+    await dbFile.delete();
   });
 
   test('initial snapshot', () => {
