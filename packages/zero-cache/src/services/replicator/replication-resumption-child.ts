@@ -12,7 +12,7 @@ import type {
   SerializedDownstream,
   SubscriberContext,
 } from '../change-streamer/change-streamer.ts';
-import {exitAfter, runUntilKilled} from '../life-cycle.ts';
+import {exitAfter, runUntilKilled, shutdownRequested} from '../life-cycle.ts';
 import type {CommitResult} from './change-processor.ts';
 import {ReplicatorService} from './replicator.ts';
 import {
@@ -250,7 +250,12 @@ export default async function runWorker(
     null,
   );
 
-  const running = runUntilKilled(lc, parent, replicator);
+  const running = runUntilKilled(
+    lc,
+    parent,
+    shutdownRequested(parent),
+    replicator,
+  );
 
   for await (const _ of replicator.subscribe()) {
     send(parent, ['replication-resumption:ready', {pid}]);

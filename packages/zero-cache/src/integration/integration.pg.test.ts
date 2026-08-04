@@ -507,7 +507,7 @@ describe('integration', () => {
         await replicaDbFile2.delete();
       }
     };
-  }, 30000);
+  });
 
   const FOO_QUERY: AST = {
     table: 'foo',

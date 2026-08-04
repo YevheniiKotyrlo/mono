@@ -1,7 +1,11 @@
 import {consoleLogSink, LogContext} from '@rocicorp/logger';
 import {must} from '../../../shared/src/must.ts';
 import {getZeroConfig} from '../config/zero-config.ts';
-import {exitAfter, runUntilKilled} from '../services/life-cycle.ts';
+import {
+  exitAfter,
+  runUntilKilled,
+  shutdownRequested,
+} from '../services/life-cycle.ts';
 import {
   buildLitestreamVfsReplicaURL,
   VfsBackupWatermarkReader,
@@ -46,6 +50,7 @@ export default async function runWorker(
   await runUntilKilled(
     lc,
     parent ?? process,
+    shutdownRequested(parent ?? process),
     new VfsBackupWatermarkWorkerService(
       lc,
       parent,

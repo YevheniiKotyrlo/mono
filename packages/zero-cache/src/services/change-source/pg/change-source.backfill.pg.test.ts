@@ -121,7 +121,7 @@ describe.each([
       await testDBs.drop(upstream);
       await replicaDbFile.delete();
     };
-  }, 30000);
+  });
 
   function drainToQueue(
     sub: Source<ChangeStreamMessage>,

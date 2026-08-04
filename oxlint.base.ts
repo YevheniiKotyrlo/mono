@@ -180,8 +180,15 @@ export const baseConfig = {
       },
     ],
 
-    // Portability rules. Both defects are invisible on POSIX, so nothing else
-    // catches a regression.
+    // Portability rules for two defects nothing else in this repo catches.
+    //
+    // Neither is Windows-only, though that is where they are unmissable. A `file:`
+    // URL's `.pathname` is percent-encoded on every platform, so a checkout under a
+    // path containing a space or a non-ASCII character — `~/Library/Mobile
+    // Documents/…` being the common macOS one — yields a string `fs` cannot open on
+    // Linux and macOS too. Only the extra `/C:/` drive prefix is Windows-specific.
+    // A bare `.CMD` shim genuinely is Windows-only; there the rule keeps the class
+    // from being reintroduced rather than guarding a live defect elsewhere.
     //
     // `tool` in ignorePatterns matches at any depth, so neither rule reaches
     // `packages/*/tool/**` or `packages/*/src/tool/**`; an override cannot narrow

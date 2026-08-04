@@ -1,20 +1,23 @@
-import {readFileSync} from 'node:fs';
-import {readdirSync} from 'node:fs';
+import {readFileSync, readdirSync} from 'node:fs';
 import {dirname, join, relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import ts from 'typescript';
 import {expect, test} from 'vitest';
 import {MAX_PG_TEST_TIMEOUT_MS} from '../../../shared/src/tool/vitest-config.ts';
 
 /**
- * A Postgres-backed suite may raise its own time budget, never lower it.
+ * A Postgres-backed test may raise its own time budget, never lower it.
  *
  * The project grants one that already accounts for where it runs — doubled in CI,
  * because CI is slower. A file that hardcodes its own number opts out of that: a
  * literal equal to the local grant silently halves the CI one, and a smaller
  * literal halves both. Neither is visible at the call site, and what it produces
  * is a suite that passes alone and times out under the parallelism the pg projects
- * actually run at. Four files had one, and the case that finally exposed the
- * pattern ran in under a second on its own while failing at ten.
+ * actually run at. The case that finally exposed the pattern ran in under a second
+ * on its own while failing at ten.
+ *
+ * Hooks count too: `pgProjectDefaults()` sets `hookTimeout` from the same number,
+ * and a `beforeEach` that provisions a database is what starves first.
  *
  * Raising is fine and stays possible — a suite that genuinely needs longer than
  * its siblings can say so, and saying so is the point. This only refuses the
@@ -57,43 +60,180 @@ function pgTestFiles(): string[] {
 }
 
 /**
- * Lines that open a suite AND carry a time budget in its options object.
+ * Everything vitest lets you attach a time budget to.
  *
- * Found loosely on purpose. The value is read by a precise pattern below, and a
- * candidate that pattern cannot read is reported rather than skipped — otherwise
- * the matcher decides what counts as a violation, which is how the first version
- * of this went blind: it anchored on `describe(` and so could never see
- * `describe.skipIf(!RUN)('…', {timeout: 30000}`, which is exactly the shape a
- * suite takes once it moves behind an opt-in flag.
+ * Hooks belong here as much as cases do, for the reason in the header: one number
+ * feeds `testTimeout` and `hookTimeout` both.
  */
-function suiteTimeoutCandidates(
+const TIMEOUT_BEARING = new Set([
+  'describe',
+  'test',
+  'it',
+  'bench',
+  'beforeEach',
+  'beforeAll',
+  'afterEach',
+  'afterAll',
+]);
+
+/**
+ * Parsed rather than pattern-matched, because every interesting form here defeats
+ * a pattern.
+ *
+ * Neither the options form nor the trailing one is reliably on one line, and one of
+ * them cannot be: `oxfmt` wraps a call past 80 columns and CI runs `oxfmt --check`,
+ * so for a long name the wrapped form is the only committable one. The trailing
+ * form's number sits after a body that routinely spans hundreds of lines. And the
+ * value is an expression, not a token — `{timeout: 90 * 1000}` is a 90-second RAISE
+ * that a pattern reading the first digits sees as 90ms and fails.
+ *
+ * Balancing brackets by hand instead runs into the same wall one level down: a
+ * regex literal containing a quote or an unbalanced paren desynchronises the count,
+ * `describe.skipIf(!isCI())(…)` nests parens inside the modifier call, and
+ * `beforeEach<PgTest<Foo>>(…)` nests angle brackets. The compiler already knows all
+ * of this, and it ships with the repo.
+ */
+type TimeoutDeclaration = {
+  line: number;
+  construct: string;
+  /** `options` is `{timeout: …}`; `trailing` is the final numeric argument. */
+  form: 'options' | 'trailing';
+  /** `null` when the value is not statically a number — see `text`. */
+  ms: number | null;
+  /** The value as written, for reporting one this cannot evaluate. */
+  text: string;
+};
+
+/**
+ * A number if the expression is statically one, else `undefined`.
+ *
+ * Covers what a budget is ever written as: a literal in any base, a negation, and
+ * arithmetic over those (`90 * 1000`, `2 * 60 * 1000`). An identifier or a call is
+ * deliberately NOT resolved — a value this cannot see is reported rather than
+ * guessed, because guessing is how a matcher ends up deciding what counts as a
+ * violation.
+ */
+function staticNumber(node: ts.Expression): number | undefined {
+  if (ts.isNumericLiteral(node)) {
+    return Number(node.text.replaceAll('_', ''));
+  }
+  if (ts.isParenthesizedExpression(node)) {
+    return staticNumber(node.expression);
+  }
+  if (
+    ts.isPrefixUnaryExpression(node) &&
+    node.operator === ts.SyntaxKind.MinusToken
+  ) {
+    const operand = staticNumber(node.operand);
+    return operand === undefined ? undefined : -operand;
+  }
+  if (ts.isBinaryExpression(node)) {
+    const left = staticNumber(node.left);
+    const right = staticNumber(node.right);
+    if (left === undefined || right === undefined) {
+      return undefined;
+    }
+    switch (node.operatorToken.kind) {
+      case ts.SyntaxKind.AsteriskToken:
+        return left * right;
+      case ts.SyntaxKind.PlusToken:
+        return left + right;
+      case ts.SyntaxKind.MinusToken:
+        return left - right;
+      case ts.SyntaxKind.SlashToken:
+        return right === 0 ? undefined : left / right;
+      default:
+        return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The identifier a call chain is rooted at, if the whole chain is identifiers.
+ *
+ * `test` -> `test`; `describe.skipIf(x)` -> `describe`; `foo.test` -> `foo`, which
+ * is how a method that merely shares vitest's name stays out of the scan.
+ */
+function rootIdentifier(node: ts.Expression): string | undefined {
+  if (ts.isIdentifier(node)) {
+    return node.text;
+  }
+  if (ts.isPropertyAccessExpression(node)) {
+    return rootIdentifier(node.expression);
+  }
+  if (ts.isCallExpression(node)) {
+    return rootIdentifier(node.expression); // the curried `describe.skipIf(x)(…)`
+  }
+  return undefined;
+}
+
+/** Every time budget declared in `source`, in either form vitest accepts. */
+function timeoutDeclarations(
   source: string,
-): {line: number; text: string}[] {
-  return source
-    .split('\n')
-    .map((text, index) => ({line: index + 1, text}))
-    .filter(
-      ({text}) => /\bdescribe\b/u.test(text) && /\{[^}]*\btimeout:/u.test(text),
-    );
-}
+  fileName = 'input.ts',
+): TimeoutDeclaration[] {
+  const parsed = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ false,
+    ts.ScriptKind.TS,
+  );
+  const found: TimeoutDeclaration[] = [];
 
-/** Any modifier chain is allowed between `describe` and its arguments. */
-const SUITE_TIMEOUT =
-  /\bdescribe(?:\.\w+)*(?:\([^()]*\))?\(\s*[^,]+,\s*\{[^}]*timeout:\s*([\d_]+)/u;
+  const lineOf = (position: number) =>
+    parsed.getLineAndCharacterOfPosition(position).line + 1;
 
-/** Suite-level `{timeout: N}` options, which apply to every case in the file. */
-function suiteTimeouts(source: string): number[] {
-  return suiteTimeoutCandidates(source).flatMap(({text}) => {
-    const value = Number(SUITE_TIMEOUT.exec(text)?.[1].replaceAll('_', ''));
-    return Number.isFinite(value) ? [value] : [];
-  });
-}
-
-/** Candidates the precise pattern could not read — a blind spot, not a pass. */
-function unreadSuiteTimeouts(source: string): string[] {
-  return suiteTimeoutCandidates(source)
-    .filter(({text}) => !SUITE_TIMEOUT.test(text))
-    .map(({line, text}) => `${line}: ${text.trim()}`);
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      const construct = rootIdentifier(node.expression);
+      if (construct !== undefined && TIMEOUT_BEARING.has(construct)) {
+        for (const argument of node.arguments) {
+          // Only this object's OWN properties: a `{poll: {timeout: 50}}` nested
+          // inside is some other API's budget, not this call's.
+          if (ts.isObjectLiteralExpression(argument)) {
+            for (const property of argument.properties) {
+              if (
+                ts.isPropertyAssignment(property) &&
+                (ts.isIdentifier(property.name) ||
+                  ts.isStringLiteral(property.name)) &&
+                property.name.text === 'timeout'
+              ) {
+                found.push({
+                  line: lineOf(property.getStart(parsed)),
+                  construct,
+                  form: 'options',
+                  ms: staticNumber(property.initializer) ?? null,
+                  text: property.initializer.getText(parsed),
+                });
+              }
+            }
+          }
+        }
+        // A bare numeric final argument is only ever the timeout — every other
+        // position takes a name, an options object, or a function.
+        const last = node.arguments.at(-1);
+        if (
+          last !== undefined &&
+          !ts.isObjectLiteralExpression(last) &&
+          !ts.isFunctionLike(last) &&
+          staticNumber(last) !== undefined
+        ) {
+          found.push({
+            line: lineOf(last.getStart(parsed)),
+            construct,
+            form: 'trailing',
+            ms: staticNumber(last) ?? null,
+            text: last.getText(parsed),
+          });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  return found;
 }
 
 const files = pgTestFiles();
@@ -113,18 +253,63 @@ test('the pg test files are found at all', () => {
   expect(files.length).toBeGreaterThan(20);
 });
 
-test('no pg suite lowers the budget its project grants', () => {
+test('the scan parses every real file', () => {
+  // Real files contain syntax no fixture thought of. This is not a count: the
+  // number of legitimate raises in the repo is not an invariant, and a guard that
+  // failed when someone removed the last one would be wired to live content.
+  for (const file of files) {
+    expect(() =>
+      timeoutDeclarations(readFileSync(file, 'utf8'), file),
+    ).not.toThrow();
+  }
+});
+
+test('no pg test lowers the budget its project grants', () => {
   const lowered: string[] = [];
   for (const file of files) {
-    for (const timeout of suiteTimeouts(readFileSync(file, 'utf8'))) {
-      if (timeout < granted) {
+    for (const {line, construct, ms, form} of timeoutDeclarations(
+      readFileSync(file, 'utf8'),
+      file,
+    )) {
+      if (ms !== null && ms < granted) {
         lowered.push(
-          `${relative(REPO_ROOT, file).replaceAll('\\', '/')}: ${timeout}ms < ${granted}ms`,
+          `${relative(REPO_ROOT, file).replaceAll('\\', '/')}:${line}: ` +
+            `${construct} (${form}) ${ms}ms < ${granted}ms`,
         );
       }
     }
   }
   expect(lowered).toEqual([]);
+});
+
+test('a budget this cannot evaluate is reported, not skipped', () => {
+  // The matcher must not also be the thing that decides what counts. A budget
+  // written as an identifier or a call is invisible to any static read, so it is
+  // surfaced for a human rather than passed silently — otherwise illegibility
+  // becomes an exemption nobody granted.
+  //
+  // The entries below are the sanctioned ones. Each is a RAISE or a documented
+  // detector; a new name appearing here is a decision, not a formality.
+  const SANCTIONED = new Set([
+    'TIMEOUT_MS', // 120_000 / 600_000 raises, declared in their own files
+    'c.timeoutMs', // the crafted COPY detector, documented at its call site
+    'timeoutMs', // the same value, as the option is assembled
+  ]);
+
+  const unreadable: string[] = [];
+  for (const file of files) {
+    for (const {line, ms, text} of timeoutDeclarations(
+      readFileSync(file, 'utf8'),
+      file,
+    )) {
+      if (ms === null && !SANCTIONED.has(text)) {
+        unreadable.push(
+          `${relative(REPO_ROOT, file).replaceAll('\\', '/')}:${line}: ${text}`,
+        );
+      }
+    }
+  }
+  expect(unreadable).toEqual([]);
 });
 
 /** Every `vitest.config*.ts` under a package, where projects are assembled. */
@@ -152,103 +337,314 @@ function packageConfigs(): string[] {
   return found;
 }
 
-test('no config lowers a pg project’s budget on its way past', () => {
-  // The suite-level check above reads test FILES. A project's budget can also be
-  // cut where the project is assembled — `mergeConfig(configForVersion(16, url),
-  // {test: {testTimeout: 20_000}})` overrides the shared grant, and no test file
-  // says anything about it. One package did exactly that across every project it
-  // owned, which raised its no-pg budget (10s -> 20s, deliberate) and quietly
-  // lowered all four pg ones (60s -> 20s in CI, not deliberate at all).
-  //
-  // A raise scoped to the no-pg project is the legitimate shape, so the target of
-  // the merge is what decides: overriding `configForNoPg` is fine, overriding
-  // `configForVersion` is not.
-  const lowered: string[] = [];
-  for (const config of packageConfigs()) {
-    const source = readFileSync(config, 'utf8');
-    for (const match of source.matchAll(
-      /mergeConfig\(\s*(\w+)\([^)]*\)\s*,\s*\{[^}]*testTimeout:\s*([\d_]+)/gu,
-    )) {
-      const [, target, literal] = match;
-      const value = Number(literal.replaceAll('_', ''));
-      if (target !== 'configForNoPg' && value < granted) {
-        lowered.push(
-          `${relative(REPO_ROOT, config).replaceAll('\\', '/')}: ` +
-            `${target} merged down to ${value}ms < ${granted}ms`,
-        );
+/**
+ * Whether this config can reach a pg project at all.
+ *
+ * A package with no pg projects is free to set whatever budget it likes — that is
+ * what a per-project grant is for. `packages/zql` merges the shared config down to
+ * 20s and owns no `*.pg.test.ts` and no pg project, so flagging it would report a
+ * lowering that reaches nothing.
+ */
+function assemblesPgProjects(source: string): boolean {
+  return /\b(configForVersion|configForCustomPg|pgProjectDefaults)\b/u.test(
+    source,
+  );
+}
+
+/**
+ * Budgets cut where a project is assembled rather than in a test file.
+ *
+ * `mergeConfig(configForVersion(16, url), {test: {testTimeout: 20_000}})` overrides
+ * the shared grant and no test file says anything about it. One package did exactly
+ * that across every project it owned, raising its no-pg budget (10s -> 20s,
+ * deliberate) and quietly lowering all four pg ones (60s -> 20s in CI, not
+ * deliberate at all).
+ *
+ * A raise scoped to the no-pg project is the legitimate shape, so the merge target
+ * decides: overriding `configForNoPg` is fine, overriding anything else is not.
+ * Both budget keys are read, because `hookTimeout` starves the same suites.
+ */
+function loweredMergeTargets(
+  source: string,
+  limit: number,
+  fileName = 'vitest.config.ts',
+): {line: number; target: string; key: string; ms: number}[] {
+  const parsed = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.TS,
+  );
+  const found: {line: number; target: string; key: string; ms: number}[] = [];
+
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      rootIdentifier(node.expression) === 'mergeConfig' &&
+      node.arguments.length >= 2
+    ) {
+      const target = node.arguments[0].getText(parsed);
+      // A no-pg-scoped raise is sanctioned. Anything else — a named pg config, or
+      // a variable standing for whichever config is being mapped over — reaches
+      // the pg projects.
+      if (!target.startsWith('configForNoPg')) {
+        for (const argument of node.arguments.slice(1)) {
+          const walk = (inner: ts.Node): void => {
+            if (
+              ts.isPropertyAssignment(inner) &&
+              ts.isIdentifier(inner.name) &&
+              (inner.name.text === 'testTimeout' ||
+                inner.name.text === 'hookTimeout')
+            ) {
+              const ms = staticNumber(inner.initializer);
+              if (ms !== undefined && ms < limit) {
+                found.push({
+                  line:
+                    parsed.getLineAndCharacterOfPosition(inner.getStart(parsed))
+                      .line + 1,
+                  target,
+                  key: inner.name.text,
+                  ms,
+                });
+              }
+            }
+            ts.forEachChild(inner, walk);
+          };
+          walk(argument);
+        }
       }
     }
-  }
-  expect(lowered).toEqual([]);
-});
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  return found;
+}
 
-test('the config scan finds the shape it is looking for', () => {
-  // A tripwire on the pattern: it has to see both the legitimate no-pg raise and
-  // the pg lowering, or the case above passes because the regex matched nothing.
-  expect(packageConfigs().length).toBeGreaterThan(8);
-  const seen = packageConfigs().some(config =>
-    /mergeConfig\(\s*configForNoPg\([^)]*\)\s*,\s*\{[^}]*testTimeout:/u.test(
-      readFileSync(config, 'utf8'),
-    ),
-  );
-  expect(seen).toBe(true);
+test('no config lowers a pg project’s budget on its way past', () => {
+  const lowered: string[] = [];
+  const scanned: string[] = [];
+  for (const config of packageConfigs()) {
+    const source = readFileSync(config, 'utf8');
+    if (!assemblesPgProjects(source)) {
+      continue;
+    }
+    scanned.push(config);
+    for (const {line, target, key, ms} of loweredMergeTargets(
+      source,
+      granted,
+      config,
+    )) {
+      lowered.push(
+        `${relative(REPO_ROOT, config).replaceAll('\\', '/')}:${line}: ` +
+          `${target} merged ${key} down to ${ms}ms < ${granted}ms`,
+      );
+    }
+  }
+  // In the same case as the assertion, so a scoping predicate that stopped
+  // matching cannot quietly empty the scan.
+  expect(scanned.length).toBeGreaterThan(8);
+  expect(lowered).toEqual([]);
 });
 
 test('the granted budget is a real one', () => {
   // A tripwire on the comparison itself: were the grant zero or missing, every
-  // literal would clear it and the case above would pass vacuously.
+  // literal would clear it and the cases above would pass vacuously.
   expect(granted).toBeGreaterThanOrEqual(10_000);
-  // And it is the CI grant, not the local one.
-  expect(granted).toBe(60_000);
 });
 
-test('the scan reads a suite timeout where one exists', () => {
-  // And a tripwire on the matcher: a regex that matched nothing would report no
-  // violations however many there were.
-  expect(suiteTimeouts("describe('x', {timeout: 15000}, () => {}); ")).toEqual([
-    15000,
+test('the scan reads every form a budget is written in', () => {
+  // Fixtures rather than live files. A tripwire wired to a real call site fails
+  // when someone legitimately changes that call site, in a package they never
+  // opened, and it only ever exercises whichever branch that site occupies.
+  const read = (source: string) =>
+    timeoutDeclarations(source).map(({construct, ms, form}) => ({
+      construct,
+      ms,
+      form,
+    }));
+
+  expect(read("describe('x', {timeout: 15000}, () => {});")).toEqual([
+    {construct: 'describe', ms: 15000, form: 'options'},
   ]);
-  expect(suiteTimeouts("describe('x', {timeout: 20_000}, () => {});")).toEqual([
-    20000,
+  expect(read("describe('x', {timeout: 20_000}, () => {});")).toEqual([
+    {construct: 'describe', ms: 20000, form: 'options'},
   ]);
-  expect(suiteTimeouts("describe('x', () => {});")).toEqual([]);
-  // Modifier chains, which is what a suite behind an opt-in flag looks like.
+  expect(read("describe('x', () => {});")).toEqual([]);
+
+  // Wrapped past 80 columns, which is what `oxfmt` produces and CI enforces.
   expect(
-    suiteTimeouts("describe.skipIf(!RUN)('x', {timeout: 30000}, () => {});"),
+    read(`describe(
+  'a suite name long enough that the formatter breaks the call',
+  {timeout: 30_000},
+  async () => {},
+);`),
+  ).toEqual([{construct: 'describe', ms: 30000, form: 'options'}]);
+
+  // An exploded options object survives the formatter at any name length.
+  expect(read("describe('tiny', {\n  timeout: 30_000,\n}, () => {});")).toEqual(
+    [{construct: 'describe', ms: 30000, form: 'options'}],
+  );
+
+  // Trailing numeric argument, after a body. No bounded pattern reaches this.
+  expect(
+    read(`test('x', async () => {
+  await something();
+  expect(1).toBe(1);
+}, 10000);`),
+  ).toEqual([{construct: 'test', ms: 10000, form: 'trailing'}]);
+
+  // Hooks, including the generic forms the repo uses.
+  expect(read('beforeEach<PgTest>(async () => {}, 30000);')).toEqual([
+    {construct: 'beforeEach', ms: 30000, form: 'trailing'},
+  ]);
+  expect(read('beforeEach<PgTest<Foo>>(async () => {}, 30_000);')).toEqual([
+    {construct: 'beforeEach', ms: 30000, form: 'trailing'},
+  ]);
+  expect(read('afterAll(async () => {}, 45_000);')).toEqual([
+    {construct: 'afterAll', ms: 45000, form: 'trailing'},
+  ]);
+
+  // Modifier chains, including one whose own argument contains parentheses.
+  expect(
+    read("describe.skipIf(!RUN)('x', {timeout: 30000}, () => {});"),
+  ).toEqual([{construct: 'describe', ms: 30000, form: 'options'}]);
+  expect(
+    read("describe.skipIf(!isCI())('x', {timeout: 30_000}, () => {});"),
+  ).toEqual([{construct: 'describe', ms: 30000, form: 'options'}]);
+  expect(
+    read("describe.each(cases.map(c => c.name))('x', {timeout: 30_000}, f);"),
+  ).toEqual([{construct: 'describe', ms: 30000, form: 'options'}]);
+  expect(read("test.each([1, 2])('x', () => {}, 12000);")).toEqual([
+    {construct: 'test', ms: 12000, form: 'trailing'},
+  ]);
+
+  // Arithmetic is evaluated, so a raise written as a product is read as a raise.
+  // A pattern reading the leading digits of `90 * 1000` sees 90 and fails a
+  // 90-second budget as if it were 90 milliseconds.
+  expect(read("test('x', {timeout: 90 * 1000}, () => {});")).toEqual([
+    {construct: 'test', ms: 90000, form: 'options'},
+  ]);
+  expect(read("test('x', {timeout: 2 * 60 * 1000}, () => {});")).toEqual([
+    {construct: 'test', ms: 120000, form: 'options'},
+  ]);
+  expect(read("test('x', {timeout: 90e3}, () => {});")).toEqual([
+    {construct: 'test', ms: 90000, form: 'options'},
+  ]);
+  expect(read("test('x', {timeout: 0x7530}, () => {});")).toEqual([
+    {construct: 'test', ms: 30000, form: 'options'},
+  ]);
+
+  // Not this call's budget: a nested object belongs to some other API, a
+  // retry count is not a time, and a method that shares vitest's name is not it.
+  expect(read("test('x', {retry: 2, poll: {timeout: 50}}, () => {});")).toEqual(
+    [],
+  );
+  expect(read("describe('x', {concurrent: true}, () => {});")).toEqual([]);
+  expect(read("test('x', () => { setTimeout(fn, 5000); });")).toEqual([]);
+  expect(read('foo.test(bar, 100);')).toEqual([]);
+  expect(read('suite.bench(name, 250);')).toEqual([]);
+});
+
+test('a value the scan cannot evaluate is surfaced as such', () => {
+  const declarations = timeoutDeclarations(
+    "test('x', {timeout: TIMEOUT_MS}, () => {});",
+  );
+  expect(declarations).toEqual([
+    {
+      line: 1,
+      construct: 'test',
+      form: 'options',
+      ms: null,
+      text: 'TIMEOUT_MS',
+    },
+  ]);
+});
+
+test('prose and regex literals cannot move the scan', () => {
+  // What a parser buys over balancing brackets by hand. Each of these shifts a
+  // hand-rolled depth count, and the budget after it is then misread or missed.
+  expect(
+    timeoutDeclarations(
+      `// don't trust a suite's own budget: {timeout: 1}\n` +
+        `describe('it (mostly) works', {timeout: 30_000}, () => {});`,
+    ).map(({line, ms}) => ({line, ms})),
+  ).toEqual([{line: 2, ms: 30000}]);
+  expect(
+    timeoutDeclarations("describe('a ) unbalanced name', () => {}, 9000);").map(
+      ({ms, form}) => ({ms, form}),
+    ),
+  ).toEqual([{ms: 9000, form: 'trailing'}]);
+  expect(
+    timeoutDeclarations('/* {timeout: 2} */ describe(name, () => {});'),
+  ).toEqual([]);
+  // A regex literal holding a quote, or an unbalanced bracket, or a comment
+  // opener. All three desynchronise a lexer that does not know what a regex is.
+  expect(
+    timeoutDeclarations("const r = /'/u;\ndescribe('x', {timeout: 1}, f);").map(
+      ({ms}) => ms,
+    ),
+  ).toEqual([1]);
+  expect(
+    timeoutDeclarations(
+      "test('a', () => { s.replace(/[)]/gu, ''); }, 30_000);",
+    ).map(({ms}) => ms),
   ).toEqual([30000]);
   expect(
-    suiteTimeouts("describe.skip('x', {timeout: 25000}, () => {});"),
-  ).toEqual([25000]);
+    timeoutDeclarations(
+      "test('a', () => { s.replace(/\\/\\//gu, '/'); }, 30_000);",
+    ).map(({ms}) => ms),
+  ).toEqual([30000]);
 });
 
-test('no suite timeout escapes the matcher', () => {
-  // The matcher cannot also be the thing that decides what counts. A line that
-  // opens a suite and carries a timeout, but that the precise pattern cannot
-  // read, fails here rather than passing silently.
-  const unread = files.flatMap(file =>
-    unreadSuiteTimeouts(readFileSync(file, 'utf8')).map(
-      hit => `${relative(REPO_ROOT, file).replaceAll('\\', '/')}:${hit}`,
-    ),
-  );
-  expect(unread).toEqual([]);
+test('the line reported is the line the budget is on', () => {
+  // Off by one here means the report points at the argument before it, which for
+  // the wrapped form is the suite name.
+  const wrapped = `describe(
+  'a name long enough that the formatter breaks this call apart',
+  {timeout: 30_000},
+  () => {},
+);`;
+  expect(timeoutDeclarations(wrapped)[0].line).toBe(3);
 });
 
-test('an unreadable candidate is reported rather than skipped', () => {
-  // Proof the case above can fire. The candidate finder over-approximates on
-  // purpose, so it also flags a line that merely mentions both — and that is the
-  // trade it is making: an over-approximation nobody can read is surfaced for a
-  // human to judge, rather than a matcher quietly deciding a suite has no budget.
-  // No such line exists in the repo, which is why the case above is green.
+test('the merge-target scan sees an indirect target', () => {
+  const read = (source: string) =>
+    loweredMergeTargets(source, 60_000).map(({target, key, ms}) => ({
+      target,
+      key,
+      ms,
+    }));
+
+  // The sanctioned shape.
   expect(
-    unreadSuiteTimeouts('describe(name, options); // {timeout: 5000}'),
-  ).toHaveLength(1);
-  expect(
-    unreadSuiteTimeouts("describe('x', {timeout: 5000}, () => {});"),
+    read('mergeConfig(configForNoPg(url), {test: {testTimeout: 20_000}})'),
   ).toEqual([]);
-  // Modifier chains are read, so they are never reported as unreadable.
+  // A named pg config.
   expect(
-    unreadSuiteTimeouts(
-      "describe.skipIf(!RUN)('x', {timeout: 5000}, () => {});",
+    read(
+      'mergeConfig(configForVersion(16, url), {test: {testTimeout: 20_000}})',
+    ),
+  ).toEqual([
+    {target: 'configForVersion(16, url)', key: 'testTimeout', ms: 20000},
+  ]);
+  // The shape that caused this: the target is whatever is being mapped over, so
+  // no list of config names recognises it.
+  expect(
+    read('projects.map(c => mergeConfig(c, {test: {testTimeout: 20_000}}))'),
+  ).toEqual([{target: 'c', key: 'testTimeout', ms: 20000}]);
+  // Hooks are cut by the same mechanism and starve the same suites.
+  expect(
+    read(
+      'mergeConfig(configForVersion(16, url), {test: {hookTimeout: 20_000}})',
+    ),
+  ).toEqual([
+    {target: 'configForVersion(16, url)', key: 'hookTimeout', ms: 20000},
+  ]);
+  // A raise is never a violation, whatever the target.
+  expect(
+    read(
+      'mergeConfig(configForVersion(16, url), {test: {testTimeout: 90_000}})',
     ),
   ).toEqual([]);
 });

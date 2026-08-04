@@ -92,7 +92,7 @@ describe('change-source/pg/end-to-mid-test', () => {
     changes = stream.changes;
     downstream = drainToQueue(changes);
     replicator = createChangeProcessor(replica);
-  }, 30000);
+  });
 
   afterAll(async () => {
     changes?.cancel();

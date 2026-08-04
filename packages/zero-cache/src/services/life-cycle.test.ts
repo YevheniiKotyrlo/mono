@@ -32,6 +32,7 @@ import {
   SHUTDOWN_MESSAGE,
   recordStartupDurationMs,
   runUntilKilled,
+  shutdownRequested,
   type WorkerType,
 } from '../services/life-cycle.ts';
 import type {SingletonService} from '../services/service.ts';
@@ -86,7 +87,15 @@ describe('shutdown', () => {
 
     processes.addWorker(parentPort, type, id);
 
-    void runUntilKilled(lc, childPort, worker).then(
+    // Armed exactly where a real worker arms it — before anything that could
+    // block — so this harness exercises the same single-arming-point arrangement
+    // production uses rather than a shape only the test has.
+    void runUntilKilled(
+      lc,
+      childPort,
+      shutdownRequested(childPort),
+      worker,
+    ).then(
       () => parentPort.emit('close', 0),
       () => parentPort.emit('close', -1),
     );
@@ -514,5 +523,83 @@ describe('exitAfter', () => {
     flushDone.resolve();
     await expect(exiting).rejects.toMatchObject({code: -1});
     expect(exit).toHaveBeenCalledWith(-1);
+  });
+});
+
+describe('shutdownRequested', () => {
+  // These cover the window `runUntilKilled` cannot: it takes services, so it can
+  // only be called once they exist, and a worker whose startup blocks has not got
+  // there yet. Every other shutdown test in this file installs its listener before
+  // anything blocks, which is exactly why none of them would notice this gap.
+
+  test('aborts on a request arriving before any service exists', () => {
+    const parent = new EventEmitter();
+    const signal = shutdownRequested(parent);
+    expect(signal.aborted).toBe(false);
+
+    parent.emit('message', [...SHUTDOWN_MESSAGE]);
+    expect(signal.aborted).toBe(true);
+  });
+
+  test('aborts on a signal too, since that is the operator-facing contract', () => {
+    const parent = new EventEmitter();
+    const signal = shutdownRequested(parent);
+
+    parent.emit('SIGTERM');
+    expect(signal.aborted).toBe(true);
+  });
+
+  test('ignores messages that are not shutdown requests', () => {
+    const parent = new EventEmitter();
+    const signal = shutdownRequested(parent);
+
+    parent.emit('message', ['ready', {ready: true}]);
+    parent.emit('message', ['shutdown']); // wrong arity
+    parent.emit('message', 'shutdown'); // not an array
+    expect(signal.aborted).toBe(false);
+  });
+
+  test('unblocks work waiting on it, rather than only recording the request', async () => {
+    // The failure this pins is not "the request was missed" — Node holds an IPC
+    // message until a listener appears, so it does arrive. It is that nothing
+    // waiting had any reason to stop waiting, so the worker ran on holding its
+    // files while the manager gave up on it.
+    const parent = new EventEmitter();
+    const signal = shutdownRequested(parent);
+
+    const {promise: blocked, resolve} = resolver<'aborted' | 'finished'>();
+    signal.addEventListener('abort', () => resolve('aborted'), {once: true});
+
+    parent.emit('message', [...SHUTDOWN_MESSAGE]);
+    expect(await blocked).toBe('aborted');
+  });
+
+  test('a request arriving during startup still stops the services', async () => {
+    // The window between arming and having services to stop. It is the one the
+    // first version of this reopened: arming early consumes the queued IPC message,
+    // Node delivers it to that listener and to no other, so a listener installed
+    // alongside the services would never see it and the request would be recorded
+    // and then dropped. Which is why the signal is passed in rather than installed
+    // there — this asserts the request survives the gap.
+    const parent = new EventEmitter();
+    const shutdown = shutdownRequested(parent);
+
+    parent.emit('message', [...SHUTDOWN_MESSAGE]); // mid-startup
+    expect(shutdown.aborted).toBe(true);
+
+    const stopped = resolver<void>();
+    const service = {
+      id: 'startup-window',
+      run: () => promiseVoid,
+      stop: () => {
+        stopped.resolve();
+        return promiseVoid;
+      },
+    };
+    void runUntilKilled(createSilentLogContext(), parent, shutdown, service);
+
+    // Resolves only if the already-aborted signal is acted on; a version that
+    // ignored it would leave this pending and fail on the suite's own budget.
+    await stopped.promise;
   });
 });

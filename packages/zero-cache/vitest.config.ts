@@ -61,8 +61,12 @@ export function configForCustomPg(url: string) {
       mergeConfig(config, {
         test: {
           name: `${name}/custom-pg`,
-          browser: {enabled: false},
-          silent: 'passed-only',
+          // The same defaults as the versioned pg projects. It runs the same
+          // files against one Postgres, so it wants the same budget, the same
+          // concurrency bound and the same group — spreading them here is also
+          // what makes "a pg project grants the pg budget" true of every pg
+          // project rather than of most of them.
+          ...pgProjectDefaults(),
           include: ['src/**/*.pg.test.?(c|m)[jt]s?(x)'],
           exclude: [],
           provide: {

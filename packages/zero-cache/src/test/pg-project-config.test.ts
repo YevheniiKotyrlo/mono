@@ -136,9 +136,16 @@ test('a pg project and a no-pg one never share a pool', () => {
   // enumerates every project at once -- which is what the repo's own `test` script
   // does -- so this is reachable without setting TEST_PG_MODE at all, and both
   // TEST_PG_MODE runs hide it by filtering one side away.
+  //
+  // What makes the pairing safe is the separate group, and only that. Comparing
+  // the two `maxWorkers` would not say it: vitest's rule is that projects in the
+  // SAME group must agree, so differing is neither necessary nor sufficient — and
+  // the no-pg project sets none at all, leaving vitest's own default, which
+  // resolves from the core count at runtime. On a 7-core machine that default
+  // lands on 6, the same as `maxConcurrentPgFiles()`, so the two would genuinely
+  // agree while a comparison against the unresolved `undefined` still passed.
   const pg = configForVersion(16, import.meta.url).test;
   const noPg = configForNoPg(import.meta.url).test;
-  expect(pg.maxWorkers).not.toBe(noPg.maxWorkers);
   expect(pg.sequence?.groupOrder ?? 0).not.toBe(noPg.sequence?.groupOrder ?? 0);
 });
 

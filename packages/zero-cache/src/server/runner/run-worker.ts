@@ -6,7 +6,11 @@ import {colorConsole} from '../../../../shared/src/logging.ts';
 import {PROTOCOL_VERSION} from '../../../../zero-protocol/src/protocol-version.ts';
 import {normalizeZeroConfig} from '../../config/normalize.ts';
 import {getServerVersion, getZeroConfig} from '../../config/zero-config.ts';
-import {ProcessManager, runUntilKilled} from '../../services/life-cycle.ts';
+import {
+  ProcessManager,
+  runUntilKilled,
+  shutdownRequested,
+} from '../../services/life-cycle.ts';
 import {childWorker, type Worker} from '../../types/processes.ts';
 import {createLogContext} from '../logging.ts';
 import {MAIN_URL} from '../worker-urls.ts';
@@ -90,6 +94,7 @@ export async function runWorker(
     await runUntilKilled(
       lc,
       parent ?? process,
+      shutdownRequested(parent ?? process),
       new ZeroDispatcher(
         config,
         lc,

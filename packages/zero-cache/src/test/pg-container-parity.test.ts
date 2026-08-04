@@ -13,10 +13,16 @@ import {
  * second, with the instances declared in .devcontainer/docker-compose.yml — whose
  * own header says its server settings "must match the testcontainers setup".
  *
- * Nothing enforced that, and the two did drift: raising `max_connections` on the
- * container left the dev container at the default, so the failure the raise fixes
- * stayed reproducible in the one environment that cannot start a container to work
- * around it. A comment cannot hold two files in step, so this does.
+ * Nothing enforces that. The two agree today, and this change raises
+ * `max_connections` on both — which is precisely the change that shows why a
+ * comment is the wrong mechanism: the settings live in two files, in two languages,
+ * edited for different reasons, and only one of them is where a developer runs the
+ * suite. Touching the testcontainers side alone would leave the dev container short
+ * of connections, so the failure the raise fixes would stay reproducible in the one
+ * environment that cannot start a container to work around it.
+ *
+ * So this asserts the parity the header asks for, rather than trusting the next
+ * person to read it.
  */
 
 const REPO_ROOT = join(

@@ -110,9 +110,15 @@ function workerStartupDuration() {
 /**
  * How long a drained shutdown waits for its supporting workers before giving up.
  *
- * Well inside the grace period a container runtime allows (Docker and Kubernetes
- * both default to 10s before a SIGKILL), so exceeding this reports and exits
- * rather than being killed mid-shutdown.
+ * Inside the grace period a container runtime allows before a SIGKILL: `docker
+ * stop` defaults to 10s for Linux containers, and a Kubernetes pod's
+ * `terminationGracePeriodSeconds` defaults to 30s. So exceeding this reports and
+ * exits rather than being killed mid-shutdown.
+ *
+ * Note what this budget is NOT: it is not subtracted from a remaining grace
+ * period. It is spent after the user-facing drain, so a drain that already used
+ * most of a 10s Docker window can still be cut short. Sizing it against the
+ * smaller of the two runtimes is the reason it is this low.
  */
 const WORKER_STOP_TIMEOUT_MS = 5_000;
 
@@ -462,16 +468,62 @@ export class ProcessManager {
 }
 
 /**
+ * A signal that aborts when the manager asks this worker to shut down, armed
+ * before the worker has any services to stop.
+ *
+ * {@link runUntilKilled} listens for the request, but only once there are
+ * services to hand it to. That is too late for a worker whose startup itself
+ * blocks: a view-syncer restoring its replica waits for the replication-manager
+ * to publish a restorable backup, which this repo documents as taking many
+ * minutes. A request arriving in that window is held by the IPC channel and
+ * delivered once a listener appears — but nothing in the startup path has any
+ * reason to finish, so the worker never reaches the listener that would honour
+ * it. Breaking that wait is what a signal used to do; a worker that cannot be
+ * asked to stop while starting up is a worker the manager cannot stop at all,
+ * and it exits leaving that worker holding the replica file.
+ *
+ * Long-running startup work therefore races this signal, so a request is
+ * honoured at the point it arrives rather than at the point the worker would
+ * have been ready to hear it.
+ */
+export function shutdownRequested(parent: EventEmitter): AbortSignal {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+
+  // Both transports, for the same reason runUntilKilled listens for both: a
+  // signal is how an operator or container runtime asks, an IPC message is how
+  // the manager asks where signals are not delivered.
+  for (const signal of GRACEFUL_SHUTDOWN) {
+    parent.once(signal, abort);
+  }
+  parent.on('message', (data: unknown) => {
+    if (isShutdownRequest(data)) {
+      abort();
+    }
+  });
+
+  return controller.signal;
+}
+
+/**
  * Runs the specified services, stopping them on `SIGTERM` or `SIGINT` with
  * an optional {@link SingletonService.drain drain()}, or stopping them
  * without draining for `SIGQUIT`.
  *
+ * @param shutdown from {@link shutdownRequested}, armed by the caller BEFORE its
+ *     startup work. Taken rather than installed here because the two cannot be
+ *     separated: Node delivers a queued IPC message to the first listener
+ *     installed and to no other, so a worker that arms early to interrupt its own
+ *     startup would consume the request, and a listener installed here would then
+ *     never see it — the request would be recorded and never acted on. One arming
+ *     point, consumed here, is the only arrangement where both hold.
  * @returns a Promise that resolves/rejects when any of the services stops/throws.
  */
 
 export async function runUntilKilled(
   lc: LogContext,
   parent: EventEmitter,
+  shutdown: AbortSignal,
   ...services: SingletonService[]
 ): Promise<void> {
   if (services.length === 0) {
@@ -490,21 +542,22 @@ export async function runUntilKilled(
     });
   };
 
-  for (const signal of [...GRACEFUL_SHUTDOWN, ...FORCEFUL_SHUTDOWN]) {
+  for (const signal of FORCEFUL_SHUTDOWN) {
     parent.once(signal, () => stopServices(signal));
   }
 
-  // The other half of the manager asking over IPC rather than by signal. A worker
-  // that only listened for signals would simply not stop on a platform that does
-  // not deliver them, so the manager would wait out its drain and then terminate
-  // it — losing the drain this exists to perform.
-  const onShutdownRequest = (data: unknown) => {
-    if (isShutdownRequest(data)) {
-      parent.off('message', onShutdownRequest);
-      stopServices(GRACEFUL_SHUTDOWN[0]);
-    }
-  };
-  parent.on('message', onShutdownRequest);
+  // Already requested, during the caller's startup. The services exist now, so
+  // this is the first moment the request can be honoured — and it must be, or a
+  // worker that was asked to stop mid-startup runs on holding its files.
+  if (shutdown.aborted) {
+    stopServices(GRACEFUL_SHUTDOWN[0]);
+  } else {
+    shutdown.addEventListener(
+      'abort',
+      () => stopServices(GRACEFUL_SHUTDOWN[0]),
+      {once: true},
+    );
+  }
 
   try {
     // Run all services and resolve when any of them stops.

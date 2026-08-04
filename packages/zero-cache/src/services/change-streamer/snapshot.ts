@@ -54,17 +54,34 @@ export const snapshotMessageSchema = v.union(statusMessageSchema);
 
 export type SnapshotMessage = v.Infer<typeof statusMessageSchema>;
 
+/**
+ * @param shutdown aborts the retry loop. Supplied by the caller rather than
+ *     derived from signals here, because a worker is asked to stop over IPC
+ *     where signals are not delivered, and this loop is otherwise unbounded —
+ *     it retries until a compatible replication-manager appears.
+ * @returns the reserved status, or `undefined` if shutdown was requested first.
+ */
 export function reserveAndGetSnapshotStatus(
   lc: LogContext,
   config: NormalizedZeroConfig,
-): Promise<SnapshotStatus> {
-  const {promise: status, resolve, reject} = resolver<SnapshotStatus>();
+  shutdown: AbortSignal,
+): Promise<SnapshotStatus | undefined> {
+  const {
+    promise: status,
+    resolve,
+    reject,
+  } = resolver<SnapshotStatus | undefined>();
+
+  if (shutdown.aborted) {
+    return Promise.resolve(undefined);
+  }
+  const onShutdown = () => resolve(undefined);
+  shutdown.addEventListener('abort', onShutdown, {once: true});
+  // Released when this call settles: the signal outlives the call, and this is
+  // reached once per retry.
+  void status.finally(() => shutdown.removeEventListener('abort', onShutdown));
 
   void (async function () {
-    const abort = new AbortController();
-    process.on('SIGINT', () => abort.abort());
-    process.on('SIGTERM', () => abort.abort());
-
     for (let i = 0; ; i++) {
       let err: unknown;
       try {
@@ -97,10 +114,15 @@ export function reserveAndGetSnapshotStatus(
         `Unable to reserve snapshot (attempt ${i + 1}). Retrying in 5 seconds.`,
         String(err),
       );
+      if (shutdown.aborted) {
+        return resolve(undefined);
+      }
       try {
-        await sleep(5000, abort.signal);
+        await sleep(5000, shutdown);
       } catch (e) {
-        return reject(e);
+        // An abort here is the requested shutdown, which the caller reads as
+        // `undefined` rather than as a failed reservation.
+        return shutdown.aborted ? resolve(undefined) : reject(e);
       }
     }
   })();

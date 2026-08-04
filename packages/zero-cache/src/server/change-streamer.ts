@@ -24,6 +24,7 @@ import {
   exitAfter,
   ProcessManager,
   runUntilKilled,
+  shutdownRequested,
 } from '../services/life-cycle.ts';
 import {startReplicaBackupProcess} from '../services/litestream/commands.ts';
 import {
@@ -319,7 +320,13 @@ export default async function runWorker(
   // Note: The changeStreamer itself is not started here; it is started by the
   //       changeStreamerWebServer.
   try {
-    await runUntilKilled(lc, parent, changeStreamerWebServer, monitor);
+    await runUntilKilled(
+      lc,
+      parent,
+      shutdownRequested(parent),
+      changeStreamerWebServer,
+      monitor,
+    );
   } catch (err) {
     processes.logErrorAndExit(err, 'change-streamer');
   } finally {

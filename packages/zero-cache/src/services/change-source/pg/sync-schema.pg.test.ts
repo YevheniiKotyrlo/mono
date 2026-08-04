@@ -105,50 +105,46 @@ describe('change-streamer/pg/sync-schema', () => {
   const lc = createSilentLogContext();
 
   for (const c of cases) {
-    test(
-      c.name,
-      async () => {
-        const replica = replicaFile.connect(lc);
-        await initDB(upstream, c.upstreamSetup, c.upstreamPreState);
-        initLiteDB(replica, c.replicaSetup, c.replicaPreState);
+    test(c.name, async () => {
+      const replica = replicaFile.connect(lc);
+      await initDB(upstream, c.upstreamSetup, c.upstreamPreState);
+      initLiteDB(replica, c.replicaSetup, c.replicaPreState);
 
-        const shard = {
-          appID: APP_ID,
-          shardNum: SHARD_NUM,
-          publications: c.requestedPublications ?? [],
-        };
+      const shard = {
+        appID: APP_ID,
+        shardNum: SHARD_NUM,
+        publications: c.requestedPublications ?? [],
+      };
 
-        await initReplica(
-          createSilentLogContext(),
-          'test',
-          replicaFile.path,
-          async (log, tx) => {
-            await initialSync(
-              log,
-              shard,
-              tx,
-              getConnectionURI(upstream),
-              {
-                tableCopyWorkers: 5,
-              },
-              TEST_CONTEXT,
-            );
-          },
-        );
+      await initReplica(
+        createSilentLogContext(),
+        'test',
+        replicaFile.path,
+        async (log, tx) => {
+          await initialSync(
+            log,
+            shard,
+            tx,
+            getConnectionURI(upstream),
+            {
+              tableCopyWorkers: 5,
+            },
+            TEST_CONTEXT,
+          );
+        },
+      );
 
-        await expectTables(upstream, c.upstreamPostState);
-        expectMatchingObjectsInTables(replica, c.replicaPostState);
+      await expectTables(upstream, c.upstreamPostState);
+      expectMatchingObjectsInTables(replica, c.replicaPostState);
 
-        expectLiteTables(replica, {
-          ['_zero.changeLog2']: [],
-        });
+      expectLiteTables(replica, {
+        ['_zero.changeLog2']: [],
+      });
 
-        // Slot should still exist.
-        const slots = await upstream`SELECT slot_name FROM pg_replication_slots 
+      // Slot should still exist.
+      const slots = await upstream`SELECT slot_name FROM pg_replication_slots 
           WHERE slot_name LIKE ${replicationSlotExpression(shard)}`.values();
-        expect(slots).toHaveLength(1);
-      },
-      10000,
-    );
+      expect(slots).toHaveLength(1);
+    });
   }
 });

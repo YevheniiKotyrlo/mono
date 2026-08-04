@@ -66,7 +66,7 @@ describe.skipIf(!RUN)('toasted values', {retry: 3}, () => {
       await testDBs.drop(upstream);
       await replicaDbFile.delete();
     };
-  }, 30000);
+  });
 
   function drainToQueue(
     sub: Source<ChangeStreamMessage>,
