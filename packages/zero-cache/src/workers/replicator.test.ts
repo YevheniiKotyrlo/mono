@@ -58,7 +58,7 @@ describe('workers/replicator', () => {
 
   // The predicate test above pins the decision; this pins the delete the
   // replicator actually performs, on a real file.
-  test('deleteStaleChangeLog removes the file only when the writer is off', () => {
+  test('deleteStaleChangeLog removes the file only when the writer is off', async () => {
     const replica = new DbFile('replicator-stale-change-log');
     const logFile = changeLogFileName(replica.path);
     try {
@@ -73,7 +73,7 @@ describe('workers/replicator', () => {
       expect(existsSync(logFile)).toBe(false);
     } finally {
       deleteStaleChangeLog('off', replica.path);
-      replica.delete();
+      await replica.delete();
     }
   });
 

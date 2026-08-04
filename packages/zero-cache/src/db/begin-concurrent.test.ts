@@ -15,8 +15,8 @@ describe('db/begin-concurrent', () => {
     conn.close();
   });
 
-  afterEach(() => {
-    dbFile.delete();
+  afterEach(async () => {
+    await dbFile.delete();
   });
 
   const startSpillingWriter = () => {

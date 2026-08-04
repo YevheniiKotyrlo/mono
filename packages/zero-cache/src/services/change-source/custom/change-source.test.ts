@@ -50,7 +50,7 @@ describe('change-source/custom', () => {
 
   afterEach(async () => {
     await server.close();
-    replicaDbFile.delete();
+    await replicaDbFile.delete();
   });
 
   async function streamChanges(changes: ChangeStreamMessage[]) {
