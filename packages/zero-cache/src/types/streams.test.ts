@@ -11,7 +11,6 @@ import {
   TestLogSink,
 } from '../../../shared/src/logging-test-utils.ts';
 import {Queue} from '../../../shared/src/queue.ts';
-import {randInt} from '../../../shared/src/rand.ts';
 import {sleep} from '../../../shared/src/sleep.ts';
 import * as v from '../../../shared/src/valita.ts';
 import {
@@ -223,7 +222,7 @@ describe('streams with internal acks', () => {
   let consumed: Queue<Message>;
   let cleanedUp: Promise<Message[]>;
   let cleanup: (m: Message[]) => void;
-  let port: number;
+  let serverUrl: string;
 
   let ws: WebSocket;
 
@@ -250,9 +249,13 @@ describe('streams with internal acks', () => {
 
     // Run the server for real instead of using `injectWS()`, as that has a
     // different behavior for ws.close().
-    port = 3000 + Math.floor(randInt(0, 5000));
-    await server.listen({port});
-    lc.info?.(`server running on port ${port}`);
+    //
+    // Port 0 asks the OS for a free one and reports back where it bound. Choosing
+    // a number in 3000-8000 and hoping instead loses to whatever already holds it:
+    // it lost to 7680 here, which Windows Delivery Optimization owns, and a
+    // one-in-five-thousand collision is a flake nobody can reproduce on purpose.
+    serverUrl = await server.listen({port: 0});
+    lc.info?.(`server running on ${serverUrl}`);
   });
 
   afterEach(async () => {
@@ -261,7 +264,7 @@ describe('streams with internal acks', () => {
   });
 
   async function startReceiver() {
-    ws = new WebSocket(`http://localhost:${port}/`);
+    ws = new WebSocket(`${serverUrl}/`);
     return {
       ws,
       consumer: (await streamIn(
@@ -273,7 +276,7 @@ describe('streams with internal acks', () => {
   }
 
   async function startStringifiedReceiver() {
-    ws = new WebSocket(`http://localhost:${port}/`);
+    ws = new WebSocket(`${serverUrl}/`);
     return {
       ws,
       consumer: await streamInStringified(lc, ws, messageSchema),
