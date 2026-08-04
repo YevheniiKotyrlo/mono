@@ -6,6 +6,8 @@
   "scripts": {
     "verify": "node src/verify-package-deps.ts",
     "verify:fix": "node src/verify-package-deps.ts --fix",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
     "check-types": "tsc",
     "format": "oxfmt .",
     "check-format": "oxfmt --check .",
@@ -19,7 +21,8 @@
   "devDependencies": {
     "@types/node": "^22.10.5",
     "oxfmt": "^0.45.0",
-    "typescript": "~6.0.2"
+    "typescript": "~6.0.2",
+    "vitest": "^4.1.6"
   },
   "engines": {
     "node": ">=22"
