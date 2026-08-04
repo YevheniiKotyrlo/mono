@@ -440,7 +440,7 @@ describe('pg-copy-binary', () => {
     expect(binaryResult).toEqual(textResult);
   });
 
-  test('many rows', {timeout: 30_000}, async () => {
+  test('many rows', async () => {
     await sql`
       CREATE TABLE many_rows (
         id int4,

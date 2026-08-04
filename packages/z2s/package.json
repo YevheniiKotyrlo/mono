@@ -19,6 +19,8 @@
     "test:pg16:watch": "vitest --project z2s/pg-16",
     "test:pg17": "vitest run --project z2s/pg-17",
     "test:pg17:watch": "vitest --project z2s/pg-17",
+    "test:pg18": "vitest run --project z2s/pg-18",
+    "test:pg18:watch": "vitest --project z2s/pg-18",
     "test:watch": "vitest watch",
     "fmt": "oxfmt .",
     "check-fmt": "oxfmt --check ."

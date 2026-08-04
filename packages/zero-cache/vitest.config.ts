@@ -1,5 +1,8 @@
 import {defineConfig, mergeConfig} from 'vitest/config';
-import config, {CI} from '../shared/src/tool/vitest-config.ts';
+import config, {
+  CI,
+  pgProjectDefaults,
+} from '../shared/src/tool/vitest-config.ts';
 
 const coverageInclude = ['src/**/*.{js,jsx,ts,tsx,mjs,mts,cjs,cts}'];
 
@@ -9,23 +12,17 @@ function nameFromURL(url: string) {
 }
 
 export function configForVersion(version: number, url: string) {
-  const TIMEOUT = (CI ? 2 : 1) * 30_000;
   const name = nameFromURL(url);
   const merged = mergeConfig(config, {
     test: {
+      ...pgProjectDefaults(),
       name: `${name}/pg-${version}`,
-      browser: {enabled: false},
-      silent: 'passed-only',
       globalSetup: [`../zero-cache/test/pg-${version}.ts`],
       coverage: {
         enabled: !CI, // Don't run coverage in continuous integration.
         reporter: [['html'], ['clover', {file: 'coverage.xml'}]],
         include: coverageInclude,
       },
-      retry: CI ? 2 : 0,
-      testTimeout: TIMEOUT,
-      hookTimeout: TIMEOUT,
-      slowTestThreshold: TIMEOUT / 10,
     },
   });
   // Override include to only pg tests (mergeConfig merges arrays, we want to replace)
@@ -64,8 +61,12 @@ export function configForCustomPg(url: string) {
       mergeConfig(config, {
         test: {
           name: `${name}/custom-pg`,
-          browser: {enabled: false},
-          silent: 'passed-only',
+          // The same defaults as the versioned pg projects. It runs the same
+          // files against one Postgres, so it wants the same budget, the same
+          // concurrency bound and the same group — spreading them here is also
+          // what makes "a pg project grants the pg budget" true of every pg
+          // project rather than of most of them.
+          ...pgProjectDefaults(),
           include: ['src/**/*.pg.test.?(c|m)[jt]s?(x)'],
           exclude: [],
           provide: {

@@ -6,7 +6,17 @@ import {
   MeterProvider,
   PeriodicExportingMetricReader,
 } from '@opentelemetry/sdk-metrics';
-import {expect, test, vi} from 'vitest';
+import {beforeAll, expect, test, vi} from 'vitest';
+
+// The graph is loaded once here rather than inside the first case that needs it.
+// Each case below resets the module registry and re-imports on purpose — the meter
+// binds when the module is evaluated, so a fresh one is the point — but the FIRST
+// of those pays for compiling the whole graph, inside a budget meant for the
+// assertions. Warming it in a hook moves that cost off every test's clock, and the
+// re-imports that follow hit a warm transform cache.
+beforeAll(async () => {
+  await import('./life-cycle.ts');
+});
 
 test('records startup_duration if OTel starts after module import', async () => {
   metrics.disable();

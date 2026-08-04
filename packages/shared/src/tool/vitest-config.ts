@@ -1,7 +1,88 @@
+import {availableParallelism} from 'node:os';
 import {playwright} from '@vitest/browser-playwright';
 import {defineConfig} from 'vitest/config';
 import type {BrowserConfigOptions} from 'vitest/node';
 import {makeDefine} from '../build.ts';
+
+/**
+ * How many pg test files may run at once.
+ *
+ * These projects contend on ONE Postgres server, not on CPUs, so vitest's default
+ * of `availableParallelism() - 1` oversubscribes it: every file opens a pool and
+ * does real I/O against the same instance, and past a handful the server and its
+ * disk are the bottleneck. The extra workers do not run in parallel so much as
+ * take turns being slow.
+ *
+ * Measured on a 32-core machine over the same 79-file project: unbounded finished
+ * in 214s having spent 3084s of test time, with one case timing out; six workers
+ * finished in 252s having spent 973s, with none. Thirty-eight seconds of wall
+ * clock buys a third of the work and the difference between a suite that flakes
+ * and one that does not — a case that runs in 1.6s alone was taking 30s.
+ *
+ * Capped rather than fixed, so a machine with fewer cores still gets vitest's own
+ * limit. Shared because every pg project has to agree: vitest rejects projects in
+ * one `sequence.groupOrder` that disagree on `maxWorkers`.
+ */
+export function maxConcurrentPgFiles(): number {
+  return Math.min(Math.max(availableParallelism() - 1, 1), 6);
+}
+
+/**
+ * The settings every Postgres-backed project shares.
+ *
+ * One definition rather than a copy per project, because these are not
+ * preferences — `maxWorkers` in particular MUST match across them, since vitest
+ * refuses to run projects that sit in one `sequence.groupOrder` and disagree on
+ * it, and the error names the two projects rather than the reason. Agreement by
+ * construction is the only kind that survives a project being added.
+ *
+ * Timeouts and retries are here for the same reason they are worth sharing: a pg
+ * project waits on a real server, so it needs a budget that reflects that, and a
+ * project that quietly kept the defaults is a project that fails differently from
+ * its siblings for no stated reason.
+ */
+/**
+ * The most a pg project ever grants a case, which is what CI gets.
+ *
+ * Exported so a check can compare a hardcoded literal against the maximum rather
+ * than against whatever the current run happens to get. A literal equal to the
+ * local grant is still below the CI one, and a check that reads the environment it
+ * runs in passes locally on exactly the literals that undercut CI.
+ */
+export const MAX_PG_TEST_TIMEOUT_MS = 60_000;
+
+/**
+ * The group Postgres-backed projects run in, after the default-group ones.
+ *
+ * Any value other than the default separates them; later means the fast suites
+ * report first.
+ */
+export const PG_PROJECT_GROUP_ORDER = 1;
+
+export function pgProjectDefaults() {
+  const timeout = CI ? MAX_PG_TEST_TIMEOUT_MS : MAX_PG_TEST_TIMEOUT_MS / 2;
+  return {
+    browser: {enabled: false},
+    silent: 'passed-only',
+    maxWorkers: maxConcurrentPgFiles(),
+    // Their own group, because they contend on something the others do not.
+    //
+    // vitest runs one group at a time and requires every project inside a group
+    // to agree on `maxWorkers`, since they share its pool -- so a bounded pg
+    // project sitting beside an unbounded no-pg one is refused outright
+    // ("Projects X and Y have different 'maxWorkers'"), which is what a bare
+    // `vitest run` enumerating every project would hit. Separating them is not
+    // just the way to satisfy that: the bound exists because these projects queue
+    // on ONE Postgres, and no-pg files queue on nothing, so making them share a
+    // pool would drag the whole no-pg suite down to a limit it has no reason to
+    // obey. No-pg runs first at full width; pg follows at the bound.
+    sequence: {groupOrder: PG_PROJECT_GROUP_ORDER},
+    retry: CI ? 2 : 0,
+    testTimeout: timeout,
+    hookTimeout: timeout,
+    slowTestThreshold: timeout / 10,
+  } as const;
+}
 
 export const CI = process.env['CI'] === 'true' || process.env['CI'] === '1';
 const {VITEST_BROWSER} = process.env;
