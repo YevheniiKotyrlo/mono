@@ -35,7 +35,7 @@ import {dropEventTriggerStatements} from './schema/ddl.ts';
 const APP_ID = '23';
 const SHARD_NUM = 1;
 
-describe('change-source/pg', {timeout: 30000, retry: 3}, () => {
+describe('change-source/pg', {retry: 3}, () => {
   let logSink: TestLogSink;
   let lc: LogContext;
   let upstream: PostgresDB;
@@ -98,9 +98,9 @@ describe('change-source/pg', {timeout: 30000, retry: 3}, () => {
       streams.forEach(s => s.changes.cancel());
       await source?.stop();
       await testDBs.drop(upstream);
-      replicaDbFile.delete();
+      await replicaDbFile.delete();
     };
-  }, 30000);
+  });
 
   function drainToQueue(
     sub: Source<ChangeStreamMessage>,
@@ -650,22 +650,20 @@ describe('change-source/pg', {timeout: 30000, retry: 3}, () => {
       {watermark: WATERMARK_REGEX},
     ]);
 
-    // Let the 500ms timeout fire.
-    await sleep(1000);
-
-    // Poll upstream up to 10 times to account for timing variability.
-    let afterState;
-    for (let i = 0; i < 10; i++) {
-      afterState = await upstream.unsafe(getReplicaIdentityStatement);
-      if (afterState[0].replicaIdentity === Index) {
-        break;
-      }
-      await sleep(200);
-    }
-    expect(afterState).toEqual([
-      [{name: 'join_table', replicaIdentity: Index}],
-      [{name: 'join_key', isReplicaIdentity: true}],
-    ]);
+    // The change applies behind a 500ms timeout upstream, so this waits for the
+    // state rather than for a duration — `vi.waitFor`, as the rest of this file
+    // does. The hand-rolled version slept a flat second before looking even when
+    // the change had already landed, and then gave up after a fixed ten polls,
+    // which is a budget that runs out under the parallelism these projects use.
+    await vi.waitFor(
+      async () => {
+        expect(await upstream.unsafe(getReplicaIdentityStatement)).toEqual([
+          [{name: 'join_table', replicaIdentity: Index}],
+          [{name: 'join_key', isReplicaIdentity: true}],
+        ]);
+      },
+      {interval: 100, timeout: 10_000},
+    );
 
     stream.changes.cancel();
   });
@@ -1225,8 +1223,8 @@ describe('change-source/pg', {timeout: 30000, retry: 3}, () => {
 
     changes2.cancel();
     changes3.cancel();
-    replicaFile2.delete();
-    replicaFile3.delete();
+    await replicaFile2.delete();
+    await replicaFile3.delete();
   });
 
   test('AutoReset on changed publications', async () => {

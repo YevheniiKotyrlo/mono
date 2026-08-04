@@ -351,7 +351,7 @@ describe('pg-copy', () => {
     `);
   });
 
-  test('multiple rows, lots of data', {timeout: 30_000}, async () => {
+  test('multiple rows, lots of data', async () => {
     const rows: Row[] = Array.from({length: 50}, (_, i) => ({
       a: BigInt(i),
       b: i * 100,

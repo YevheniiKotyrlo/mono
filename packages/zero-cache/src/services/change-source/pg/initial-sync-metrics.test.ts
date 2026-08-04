@@ -7,16 +7,22 @@ import {
   PeriodicExportingMetricReader,
 } from '@opentelemetry/sdk-metrics';
 import {afterEach, describe, expect, test, vi} from 'vitest';
+import {
+  COPY_METRIC_BATCH_BYTES,
+  createCopyMetricBatcher,
+} from './initial-sync.ts';
 
-afterEach(() => {
-  metrics.disable();
-  vi.resetModules();
-});
+// Statically, for everything that does not need a module bound to a particular
+// OTel provider. `initial-sync.ts` pulls in a large graph, and a dynamic import
+// after `vi.resetModules()` re-evaluates all of it — inside the importing test's
+// time budget. That cost is invisible on an idle machine (~360ms) and is what
+// made this file time out under the parallelism the pg projects run at: the first
+// test paid for the graph and the 10s budget was for the assertions. Loading it
+// at file scope moves the cost to collection, where it is paid once and belongs
+// to no test's clock.
 
 describe('createCopyMetricBatcher', () => {
-  test('flushes below, at, and above the byte threshold', async () => {
-    const {COPY_METRIC_BATCH_BYTES, createCopyMetricBatcher} =
-      await import('./initial-sync.ts');
+  test('flushes below, at, and above the byte threshold', () => {
     const record = vi.fn();
     const batcher = createCopyMetricBatcher(record);
 
@@ -30,8 +36,7 @@ describe('createCopyMetricBatcher', () => {
     expect(record).toHaveBeenLastCalledWith(COPY_METRIC_BATCH_BYTES + 1, 1);
   });
 
-  test('flushes residual totals only once', async () => {
-    const {createCopyMetricBatcher} = await import('./initial-sync.ts');
+  test('flushes residual totals only once', () => {
     const record = vi.fn();
     const batcher = createCopyMetricBatcher(record);
 
@@ -45,59 +50,70 @@ describe('createCopyMetricBatcher', () => {
   });
 });
 
-test('exports exact byte and chunk totals with active OTel', async () => {
-  const {COPY_METRIC_BATCH_BYTES, initialSyncCopyMetrics} =
-    await import('./initial-sync.ts');
-  const exporter = new InMemoryMetricExporter(
-    AggregationTemporality.CUMULATIVE,
-  );
-  const provider = new MeterProvider({
-    readers: [
-      new PeriodicExportingMetricReader({
-        exporter,
-        exportIntervalMillis: 60_000,
-      }),
-    ],
+// These two DO need a fresh module: the meter is bound when `initial-sync.ts` is
+// evaluated, so each has to be evaluated against the provider it is testing
+// against. The reset lives here rather than at file scope so the pure cases above
+// do not pay for a module registry reset they have no use for.
+describe('initialSyncCopyMetrics', () => {
+  afterEach(() => {
+    metrics.disable();
+    vi.resetModules();
   });
 
-  try {
-    expect(metrics.setGlobalMeterProvider(provider)).toBe(true);
-    const copyMetrics = initialSyncCopyMetrics({
-      syncMode: 'initial',
-      copyFormat: 'binary',
+  test('exports exact byte and chunk totals with active OTel', async () => {
+    const {COPY_METRIC_BATCH_BYTES, initialSyncCopyMetrics} =
+      await import('./initial-sync.ts');
+    const exporter = new InMemoryMetricExporter(
+      AggregationTemporality.CUMULATIVE,
+    );
+    const provider = new MeterProvider({
+      readers: [
+        new PeriodicExportingMetricReader({
+          exporter,
+          exportIntervalMillis: 60_000,
+        }),
+      ],
     });
 
-    copyMetrics.add(COPY_METRIC_BATCH_BYTES - 1);
-    copyMetrics.add(2);
-    copyMetrics.add(3);
-    copyMetrics.flush();
-    await provider.forceFlush();
+    try {
+      expect(metrics.setGlobalMeterProvider(provider)).toBe(true);
+      const copyMetrics = initialSyncCopyMetrics({
+        syncMode: 'initial',
+        copyFormat: 'binary',
+      });
 
-    expect(
-      metricValue(exporter, 'zero.replication.initial_sync_copy_stream'),
-    ).toBe(COPY_METRIC_BATCH_BYTES + 4);
-    expect(
-      metricValue(exporter, 'zero.replication.initial_sync_copy_chunks'),
-    ).toBe(3);
-  } finally {
-    await provider.shutdown();
-  }
-});
+      copyMetrics.add(COPY_METRIC_BATCH_BYTES - 1);
+      copyMetrics.add(2);
+      copyMetrics.add(3);
+      copyMetrics.flush();
+      await provider.forceFlush();
 
-test('works with the no-op OTel provider', async () => {
-  const {COPY_METRIC_BATCH_BYTES, initialSyncCopyMetrics} =
-    await import('./initial-sync.ts');
-  const copyMetrics = initialSyncCopyMetrics({
-    syncMode: 'shadow',
-    copyFormat: 'text',
+      expect(
+        metricValue(exporter, 'zero.replication.initial_sync_copy_stream'),
+      ).toBe(COPY_METRIC_BATCH_BYTES + 4);
+      expect(
+        metricValue(exporter, 'zero.replication.initial_sync_copy_chunks'),
+      ).toBe(3);
+    } finally {
+      await provider.shutdown();
+    }
   });
 
-  expect(() => {
-    copyMetrics.add(COPY_METRIC_BATCH_BYTES);
-    copyMetrics.add(1);
-    copyMetrics.flush();
-    copyMetrics.flush();
-  }).not.toThrow();
+  test('works with the no-op OTel provider', async () => {
+    const {COPY_METRIC_BATCH_BYTES, initialSyncCopyMetrics} =
+      await import('./initial-sync.ts');
+    const copyMetrics = initialSyncCopyMetrics({
+      syncMode: 'shadow',
+      copyFormat: 'text',
+    });
+
+    expect(() => {
+      copyMetrics.add(COPY_METRIC_BATCH_BYTES);
+      copyMetrics.add(1);
+      copyMetrics.flush();
+      copyMetrics.flush();
+    }).not.toThrow();
+  });
 });
 
 function metricValue(exporter: InMemoryMetricExporter, name: string) {
