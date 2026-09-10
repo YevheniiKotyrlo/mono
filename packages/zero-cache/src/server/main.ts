@@ -1,4 +1,5 @@
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {consoleLogSink, LogContext} from '@rocicorp/logger';
 import {resolver} from '@rocicorp/resolver';
 import {must} from '../../../shared/src/must.ts';
@@ -100,7 +101,11 @@ export default async function runWorker(
     ...args: string[]
   ): Worker {
     const worker = childWorker(moduleUrl, env, ...args, ...internalFlags);
-    const name = path.basename(moduleUrl.pathname) + (id ? ` (${id})` : '');
+    // `fileURLToPath`, not `.pathname`: a URL pathname is percent-encoded, so a
+    // worker path containing an encodable character would surface here as `%20`
+    // style text in the process label.
+    const name =
+      path.basename(fileURLToPath(moduleUrl)) + (id ? ` (${id})` : '');
     const w = processes.addWorker(worker, type, name);
     allSubWorkers.push(w);
     w.onMessageType<ProfileResponseMessage>('profileResponse', res =>

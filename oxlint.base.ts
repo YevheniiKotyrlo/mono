@@ -1,9 +1,12 @@
+import {fileURLToPath} from 'node:url';
 import type {OxlintConfig} from 'oxlint';
 
-const zeroPlugin = new URL(
-  './tools/oxlint-plugin-zero/index.js',
-  import.meta.url,
-).pathname;
+// fileURLToPath, not URL.pathname: pathname is a URL path, so on Windows it is
+// '/C:/…' and oxlint cannot load the plugin from it — which aborts the whole
+// lint run rather than degrading.
+const zeroPlugin = fileURLToPath(
+  new URL('./tools/oxlint-plugin-zero/index.js', import.meta.url),
+);
 
 /**
  * Shared oxlint configuration for all packages in the monorepo.
@@ -181,6 +184,22 @@ export const baseConfig = {
         include: ['packages/zero-cache/src/'],
       },
     ],
+
+    // Portability rules for two defects nothing else in this repo catches.
+    //
+    // Neither is Windows-only, though that is where they are unmissable. A `file:`
+    // URL's `.pathname` is percent-encoded on every platform, so a checkout under a
+    // path containing a space or a non-ASCII character — `~/Library/Mobile
+    // Documents/…` being the common macOS one — yields a string `fs` cannot open on
+    // Linux and macOS too. Only the extra `/C:/` drive prefix is Windows-specific.
+    // A bare `.CMD` shim genuinely is Windows-only; there the rule keeps the class
+    // from being reintroduced rather than guarding a live defect elsewhere.
+    //
+    // `tool` in ignorePatterns matches at any depth, so neither rule reaches
+    // `packages/*/tool/**` or `packages/*/src/tool/**`; an override cannot narrow
+    // an ignore, so widening their reach means removing that pattern.
+    'zero/no-file-url-pathname': 'error',
+    'zero/no-bare-shim-spawn': 'error',
   },
   overrides: [
     {
