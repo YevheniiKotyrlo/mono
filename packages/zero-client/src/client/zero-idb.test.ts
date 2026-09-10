@@ -165,9 +165,23 @@ test('logged-out client uses a private storage sentinel for idb naming', async (
     kvStore: 'mem',
   });
 
-  expect(zero.idbName).toEqual(
-    `rep:zero-${LOGGED_OUT_STORAGE_USER_ID}-o92aeop6ci3f:7:52.32bj126fs2e3f`,
+  // The sentinel standing where a user id would is what this case is about. The
+  // rest of the name carries a hash of the storage configuration, replicache's
+  // format version and the schema version — all of which move for reasons that
+  // have nothing to do with logged-out naming, so pinning the whole string made
+  // an unrelated schema bump fail this. The shape is asserted instead, and a
+  // real user id in that position still cannot satisfy it.
+  expect(zero.idbName).toMatch(
+    new RegExp(`^rep:zero-${LOGGED_OUT_STORAGE_USER_ID}-[a-z0-9]+:\\d+:`, 'u'),
   );
 
+  // And the sentinel is what a logged-out client gets, not something every name
+  // carries — otherwise the assertion above would hold no matter who was
+  // signed in.
+  const signedIn = new Zero({userID, storageKey, schema, kvStore: 'mem'});
+  expect(signedIn.idbName).not.toContain(LOGGED_OUT_STORAGE_USER_ID);
+  expect(signedIn.idbName).toContain(userID);
+
+  await signedIn.close();
   await zero.close();
 });
