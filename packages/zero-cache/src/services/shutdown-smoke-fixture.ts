@@ -17,5 +17,12 @@ const keepAlive = setInterval(() => {}, 60_000);
 
 parentWorker?.send(['ready', {ready: true}]);
 
+// Answers a liveness probe, so the parent can prove this process is still up
+// without waiting on a clock. A negative proved by a timer is only as good as the
+// machine's load at the time; a round trip is an observation.
+parentWorker?.onMessageType('status', () => {
+  parentWorker?.send(['status', {status: 'alive'}]);
+});
+
 // So the interval cannot outlive a shutdown that works.
 process.on('exit', () => clearInterval(keepAlive));

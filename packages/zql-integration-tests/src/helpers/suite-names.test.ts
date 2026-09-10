@@ -61,6 +61,13 @@ function collectSuiteNames(packageName: string): Map<string, string[]> {
     const names = [
       ...source.matchAll(/suiteName:\s*'([^']+)'/gu),
       ...source.matchAll(/testDBs\.create\(\s*'([^']+)'/gu),
+      // A name bound to a const and passed through, which is how the two suites
+      // that collided were written — neither reaches `testDBs.create` as a
+      // literal, so a scan of the call sites alone could not see them.
+      ...source.matchAll(/\bconst \w*DB_NAME\w* = '([^']+)'/gu),
+      // And an app id written out rather than derived: it lands on a slot the
+      // same way a name does, so two suites sharing one collide identically.
+      ...source.matchAll(/\bappID:\s*'([^']+)'/gu),
     ].map(match => match[1]);
 
     for (const name of names) {
@@ -102,4 +109,8 @@ test('the scan found the suites it is meant to cover', () => {
   expect(byName.size).toBeGreaterThan(20);
   expect([...byName.keys()]).toContain('check_zql_string');
   expect([...byName.keys()]).toContain('frontend_analysis');
+  // The two shapes a call-site scan cannot see. Named individually because each
+  // needs its own pattern, so losing one leaves the other reading clean.
+  expect([...byName.keys()]).toContain('collate-test');
+  expect([...byName.keys()]).toContain('text-semantics-test');
 });

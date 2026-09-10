@@ -53,9 +53,66 @@ function resolveOxlint() {
 
 const OXLINT = resolveOxlint();
 
-/** A built-in rule and a file that violates it, proving the harness can lint. */
-const CANARY_RULE = 'no-debugger';
-const CANARY_FILE = '__canary.ts';
+/**
+ * Rules from THIS plugin that always report, with a file that violates each.
+ *
+ * A built-in rule would prove only that oxlint ran. oxlint's plugin loader
+ * returns a failure rather than throwing, so the day it warns-and-continues
+ * instead of aborting, a built-in canary would still fire while none of the
+ * plugin's rules existed — and every "stays quiet" assertion below would pass
+ * over a plugin that never loaded.
+ *
+ * Two, so the canary is never the rule under test: a rule cannot vouch for its
+ * own registration while also being what the case is measuring.
+ */
+const CANARIES = [
+  {
+    rule: 'zero/no-file-url-pathname',
+    file: '__canary_pathname.ts',
+    source: 'export const p = new URL(import.meta.url).pathname;\n',
+  },
+  {
+    rule: 'zero/no-bare-shim-spawn',
+    file: '__canary_spawn.ts',
+    source:
+      "import {spawnSync} from 'node:child_process';\n" +
+      "export const r = spawnSync('npm', ['--version']);\n",
+  },
+];
+
+/** The canary for a case, which is any of them that is not under test. */
+function canaryFor(ruleName) {
+  const canary = CANARIES.find(candidate => candidate.rule !== ruleName);
+  if (canary === undefined) {
+    throw new Error(`no canary available while testing ${ruleName}`);
+  }
+  return canary;
+}
+
+/** oxlint's `--format=json` report, as the codes and severities it reported. */
+function parseReport(stdout, context) {
+  let report;
+  try {
+    report = JSON.parse(stdout);
+  } catch (cause) {
+    throw new Error(`oxlint did not emit a JSON report: ${context}`, {cause});
+  }
+  const diagnostics = report.diagnostics ?? [];
+  return {
+    // `zero(no-select-star)` — the plugin name oxlint reports a rule under.
+    codes: diagnostics.map(diagnostic => diagnostic.code),
+    errors: diagnostics
+      .filter(diagnostic => diagnostic.severity === 'error')
+      .map(diagnostic => diagnostic.code),
+    filesLinted: report.number_of_files ?? 0,
+  };
+}
+
+/** The code oxlint reports a rule under, from the name a config enables it by. */
+function codeOf(ruleName) {
+  const [plugin, rule] = ruleName.split('/');
+  return rule === undefined ? `eslint(${plugin})` : `${plugin}(${rule})`;
+}
 
 const fixtureRoots = [];
 
@@ -75,13 +132,10 @@ function lintFixture(relativeFilePath, source, ruleName, ruleOptions) {
   mkdirSync(dirname(filePath), {recursive: true});
   writeFileSync(filePath, source);
 
-  // A file that always violates a built-in rule, at WARNING level so it never
-  // moves the exit code the assertions below read. Its diagnostic is the proof
-  // that oxlint reached this fixture at all.
-  writeFileSync(
-    join(root, CANARY_FILE),
-    'debugger;\nexport const canary = 1;\n',
-  );
+  // At WARNING level, so it never moves the exit code the assertions read. Its
+  // diagnostic is the proof that this plugin's rules are registered and firing.
+  const canary = canaryFor(ruleName);
+  writeFileSync(join(root, canary.file), canary.source);
 
   writeFileSync(
     join(root, '.oxlintrc.json'),
@@ -98,46 +152,52 @@ function lintFixture(relativeFilePath, source, ruleName, ruleOptions) {
         perf: 'off',
       },
       rules: {
-        [CANARY_RULE]: 'warn',
+        [canary.rule]: 'warn',
         [ruleName]:
           ruleOptions === undefined ? 'error' : ['error', ruleOptions],
       },
     }),
   );
 
-  const result = spawnSync(process.execPath, [OXLINT, '.'], {
+  const result = spawnSync(process.execPath, [OXLINT, '.', '--format=json'], {
     cwd: root,
     encoding: 'utf8',
   });
-  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  const report = parseReport(
+    result.stdout ?? '',
+    `status ${result.status}: ${result.stderr ?? ''}`,
+  );
 
   // A harness that cannot lint would satisfy every "does not report" assertion
   // below — a plugin that fails to load, a rejected config, a wrong oxlint path.
-  // So each run proves it actually linted the fixture before its own assertion
-  // is allowed to mean anything. This is the same failure the rule under test
-  // had (silence is indistinguishable from clean), reintroduced one level up.
-  //
-  // The canary's own diagnostic is the proof, rather than oxlint's summary line:
-  // that line is prose, it is not emitted for every invocation, and keying a
-  // correctness guard on it turns an oxlint upgrade into a suite that passes
-  // while checking nothing.
-  if (!output.includes(CANARY_RULE)) {
+  // So each run proves the PLUGIN linted the fixture before its own assertion is
+  // allowed to mean anything. This is the same failure the rule under test had
+  // (silence is indistinguishable from clean), reintroduced one level up.
+  if (!report.codes.includes(codeOf(canary.rule))) {
     throw new Error(
-      `oxlint did not lint the fixture (status ${result.status}):\n${output}`,
+      `${canary.rule} did not report, so the plugin's rules are not running ` +
+        `(status ${result.status}, ${report.filesLinted} file(s) linted): ` +
+        `${result.stdout ?? ''}${result.stderr ?? ''}`,
     );
   }
-  return {output, status: result.status};
+  return {report, status: result.status};
 }
 
 /** Asserts the rule fired on a fixture that violates it. */
 function expectReported(result, ruleName) {
-  expect(result.output).toContain(ruleName);
+  // The reported code, not a substring of oxlint's prose: the config it echoes on
+  // a rejection contains the rule names, so a grep passes on a run that linted
+  // nothing.
+  expect(result.report.errors).toContain(codeOf(`zero/${ruleName}`));
   expect(result.status).not.toBe(0);
 }
 
 /** Asserts the rule stayed silent on a fixture that does not violate it. */
 function expectSilent(result, ruleName) {
-  expect(result.output).not.toContain(ruleName);
+  expect(result.report.codes).not.toContain(codeOf(`zero/${ruleName}`));
+  // The canary is a warning, so a clean fixture leaves the exit code at 0. That
+  // is asserted rather than assumed: a change in how oxlint treats warnings would
+  // otherwise turn every quiet case red and point at the plugin.
   expect(result.status).toBe(0);
 }
 

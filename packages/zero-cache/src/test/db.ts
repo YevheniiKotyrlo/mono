@@ -10,6 +10,7 @@ import {
 } from 'vitest';
 import {must} from '../../../shared/src/must.ts';
 import {sleep} from '../../../shared/src/sleep.ts';
+import {postgresServerSettings} from '../../test/pg-container-setup.ts';
 import {
   type PostgresDB,
   postgresTypeConfig,
@@ -235,13 +236,16 @@ export const pgContainerTest = baseTest.extend<{pgConnectionString: string}>({
     // object destructuring.
     // oxlint-disable-next-line no-empty-pattern
     async ({}, use) => {
+      // The same settings the shared setup starts its container with. Written
+      // out here, this was a third declaration of them — and the shortest, so a
+      // suite reaching Postgres this way got neither the replication slots nor
+      // the connections the others are given.
       const container = await new PostgreSqlContainer(mustInject('pgImage'))
         .withCommand([
           'postgres',
-          '-c',
-          'wal_level=logical',
-          '-c',
-          `timezone=${mustInject('pgTimezone')}`,
+          ...postgresServerSettings(mustInject('pgTimezone')).flatMap(
+            setting => ['-c', setting],
+          ),
         ])
         .start();
       const pgConnectionString = container.getConnectionUri();

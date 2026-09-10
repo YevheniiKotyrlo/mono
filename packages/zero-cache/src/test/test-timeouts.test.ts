@@ -663,15 +663,72 @@ function loweredMergeTargets(
     ms: number | null;
   }[] = [];
 
+  /** Records a `testTimeout`/`hookTimeout` property that lowers the grant. */
+  const collectBudget = (inner: Node, target: string) => {
+    if (inner.type !== 'Property') {
+      return;
+    }
+    const key = child(inner, 'key');
+    const name = key?.type === 'Identifier' ? key['name'] : undefined;
+    if (name !== 'testTimeout' && name !== 'hookTimeout') {
+      return;
+    }
+    // Resolved against the file's own constants, and REPORTED when it cannot be:
+    // dropping an unreadable value here would leave illegibility as an exemption
+    // in the one place a budget is most likely to be named rather than written.
+    const value = child(inner, 'value');
+    const ms = value && staticNumber(value, constants);
+    if (ms === undefined || (ms > DISABLES_TIMEOUT && ms < limit)) {
+      found.push({
+        line: lineOf(inner.start),
+        target,
+        key: name,
+        ms: ms ?? null,
+      });
+    }
+  };
+
   walk(root, node => {
     if (node.type !== 'CallExpression') {
       return;
     }
     const callee = child(node, 'callee');
-    if (callee === undefined || rootIdentifier(callee) !== 'mergeConfig') {
+    const call = callee && rootIdentifier(callee);
+    if (call !== 'mergeConfig' && call !== 'defineConfig') {
       return;
     }
     const args = children(node, 'arguments');
+    // `defineConfig({test: {testTimeout: N}})` states a budget with nothing to
+    // merge over, so it is read as a target of its own: a shape the scan cannot
+    // see is a shape a budget hides in.
+    //
+    // Unless the same config declares `projects`. There the `test` block is the
+    // ROOT's, and a project supplies its own — `pgProjectDefaults()` sets both
+    // budget keys — so a root value governs nothing that runs. Skipping it is
+    // what keeps this from flagging the legitimate shape while still reading a
+    // leaf project config.
+    if (call === 'defineConfig') {
+      const declaresProjects = args.some(argument => {
+        let found = false;
+        walk(argument, inner => {
+          const key =
+            inner.type === 'Property' ? child(inner, 'key') : undefined;
+          if (key?.type === 'Identifier' && key['name'] === 'projects') {
+            found = true;
+          }
+        });
+        return found;
+      });
+      if (declaresProjects) {
+        return;
+      }
+      for (const argument of args) {
+        walk(argument, inner => {
+          collectBudget(inner, 'defineConfig');
+        });
+      }
+      return;
+    }
     if (args.length < 2) {
       return;
     }
@@ -684,28 +741,7 @@ function loweredMergeTargets(
     }
     for (const argument of args.slice(1)) {
       walk(argument, inner => {
-        if (inner.type !== 'Property') {
-          return;
-        }
-        const key = child(inner, 'key');
-        const name = key?.type === 'Identifier' ? key['name'] : undefined;
-        if (name !== 'testTimeout' && name !== 'hookTimeout') {
-          return;
-        }
-        // Resolved against the file's own constants, and REPORTED when it cannot
-        // be: dropping an unreadable value here would leave illegibility as an
-        // exemption in the one place a budget is most likely to be named rather
-        // than written.
-        const value = child(inner, 'value');
-        const ms = value && staticNumber(value, constants);
-        if (ms === undefined || (ms > DISABLES_TIMEOUT && ms < limit)) {
-          found.push({
-            line: lineOf(inner.start),
-            target,
-            key: name,
-            ms: ms ?? null,
-          });
-        }
+        collectBudget(inner, target);
       });
     }
   });
@@ -1036,6 +1072,35 @@ test('the line reported is the line the budget is on', () => {
   () => {},
 );`;
   expect(timeoutDeclarations(wrapped)[0].line).toBe(3);
+});
+
+test('a leaf project config cannot cut the budget either', () => {
+  const read = (source: string) =>
+    loweredMergeTargets(source, 60_000).map(({target, key, ms}) => ({
+      target,
+      key,
+      ms,
+    }));
+
+  // The shape the merge scan cannot see: a budget stated directly rather than
+  // merged over a shared config. Reported, because the projects that config
+  // assembles are the ones that run.
+  expect(
+    read('export default defineConfig({test: {testTimeout: 20_000}});'),
+  ).toEqual([{target: 'defineConfig', key: 'testTimeout', ms: 20000}]);
+
+  // But a ROOT config, which declares projects and whose own `test` block
+  // therefore governs nothing that runs — a project supplies its own budget.
+  expect(
+    read(
+      "export default defineConfig({test: {projects: ['a'], testTimeout: 20_000}});",
+    ),
+  ).toEqual([]);
+
+  // A raise is still a raise wherever it is written.
+  expect(
+    read('export default defineConfig({test: {testTimeout: 90_000}});'),
+  ).toEqual([]);
 });
 
 test('the merge-target scan sees an indirect target', () => {

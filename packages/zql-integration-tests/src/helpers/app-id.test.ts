@@ -1,4 +1,5 @@
 import {expect, test} from 'vitest';
+import {ALLOWED_APP_ID_CHARACTERS} from '../../../zero-cache/src/types/shards.ts';
 import {appIdFor} from './app-id.ts';
 
 // The app id names the replication slot initial sync creates. Two suites that end
@@ -50,4 +51,23 @@ test('long names stay distinct once truncated', () => {
 
 test('the two suites that collided now differ', () => {
   expect(appIdFor('collate-test')).not.toBe(appIdFor('text-semantics-test'));
+});
+
+test('every id it returns is one Postgres will accept', () => {
+  // The property, against the rule that rejects an app id rather than against a
+  // second copy of it. Includes the input that used to break totality: a name
+  // with no alphanumerics sanitises to '', which that rule refuses, so the
+  // digest branch has to supply the characters.
+  for (const name of [
+    '',
+    '-',
+    '...',
+    '   ',
+    'Collate-Test',
+    'a'.repeat(200),
+    'UPPER_CASE',
+    '9lives',
+  ]) {
+    expect(appIdFor(name)).toMatch(ALLOWED_APP_ID_CHARACTERS);
+  }
 });

@@ -1,8 +1,10 @@
 import {describe, expect, test} from 'vitest';
 import {
   bareShimSpawnCommand,
+  hasSelectStar,
   isFileUrlPathnameAccess,
   shouldCheck,
+  stripCommentOnlyLines,
   toPosixPath,
 } from './index.js';
 
@@ -395,4 +397,51 @@ test('bareShimSpawnCommand ignores a computed member callee it cannot read', () 
     property: {type: 'Identifier', name: 'spawn'},
   };
   expect(bareShimSpawnCommand(node)).toBeUndefined();
+});
+
+// `no-select-star`'s two halves. Exported and, until now, covered only through
+// the rule — so a change to either was visible to nothing but a smoke fixture
+// that happens to exercise the one path it takes.
+
+test('a comment-only line cannot carry a SELECT * into the match', () => {
+  // The point of stripping: a rule that read commented-out SQL would fire on
+  // prose, and the one that matters is a `--` line, which is SQL's own comment
+  // inside a template literal.
+  expect(hasSelectStar(stripCommentOnlyLines('-- SELECT * FROM t'))).toBe(
+    false,
+  );
+  expect(hasSelectStar(stripCommentOnlyLines('   // SELECT * FROM t'))).toBe(
+    false,
+  );
+  // Only comment-ONLY lines go. A trailing comment leaves the statement intact,
+  // which is deliberate: the code before it still runs.
+  expect(hasSelectStar(stripCommentOnlyLines('SELECT * FROM t -- why'))).toBe(
+    true,
+  );
+  // Line-preserving, so a reported line number still points at the right line.
+  expect(stripCommentOnlyLines('a\n// b\nc')).toBe('a\n\nc');
+});
+
+test('select-star matching is about the projection, not the word', () => {
+  for (const yes of [
+    'SELECT * FROM t',
+    'select * from t',
+    'SELECT *, id FROM t',
+    'SELECT\n  *\nFROM t',
+    'select a.* from t as a',
+  ]) {
+    expect(hasSelectStar(yes), yes).toBe(true);
+  }
+  for (const no of [
+    'SELECT id FROM t',
+    // Multiplication, not a projection: nothing follows the star that makes it
+    // one, which is what the lookahead is for.
+    'SELECT 2 * price FROM t',
+    'SELECT count(*) FROM t',
+    // No FROM at all, so there is no result shape to break.
+    'SELECT *',
+    '',
+  ]) {
+    expect(hasSelectStar(no), no).toBe(false);
+  }
 });

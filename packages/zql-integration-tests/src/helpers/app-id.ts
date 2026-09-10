@@ -1,4 +1,9 @@
 import {createHash} from 'node:crypto';
+import {assert} from '../../../shared/src/asserts.ts';
+import {
+  ALLOWED_APP_ID_CHARACTERS,
+  INVALID_APP_ID_MESSAGE,
+} from '../../../zero-cache/src/types/shards.ts';
 
 /**
  * Room left for the `_<digest>` and the `_<shard>_<role>` a slot name appends.
@@ -29,9 +34,22 @@ export function appIdFor(dbName: string): string {
   // Both conditions before returning the name as-is: comparing a truncated
   // `sanitized` against the full `dbName` would attribute a length overrun to
   // sanitising, and take a digest of a name that never needed one.
-  if (sanitized === dbName && sanitized.length <= MAX_SANITIZED_LENGTH) {
+  //
+  // The emptiness check is what makes this total: sanitising a name with no
+  // alphanumerics leaves `''`, which `ALLOWED_APP_ID_CHARACTERS` rejects — so it
+  // takes the digest branch, where the digest supplies the characters.
+  if (
+    sanitized !== '' &&
+    sanitized === dbName &&
+    sanitized.length <= MAX_SANITIZED_LENGTH
+  ) {
     return sanitized;
   }
   const digest = createHash('sha256').update(dbName).digest('hex').slice(0, 8);
-  return `${sanitized.slice(0, MAX_SANITIZED_LENGTH)}_${digest}`;
+  const id = `${sanitized.slice(0, MAX_SANITIZED_LENGTH)}_${digest}`;
+  // Against the rule the code that rejects an app id already exports, rather than
+  // against a second copy of it here: two statements of one constraint drift, and
+  // the drift surfaces as a slot Postgres refuses at sync time.
+  assert(ALLOWED_APP_ID_CHARACTERS.test(id), INVALID_APP_ID_MESSAGE);
+  return id;
 }
