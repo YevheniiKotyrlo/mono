@@ -106,11 +106,11 @@ describe('Chinook PG Tests', async () => {
                   l.related('invoice', i => i.related('customer')),
                 ),
               ),
+            ),
         },
         {
           name: 'Tracks that have been sold (exists testing)',
-          createQuery: q =>
-            q.track.where(({exists}) => exists('invoiceLines')),
+          createQuery: q => q.track.where(({exists}) => exists('invoiceLines')),
         },
         {
           name: 'Tracks that have not been sold (not exists testing)',
@@ -196,14 +196,14 @@ describe('Chinook PG Tests', async () => {
         },
         {
           name: 'Not like',
-          createQuery: q =>
-            q.album.where('title', 'NOT LIKE', '%Act').limit(1),
+          createQuery: q => q.album.where('title', 'NOT LIKE', '%Act').limit(1),
         },
         {
           name: 'In operator',
           createQuery: q =>
-            q.album.where('title', 'IN', [
-              'Riot Act',
+            q.album
+              .where('title', 'IN', [
+                'Riot Act',
                 'For Those About To Rock We Salute You',
               ])
               .limit(10),

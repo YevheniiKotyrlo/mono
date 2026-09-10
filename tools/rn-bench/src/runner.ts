@@ -24,6 +24,7 @@ import process from 'node:process';
 import {promisify} from 'node:util';
 import commandLineArgs from 'command-line-args';
 import commandLineUsage from 'command-line-usage';
+import {resolveNodeShimCommand} from '../../../packages/shared/src/node-shim-command.ts';
 import {
   type BencherMetricsFormat,
   toBencherMetricFormat,
@@ -627,25 +628,26 @@ function spawnExpo(
   metroPort: number,
   options: Options,
 ): ChildProcess {
-  return spawn(
+  // `npx` is `npx.cmd` on Windows, which CreateProcess cannot resolve by name.
+  const {command, args} = resolveNodeShimCommand(
     'npx',
     driver.expoArgs(device, metroPort, options.release ?? false),
-    {
-      cwd: options.app,
-      env: {
-        ...process.env,
-        CI: '1',
-        EXPO_PUBLIC_PERF_PORT: String(options.port),
-        // CocoaPods refuses to run without a UTF-8 locale, and a non-login shell
-        // often has none.
-        LANG: process.env.LANG ?? 'en_US.UTF-8',
-      },
-      stdio: options.verbose ? 'inherit' : 'ignore',
-      // Its own process group, so killing it takes Metro and gradle down too
-      // rather than leaving Metro holding the port.
-      detached: true,
-    },
   );
+  return spawn(command, args, {
+    cwd: options.app,
+    env: {
+      ...process.env,
+      CI: '1',
+      EXPO_PUBLIC_PERF_PORT: String(options.port),
+      // CocoaPods refuses to run without a UTF-8 locale, and a non-login shell
+      // often has none.
+      LANG: process.env.LANG ?? 'en_US.UTF-8',
+    },
+    stdio: options.verbose ? 'inherit' : 'ignore',
+    // Its own process group, so killing it takes Metro and gradle down too
+    // rather than leaving Metro holding the port.
+    detached: true,
+  });
 }
 
 function killGroup(child: ChildProcess | undefined): void {

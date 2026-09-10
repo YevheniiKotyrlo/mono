@@ -217,9 +217,14 @@ describe('change-streamer/sqlite-change-log-writer', () => {
     // it, so the file survives and the writer only logs the refusal. Asserting the
     // ORDER rather than the outcome is what makes this catchable on either one.
     let existedWhenDisabled: boolean | undefined;
-    using fixture = setup('change-log-writer-disable-order', '02', 100, file => {
-      existedWhenDisabled = existsSync(changeLogFileName(file.path));
-    });
+    using fixture = setup(
+      'change-log-writer-disable-order',
+      '02',
+      100,
+      file => {
+        existedWhenDisabled = existsSync(changeLogFileName(file.path));
+      },
+    );
     {
       using other = openChangeLogDB(fixture.lc, fixture.file.path, {
         readonly: false,

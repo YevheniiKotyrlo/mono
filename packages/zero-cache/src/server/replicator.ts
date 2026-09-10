@@ -276,7 +276,11 @@ async function restoreReplica(
     while (!shutdown.aborted) {
       let snapshotStatus;
       try {
-        snapshotStatus = await reserveAndGetSnapshotStatus(lc, config, shutdown);
+        snapshotStatus = await reserveAndGetSnapshotStatus(
+          lc,
+          config,
+          shutdown,
+        );
       } catch (e) {
         if (shutdown.aborted) {
           break; // asked to stop while waiting to reserve

@@ -205,10 +205,9 @@ async function startReplicationPipeline(
     `logical-replication-throughput-bench-${mode.name}`,
   );
 
-  // oxlint-disable require-await
   cleanup.push(async () => {
     deleteChangeLogDB(replicaDbFile.path);
-    replicaDbFile.delete();
+    await replicaDbFile.delete();
   });
   cleanup.push(async () => {
     await testDBs.drop(upstream, changeDB);

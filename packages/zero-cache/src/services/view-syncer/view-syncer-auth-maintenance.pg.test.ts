@@ -775,7 +775,7 @@ describe('view-syncer/auth maintenance', () => {
         await vs.stop();
         await viewSyncerDone;
         await testDBs.drop(cvrDB, upstreamDb);
-        replicaDbFile.delete();
+        await replicaDbFile.delete();
       };
     });
 

@@ -424,7 +424,9 @@ export class ProcessManager {
             } ms)`
           : `all user-facing workers exited`,
       );
-      return this.#exitWhenWorkersHaveStopped(this.#drainStart ? 0 : code || -1);
+      return this.#exitWhenWorkersHaveStopped(
+        this.#drainStart ? 0 : code || -1,
+      );
     }
 
     if (this.#drainStart === 0) {

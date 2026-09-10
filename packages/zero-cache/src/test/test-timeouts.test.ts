@@ -1,7 +1,7 @@
 import {readFileSync, readdirSync} from 'node:fs';
 import {dirname, join, relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import ts from 'typescript';
+import {parseSync} from 'oxc-parser';
 import {expect, test} from 'vitest';
 import {MAX_PG_TEST_TIMEOUT_MS} from '../../../shared/src/tool/vitest-config.ts';
 
@@ -118,52 +118,120 @@ type TimeoutDeclaration = {
 };
 
 /**
+ * The syntax this gate reads.
+ *
+ * oxc reports an ESTree tree, and only the handful of node shapes a time budget
+ * is ever written as are named here. Structural rather than nominal: a walk over
+ * an unknown tree cannot be exhaustive, so the reader narrows what it recognises
+ * and reports everything else rather than guessing.
+ */
+type Node = {
+  readonly type: string;
+  readonly start: number;
+  readonly end: number;
+  readonly [key: string]: unknown;
+};
+
+function isNode(value: unknown): value is Node {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as {type?: unknown}).type === 'string'
+  );
+}
+
+function child(node: Node, key: string): Node | undefined {
+  const value = node[key];
+  return isNode(value) ? value : undefined;
+}
+
+function children(node: Node, key: string): readonly Node[] {
+  const value = node[key];
+  return Array.isArray(value) ? value.filter(isNode) : [];
+}
+
+/** Depth-first over every node in the tree. */
+function walk(node: Node, visit: (node: Node) => void): void {
+  visit(node);
+  for (const value of Object.values(node)) {
+    if (isNode(value)) {
+      walk(value, visit);
+    } else if (Array.isArray(value)) {
+      for (const entry of value) {
+        if (isNode(entry)) {
+          walk(entry, visit);
+        }
+      }
+    }
+  }
+}
+
+const FUNCTION_TYPES = new Set([
+  'FunctionExpression',
+  'ArrowFunctionExpression',
+  'FunctionDeclaration',
+]);
+
+const NUMERIC_LITERAL = /^[-+]?[\dA-Fa-fXxOoBb_.]+$/u;
+
+/**
  * A number if the expression is statically one, else `undefined`.
  *
  * Covers what a budget is ever written as: a literal in any base, a negation,
  * arithmetic over those (`90 * 1000`, `2 * 60 * 1000`), and a file-local `const`
  * holding any of them. A value from further away — a call, an import, a member
- * access — is NOT resolved: it is reported rather than guessed, because guessing is
- * how a matcher ends up deciding what counts as a violation.
+ * access — is NOT resolved: it is reported rather than guessed, because guessing
+ * is how a matcher ends up deciding what counts as a violation.
  */
 function staticNumber(
-  node: ts.Expression,
+  node: Node,
   constants: ReadonlyMap<string, number> = new Map(),
 ): number | undefined {
-  if (ts.isNumericLiteral(node)) {
-    return Number(node.text.replaceAll('_', ''));
+  if (node.type === 'Literal') {
+    // `raw` rather than `value`, so a separator-bearing literal reads as written.
+    const raw = node['raw'];
+    if (typeof raw === 'string' && NUMERIC_LITERAL.test(raw)) {
+      const parsed = Number(raw.replaceAll('_', ''));
+      return Number.isNaN(parsed) ? undefined : parsed;
+    }
+    const value = node['value'];
+    return typeof value === 'number' ? value : undefined;
   }
   // A budget named by a file-local constant is still a budget this can read, and
   // reading it beats exempting it: `const TIMEOUT_MS = 120_000` is a RAISE, and a
   // gate told to trust the name would go on trusting it if the value became
   // 5_000. Fifteen sites in this repo are written that way.
-  if (ts.isIdentifier(node)) {
-    return constants.get(node.text);
+  if (node.type === 'Identifier') {
+    const name = node['name'];
+    return typeof name === 'string' ? constants.get(name) : undefined;
   }
-  if (ts.isParenthesizedExpression(node)) {
-    return staticNumber(node.expression, constants);
+  // Present only where parentheses are preserved; harmless either way, since oxc
+  // otherwise folds them and the arithmetic arrives directly.
+  if (node.type === 'ParenthesizedExpression') {
+    const inner = child(node, 'expression');
+    return inner && staticNumber(inner, constants);
   }
-  if (
-    ts.isPrefixUnaryExpression(node) &&
-    node.operator === ts.SyntaxKind.MinusToken
-  ) {
-    const operand = staticNumber(node.operand, constants);
+  if (node.type === 'UnaryExpression' && node['operator'] === '-') {
+    const argument = child(node, 'argument');
+    const operand = argument && staticNumber(argument, constants);
     return operand === undefined ? undefined : -operand;
   }
-  if (ts.isBinaryExpression(node)) {
-    const left = staticNumber(node.left, constants);
-    const right = staticNumber(node.right, constants);
+  if (node.type === 'BinaryExpression') {
+    const leftNode = child(node, 'left');
+    const rightNode = child(node, 'right');
+    const left = leftNode && staticNumber(leftNode, constants);
+    const right = rightNode && staticNumber(rightNode, constants);
     if (left === undefined || right === undefined) {
       return undefined;
     }
-    switch (node.operatorToken.kind) {
-      case ts.SyntaxKind.AsteriskToken:
+    switch (node['operator']) {
+      case '*':
         return left * right;
-      case ts.SyntaxKind.PlusToken:
+      case '+':
         return left + right;
-      case ts.SyntaxKind.MinusToken:
+      case '-':
         return left - right;
-      case ts.SyntaxKind.SlashToken:
+      case '/':
         return right === 0 ? undefined : left / right;
       default:
         return undefined;
@@ -178,67 +246,108 @@ function staticNumber(
  * `test` -> `test`; `describe.skipIf(x)` -> `describe`; `foo.test` -> `foo`, which
  * is how a method that merely shares vitest's name stays out of the scan.
  */
-function rootIdentifier(node: ts.Expression): string | undefined {
-  if (ts.isIdentifier(node)) {
-    return node.text;
+function rootIdentifier(node: Node): string | undefined {
+  if (node.type === 'Identifier') {
+    const name = node['name'];
+    return typeof name === 'string' ? name : undefined;
   }
-  if (ts.isPropertyAccessExpression(node)) {
-    return rootIdentifier(node.expression);
-  }
-  if (ts.isCallExpression(node)) {
-    return rootIdentifier(node.expression); // the curried `describe.skipIf(x)(…)`
-  }
-  if (ts.isTaggedTemplateExpression(node)) {
-    return rootIdentifier(node.tag); // the ``describe.each`…` `` table form
-  }
-  return undefined;
+  const inner =
+    node.type === 'MemberExpression'
+      ? child(node, 'object')
+      : node.type === 'CallExpression'
+        ? // the curried `describe.skipIf(x)(…)`
+          child(node, 'callee')
+        : node.type === 'TaggedTemplateExpression'
+          ? // the `describe.each` table form
+            child(node, 'tag')
+          : undefined;
+  return inner && rootIdentifier(inner);
 }
 
 /**
  * Every `const` name bound to a static number, minus any bound more than once.
  *
  * Collected over the whole tree rather than file scope, and a re-declared name is
- * dropped rather than resolved to whichever binding was seen. Resolving it would be
- * worse than not resolving it at all: an inner `const T = 30_000` shadowing an outer
- * `const T = 120_000` would be reported as 120000, which CLEARS the grant — a wrong
- * number, not a missing one, so the "unreadable is reported" backstop never fires.
- * Dropped names come back as `null` and are reported.
+ * dropped rather than resolved to whichever binding was seen. Resolving it would
+ * be worse than not resolving it at all: an inner `const T = 30_000` shadowing an
+ * outer `const T = 120_000` would be reported as 120000, which CLEARS the grant —
+ * a wrong number, not a missing one, so the "unreadable is reported" backstop
+ * never fires. Dropped names come back as `null` and are reported.
  */
-function fileConstants(parsed: ts.SourceFile): ReadonlyMap<string, number> {
+function fileConstants(program: Node): ReadonlyMap<string, number> {
   const seen = new Map<string, number>();
   const ambiguous = new Set<string>();
 
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isVariableStatement(node) &&
-      (node.declarationList.flags & ts.NodeFlags.Const) !== 0
-    ) {
-      for (const declaration of node.declarationList.declarations) {
-        if (!ts.isIdentifier(declaration.name)) {
-          continue;
-        }
-        const name = declaration.name.text;
-        if (seen.has(name) || ambiguous.has(name)) {
-          ambiguous.add(name);
-          seen.delete(name);
-          continue;
-        }
-        const value = declaration.initializer
-          ? staticNumber(declaration.initializer)
-          : undefined;
-        if (value !== undefined) {
-          seen.set(name, value);
-        } else {
-          // A name bound to something unreadable must not fall through to an
-          // outer binding of the same name either.
-          ambiguous.add(name);
-        }
+  walk(program, node => {
+    if (node.type !== 'VariableDeclaration' || node['kind'] !== 'const') {
+      return;
+    }
+    for (const declaration of children(node, 'declarations')) {
+      const id = child(declaration, 'id');
+      const name = id?.type === 'Identifier' ? id['name'] : undefined;
+      if (typeof name !== 'string') {
+        continue;
+      }
+      if (seen.has(name) || ambiguous.has(name)) {
+        ambiguous.add(name);
+        seen.delete(name);
+        continue;
+      }
+      const init = child(declaration, 'init');
+      const value = init && staticNumber(init);
+      if (value !== undefined) {
+        seen.set(name, value);
+      } else {
+        // A name bound to something unreadable must not fall through to an outer
+        // binding of the same name either.
+        ambiguous.add(name);
       }
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(parsed);
+  });
   return seen;
+}
+
+/**
+ * One parse, and the three things every reader of it needs.
+ *
+ * Both scans below want the tree, a line number for a node, and the text a node
+ * was written as. Deriving them once keeps the two from disagreeing about any of
+ * it, and puts the parse failure in a single place.
+ */
+type ParsedSource = {
+  readonly root: Node;
+  readonly constants: ReadonlyMap<string, number>;
+  readonly lineOf: (position: number) => number;
+  readonly textOf: (node: Node) => string;
+};
+
+function parseSource(fileName: string, source: string): ParsedSource {
+  const {program, errors} = parseSync(fileName, source);
+  if (errors.length > 0) {
+    throw new Error(
+      `${fileName}: ${errors.map(error => error.message).join('; ')}`,
+    );
+  }
+  const root = program as unknown as Node;
+
+  const lineStarts = [0];
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] === '\n') {
+      lineStarts.push(i + 1);
+    }
+  }
+  return {
+    root,
+    constants: fileConstants(root),
+    lineOf: position => {
+      let line = 0;
+      while (line + 1 < lineStarts.length && lineStarts[line + 1] <= position) {
+        line++;
+      }
+      return line + 1;
+    },
+    textOf: node => source.slice(node.start, node.end),
+  };
 }
 
 /** Every time budget declared in `source`, in either form vitest accepts. */
@@ -246,103 +355,96 @@ function timeoutDeclarations(
   source: string,
   fileName = 'input.ts',
 ): TimeoutDeclaration[] {
-  const parsed = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    /* setParentNodes */ false,
-    ts.ScriptKind.TS,
-  );
+  const {root, constants, lineOf, textOf} = parseSource(fileName, source);
   const found: TimeoutDeclaration[] = [];
 
-  const lineOf = (position: number) =>
-    parsed.getLineAndCharacterOfPosition(position).line + 1;
-
-  const constants = fileConstants(parsed);
-
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node)) {
-      const construct = rootIdentifier(node.expression);
-      if (construct !== undefined && TIMEOUT_BEARING.has(construct)) {
-        for (const argument of node.arguments) {
-          // Only this object's OWN properties: a `{poll: {timeout: 50}}` nested
-          // inside is some other API's budget, not this call's.
-          if (ts.isObjectLiteralExpression(argument)) {
-            for (const property of argument.properties) {
-              // `{timeout: T}`, and `{timeout}` — the same declaration written
-              // shorter, where the value is the name itself. A spread has no name
-              // at all, which is why the kind is narrowed before reading one.
-              const named =
-                (ts.isPropertyAssignment(property) ||
-                  ts.isShorthandPropertyAssignment(property)) &&
-                (ts.isIdentifier(property.name) ||
-                  ts.isStringLiteral(property.name)) &&
-                property.name.text === 'timeout';
-              const value = ts.isPropertyAssignment(property)
-                ? property.initializer
-                : ts.isShorthandPropertyAssignment(property)
-                  ? property.name
-                  : undefined;
-              if (named && value !== undefined) {
-                found.push({
-                  line: lineOf(property.getStart(parsed)),
-                  construct,
-                  form: 'options',
-                  ms: staticNumber(value, constants) ?? null,
-                  text: value.getText(parsed),
-                });
-              } else if (ts.isSpreadAssignment(property)) {
-                // Options merged in from elsewhere may carry a budget this cannot
-                // see. Reported rather than passed: a shared options object is the
-                // natural shape the moment two suites want the same settings.
-                found.push({
-                  line: lineOf(property.getStart(parsed)),
-                  construct,
-                  form: 'options',
-                  ms: null,
-                  text: property.getText(parsed),
-                });
-              }
-            }
-          }
-        }
-        // The trailing budget, recognised by POSITION rather than by whether its
-        // value can be read. Keying on readability would make the check its own
-        // exemption: `beforeEach(fn, HOOK_TIMEOUT_MS)` halves the CI grant and
-        // would produce no output at all, and five of the literals this gate
-        // first found were in exactly that position.
-        //
-        // Position is unambiguous when the argument before it is the BODY:
-        // `test(name, fn, T)` and `beforeEach(fn, T)` qualify. Requiring a
-        // function there rather than "anything but a number" is what separates
-        // those from `describe(name, {timeout: T}, body)`, where the last
-        // argument is a body referred to by name and no trailing budget exists.
-        //
-        // A body passed by name with a trailing budget — `test(name, fn, T)`
-        // where `fn` is an identifier — is outside this, and stated rather than
-        // silent: the two shapes are indistinguishable without resolving the
-        // name, and no test in this repo is written that way.
-        const [last, previous] = [node.arguments.at(-1), node.arguments.at(-2)];
-        if (
-          last !== undefined &&
-          previous !== undefined &&
-          !ts.isObjectLiteralExpression(last) &&
-          !ts.isFunctionLike(last) &&
-          ts.isFunctionLike(previous)
-        ) {
+  walk(root, node => {
+    if (node.type !== 'CallExpression') {
+      return;
+    }
+    const callee = child(node, 'callee');
+    const construct = callee && rootIdentifier(callee);
+    if (construct === undefined || !TIMEOUT_BEARING.has(construct)) {
+      return;
+    }
+    const args = children(node, 'arguments');
+    for (const argument of args) {
+      // Only this object's OWN properties: a `{poll: {timeout: 50}}` nested
+      // inside is some other API's budget, not this call's.
+      if (argument.type !== 'ObjectExpression') {
+        continue;
+      }
+      for (const property of children(argument, 'properties')) {
+        if (property.type === 'SpreadElement') {
+          // Options merged in from elsewhere may carry a budget this cannot see.
+          // Reported rather than passed: a shared options object is the natural
+          // shape the moment two suites want the same settings.
           found.push({
-            line: lineOf(last.getStart(parsed)),
+            line: lineOf(property.start),
             construct,
-            form: 'trailing',
-            ms: staticNumber(last, constants) ?? null,
-            text: last.getText(parsed),
+            form: 'options',
+            ms: null,
+            text: textOf(property),
+          });
+          continue;
+        }
+        if (property.type !== 'Property') {
+          continue;
+        }
+        // `{timeout: T}`, and `{timeout}` — the same declaration written shorter,
+        // where the value is the name itself. oxc gives a shorthand property the
+        // same key and value node, so both forms read identically here.
+        const key = child(property, 'key');
+        const named =
+          key !== undefined &&
+          ((key.type === 'Identifier' && key['name'] === 'timeout') ||
+            (key.type === 'Literal' && key['value'] === 'timeout'));
+        const value = child(property, 'value');
+        if (named && value !== undefined) {
+          found.push({
+            line: lineOf(property.start),
+            construct,
+            form: 'options',
+            ms: staticNumber(value, constants) ?? null,
+            text: textOf(value),
           });
         }
       }
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(parsed);
+    // The trailing budget, recognised by POSITION rather than by whether its
+    // value can be read. Keying on readability would make the check its own
+    // exemption: `beforeEach(fn, HOOK_TIMEOUT_MS)` halves the CI grant and would
+    // produce no output at all, and five of the literals this gate first found
+    // were in exactly that position.
+    //
+    // Position is unambiguous when the argument before it is the BODY:
+    // `test(name, fn, T)` and `beforeEach(fn, T)` qualify. Requiring a function
+    // there rather than "anything but a number" is what separates those from
+    // `describe(name, {timeout: T}, body)`, where the last argument is a body
+    // referred to by name and no trailing budget exists.
+    //
+    // A body passed by name with a trailing budget — `test(name, fn, T)` where
+    // `fn` is an identifier — is outside this, and stated rather than silent: the
+    // two shapes are indistinguishable without resolving the name, and no test in
+    // this repo is written that way.
+    const last = args.at(-1);
+    const previous = args.at(-2);
+    if (
+      last !== undefined &&
+      previous !== undefined &&
+      last.type !== 'ObjectExpression' &&
+      !FUNCTION_TYPES.has(last.type) &&
+      FUNCTION_TYPES.has(previous.type)
+    ) {
+      found.push({
+        line: lineOf(last.start),
+        construct,
+        form: 'trailing',
+        ms: staticNumber(last, constants) ?? null,
+        text: textOf(last),
+      });
+    }
+  });
   return found;
 }
 
@@ -485,67 +587,60 @@ function loweredMergeTargets(
   limit: number,
   fileName = 'vitest.config.ts',
 ): {line: number; target: string; key: string; ms: number | null}[] {
-  const parsed = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    false,
-    ts.ScriptKind.TS,
-  );
+  const {root, constants, lineOf, textOf} = parseSource(fileName, source);
   const found: {
     line: number;
     target: string;
     key: string;
     ms: number | null;
   }[] = [];
-  const constants = fileConstants(parsed);
 
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isCallExpression(node) &&
-      rootIdentifier(node.expression) === 'mergeConfig' &&
-      node.arguments.length >= 2
-    ) {
-      const target = node.arguments[0].getText(parsed);
-      // A no-pg-scoped raise is sanctioned. Anything else — a named pg config, or
-      // a variable standing for whichever config is being mapped over — reaches
-      // the pg projects.
-      if (!target.startsWith('configForNoPg')) {
-        for (const argument of node.arguments.slice(1)) {
-          const walk = (inner: ts.Node): void => {
-            if (
-              ts.isPropertyAssignment(inner) &&
-              ts.isIdentifier(inner.name) &&
-              (inner.name.text === 'testTimeout' ||
-                inner.name.text === 'hookTimeout')
-            ) {
-              // Resolved against the file's own constants, and REPORTED when
-              // it cannot be: dropping an unreadable value here would leave
-              // illegibility as an exemption in the one place a budget is most
-              // likely to be named rather than written.
-              const ms = staticNumber(inner.initializer, constants);
-              const lowered =
-                ms === undefined || (ms > DISABLES_TIMEOUT && ms < limit);
-              if (lowered) {
-                found.push({
-                  line:
-                    parsed.getLineAndCharacterOfPosition(inner.getStart(parsed))
-                      .line + 1,
-                  target,
-                  key: inner.name.text,
-                  ms: ms ?? null,
-                });
-              }
-            }
-            ts.forEachChild(inner, walk);
-          };
-          walk(argument);
-        }
-      }
+  walk(root, node => {
+    if (node.type !== 'CallExpression') {
+      return;
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(parsed);
+    const callee = child(node, 'callee');
+    if (callee === undefined || rootIdentifier(callee) !== 'mergeConfig') {
+      return;
+    }
+    const args = children(node, 'arguments');
+    if (args.length < 2) {
+      return;
+    }
+    const target = textOf(args[0]);
+    // A no-pg-scoped raise is sanctioned. Anything else — a named pg config, or a
+    // variable standing for whichever config is being mapped over — reaches the
+    // pg projects.
+    if (target.startsWith('configForNoPg')) {
+      return;
+    }
+    for (const argument of args.slice(1)) {
+      walk(argument, inner => {
+        if (inner.type !== 'Property') {
+          return;
+        }
+        const key = child(inner, 'key');
+        const name = key?.type === 'Identifier' ? key['name'] : undefined;
+        if (name !== 'testTimeout' && name !== 'hookTimeout') {
+          return;
+        }
+        // Resolved against the file's own constants, and REPORTED when it cannot
+        // be: dropping an unreadable value here would leave illegibility as an
+        // exemption in the one place a budget is most likely to be named rather
+        // than written.
+        const value = child(inner, 'value');
+        const ms = value && staticNumber(value, constants);
+        if (ms === undefined || (ms > DISABLES_TIMEOUT && ms < limit)) {
+          found.push({
+            line: lineOf(inner.start),
+            target,
+            key: name,
+            ms: ms ?? null,
+          });
+        }
+      });
+    }
+  });
   return found;
 }
 

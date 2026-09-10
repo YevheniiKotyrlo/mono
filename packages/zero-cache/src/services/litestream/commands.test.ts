@@ -3,6 +3,7 @@ import {EventEmitter} from 'node:events';
 import {
   copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   statSync,
@@ -52,7 +53,45 @@ type FakeLitestream =
   | {kind: 'listing'; snapshots: readonly string[]; wal: readonly string[]}
   | {kind: 'exit'; code: number}
   | {kind: 'hang'}
-  | {kind: 'restore'; copyFrom?: string};
+  | {kind: 'restore'; copyFrom?: string}
+  /**
+   * A restore that refuses when the destination already carries staged
+   * artifacts, and otherwise succeeds by copying — litestream's own refusal to
+   * restore on top of a half-finished attempt. The suffixes are appended to the
+   * staging path, so `''` names the staged database itself.
+   */
+  | {
+      kind: 'restore-unless-staged';
+      stagedSuffixes: readonly string[];
+      refuseWith: number;
+      copyFrom: string;
+    }
+  /**
+   * A restore that fails having left staged artifacts behind, which is the state
+   * the production cleanup exists to clear.
+   */
+  | {
+      kind: 'restore-leaving-staged';
+      stagedSuffixes: readonly string[];
+      code: number;
+    }
+  /**
+   * A restore that fails with a DIRECTORY at a staging path, emitting output.
+   * A directory is the one staged artifact a non-recursive `rm` refuses, so this
+   * reaches the error path rather than the cleanup path.
+   */
+  | {
+      kind: 'restore-staging-directory';
+      suffix: string;
+      stdout: string;
+      stderr: string;
+      code: number;
+    };
+
+/** Where litestream stages a restore before moving it into place. */
+function stagingPath(destination: string, suffix: string): string {
+  return `${destination}.tmp${suffix}`;
+}
 
 /**
  * Stands in for a spawned `litestream`, implementing only what the production
@@ -113,12 +152,12 @@ function fakeChild(
       case 'exit':
         close(behaviour.code, null);
         break;
+      // The restore target is the trailing argument — the only one that is
+      // neither a flag nor a flag's value — so these survive another flag being
+      // added ahead of it, which an index would not.
       case 'restore':
         if (subcommand === 'restore') {
           if (behaviour.copyFrom !== undefined) {
-            // The restore target is the trailing argument — the only one that is
-            // neither a flag nor a flag's value — so this survives another flag
-            // being added ahead of it, which an index would not.
             copyFileSync(behaviour.copyFrom, must(args.at(-1)));
           }
           close(0, null);
@@ -126,6 +165,50 @@ function fakeChild(
           close(1, null);
         }
         break;
+      case 'restore-unless-staged': {
+        if (subcommand !== 'restore') {
+          close(1, null);
+          break;
+        }
+        const destination = must(args.at(-1));
+        const staged = behaviour.stagedSuffixes.some(suffix =>
+          existsSync(stagingPath(destination, suffix)),
+        );
+        if (staged) {
+          close(behaviour.refuseWith, null);
+          break;
+        }
+        copyFileSync(behaviour.copyFrom, destination);
+        close(0, null);
+        break;
+      }
+      case 'restore-leaving-staged': {
+        if (subcommand !== 'restore') {
+          close(1, null);
+          break;
+        }
+        const destination = must(args.at(-1));
+        for (const suffix of behaviour.stagedSuffixes) {
+          writeFileSync(stagingPath(destination, suffix), 'staged');
+        }
+        close(behaviour.code, null);
+        break;
+      }
+      case 'restore-staging-directory': {
+        if (subcommand !== 'restore') {
+          close(1, null);
+          break;
+        }
+        mkdirSync(stagingPath(must(args.at(-1)), behaviour.suffix), {
+          recursive: true,
+        });
+        child.stdout?.write(`${behaviour.stdout}
+`);
+        child.stderr?.write(`${behaviour.stderr}
+`);
+        close(behaviour.code, null);
+        break;
+      }
       case 'hang':
         // Never closes on its own: the production timeout must kill it.
         break;
@@ -486,15 +569,19 @@ describe('litestream/commands restoreReplica', () => {
     writeSQLiteFamily(temporaryReplica);
     writeFileSync(stagedWAL, 'stale WAL data');
     const {litestream} = configWithFakeLitestream(
-      `if [ "$1" = "restore" ]; then\n` +
-        `  for suffix in "" "-wal" "-wal2" "-shm" "-journal"; do\n` +
-        `    if [ -e "$6.tmp$suffix" ]; then exit 9; fi\n` +
-        `  done\n` +
-        `  if [ -e "$6.tmp-deadbeef-wal" ]; then exit 9; fi\n` +
-        `  cp "${source}" "$6"\n` +
-        `  exit 0\n` +
-        `fi\n` +
-        `exit 1`,
+      {
+        kind: 'restore-unless-staged',
+        stagedSuffixes: [
+          '',
+          '-wal',
+          '-wal2',
+          '-shm',
+          '-journal',
+          '-deadbeef-wal',
+        ],
+        refuseWith: 9,
+        copyFrom: source,
+      },
       replica,
     );
 
@@ -518,14 +605,18 @@ describe('litestream/commands restoreReplica', () => {
     const temporaryReplica = `${replica}.tmp`;
     const stagedWAL = `${temporaryReplica}-deadbeef-wal`;
     const {litestream} = configWithFakeLitestream(
-      `if [ "$1" = "restore" ]; then\n` +
-        `  for suffix in "" "-wal" "-wal2" "-shm" "-journal"; do\n` +
-        `    printf "temporary" > "$6.tmp$suffix"\n` +
-        `  done\n` +
-        `  printf "temporary WAL" > "${stagedWAL}"\n` +
-        `  exit 1\n` +
-        `fi\n` +
-        `exit 1`,
+      {
+        kind: 'restore-leaving-staged',
+        stagedSuffixes: [
+          '',
+          '-wal',
+          '-wal2',
+          '-shm',
+          '-journal',
+          '-deadbeef-wal',
+        ],
+        code: 1,
+      },
       replica,
     );
 
@@ -549,12 +640,11 @@ describe('litestream/commands restoreReplica', () => {
     const temporaryReplica = `${replica}.tmp`;
     writeSQLiteFamily(replica, 'real replica');
     const {litestream} = configWithFakeLitestream(
-      `if [ "$1" = "restore" ]; then\n` +
-        `  printf "temporary" > "$6.tmp"\n` +
-        `  printf "temporary journal" > "$6.tmp-journal"\n` +
-        `  exit 1\n` +
-        `fi\n` +
-        `exit 1`,
+      {
+        kind: 'restore-leaving-staged',
+        stagedSuffixes: ['', '-journal'],
+        code: 1,
+      },
       replica,
     );
 
@@ -586,11 +676,7 @@ describe('litestream/commands restoreReplica', () => {
     writeFileSync(temporaryReplica, 'stale temporary data');
     writeFileSync(unexpectedFile, 'unexpected data');
     const {litestream} = configWithFakeLitestream(
-      `if [ "$1" = "restore" ]; then\n` +
-        `  cp "${source}" "$6"\n` +
-        `  exit 0\n` +
-        `fi\n` +
-        `exit 1`,
+      {kind: 'restore', copyFrom: source},
       replica,
     );
 
@@ -639,15 +725,13 @@ describe('litestream/commands restoreReplica', () => {
   });
 
   test('includes captured output when restore fails', async () => {
-    const {litestream, replica} = configWithFakeLitestream(
-      `if [ "$1" = "restore" ]; then\n` +
-        `  mkdir "$6.tmp"\n` +
-        `  echo "restore stdout"\n` +
-        `  echo "restore stderr" >&2\n` +
-        `  exit 1\n` +
-        `fi\n` +
-        `exit 1`,
-    );
+    const {litestream, replica} = configWithFakeLitestream({
+      kind: 'restore-staging-directory',
+      suffix: '',
+      stdout: 'restore stdout',
+      stderr: 'restore stderr',
+      code: 1,
+    });
 
     const error = await tryRestore(
       lc,
@@ -764,11 +848,7 @@ describe('litestream/commands restoreReplica', () => {
     const replica = join(dir, 'replica.db');
     createRestorableReplica(source, '01');
     const {litestream} = configWithFakeLitestream(
-      `if [ "$1" = "restore" ]; then\n` +
-        `  cp "${source}" "$6"\n` +
-        `  exit 0\n` +
-        `fi\n` +
-        `exit 1`,
+      {kind: 'restore', copyFrom: source},
       replica,
       {restoreUsingV5},
     );
@@ -838,7 +918,10 @@ describe('litestream/commands restoreReplica', () => {
       mkdtempSync(join(tmpdir(), 'litestream-config-test-')),
       'replica.db',
     );
-    const {litestream} = configWithFakeLitestream('exit 0', replica);
+    const {litestream} = configWithFakeLitestream(
+      {kind: 'exit', code: 0},
+      replica,
+    );
     const env: Record<string, string> = {
       ZERO_REPLICA_FILE: replica,
       ZERO_LITESTREAM_BACKUP_URL: must(litestream.backupURL),
@@ -866,7 +949,7 @@ describe('litestream/commands restoreReplica', () => {
     const spawnMock = vi.mocked(childProcess.spawn);
     spawnMock.mockClear();
     const {litestream, replica} = configWithFakeLitestream(
-      'exit 0',
+      {kind: 'exit', code: 0},
       undefined,
       {forceCheckpointThresholdMB},
     );
