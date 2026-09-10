@@ -1256,6 +1256,8 @@ describe('change-streamer/sqlite-change-log-purge-scheduler', () => {
             } finally {
               scheduler.stop();
               parkedYields.splice(0).forEach(release => release());
+              // This run cleans up after itself rather than leaving 1000 files to
+              // the hook, so it drops its own entry and closes its own handle.
               const index = opened.findIndex(entry => entry.file === file);
               if (index >= 0) {
                 opened.splice(index, 1);
