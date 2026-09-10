@@ -102,22 +102,40 @@ export type ReplicaOptions = {
 export type ServerContext = JSONObject;
 
 /**
- * The most upstream connections initial sync will open to copy tables.
+ * The share of upstream's `max_connections` the Windows workaround may spend.
  *
- * A worker is a connection, so this is the ceiling on what initial sync asks of
- * upstream. It exists because the Windows path below raises the worker count to
- * the TABLE count, which is a property of the publication rather than of any
- * setting: a 1,000-table publication asked for 1,000 connections and failed
- * against a `max_connections` of 100 — trading a client bug for a server limit.
+ * A worker is a connection, and the Windows path below derives the worker count
+ * from the TABLE count — a property of the publication rather than of any
+ * setting, so a 1,000-table publication asks for 1,000 connections. What bounds
+ * that has to be the server's limit, because the limit is what it collides with:
+ * a fixed number protects nothing on a managed Postgres at 25 and is not
+ * defensible against the default 100 either, since `cvr-db` and `change-db` both
+ * fall back to `upstream-db` and zero-cache's own documented budget on that one
+ * server is already 56 connections before initial sync opens any.
  *
- * Above the ceiling, Windows workers copy more than one table each and the
- * Node/Postgres bug is back in scope. That is the better failure of the two: it
- * is fixed by running Node 22 or later, which the startup warning already asks
- * for, whereas exhausting `max_connections` cannot be worked around from the
- * client at all. An operator who asks for more than this many workers still gets
- * them — the ceiling only bounds what the platform workaround adds on its own.
+ * A quarter leaves the rest of that budget, the replication stream, and other
+ * clients room. `WIN32_COPY_WORKER_CEILING` caps it above that, because past a
+ * few dozen concurrent COPY streams the connections stop buying throughput.
  */
-export const MAX_COPY_WORKERS = 50;
+export const WIN32_COPY_WORKER_SHARE = 0.25;
+
+/** The most workers the Windows workaround adds on its own, whatever the limit. */
+export const WIN32_COPY_WORKER_CEILING = 50;
+
+/**
+ * The ceiling the Windows workaround respects on this server.
+ *
+ * Exported for the test; the sync passes upstream's reported `max_connections`.
+ */
+export function win32CopyWorkerCeiling(maxConnections: number): number {
+  return Math.max(
+    1,
+    Math.min(
+      WIN32_COPY_WORKER_CEILING,
+      Math.floor(maxConnections * WIN32_COPY_WORKER_SHARE),
+    ),
+  );
+}
 
 /**
  * How many workers copy the tables, which is not simply the requested count.
@@ -127,23 +145,32 @@ export const MAX_COPY_WORKERS = 50;
  * responding after a certain sequence of them. Everywhere else the requested count
  * applies, capped at the number of tables since idle workers do nothing.
  *
- * Either way the result is bounded by {@link MAX_COPY_WORKERS}, unless the
- * operator asked for more than that outright.
+ * That Windows count is bounded by {@link win32CopyWorkerCeiling} — an operator
+ * who asked for more than the ceiling still gets what they asked for, since the
+ * ceiling bounds only what the platform workaround adds on its own.
  *
- * The platform is a parameter so both outcomes are testable on either one — the
- * Windows branch would otherwise be unreachable on CI, and a test that re-derives
- * this rule can drift from it silently.
+ * Above the ceiling, Windows workers copy more than one table each and the
+ * Node/Postgres bug is back in scope. That is the better of the two failures: it
+ * is fixed by running Node 22 or later, whereas exhausting `max_connections`
+ * cannot be worked around from the client at all — and unlike the hang, it is
+ * reported (see the caller's warning).
+ *
+ * Every input is a parameter so both outcomes are testable on either platform —
+ * the Windows branch would otherwise be unreachable on CI, and a test that
+ * re-derives this rule can drift from it silently.
  */
 export function copyWorkerCount({
   requested,
   numTables,
   platform,
+  maxConnections,
 }: {
   requested: number;
   numTables: number;
   platform: NodeJS.Platform;
+  maxConnections: number;
 }): number {
-  // Named rather than positional because both counts are plain numbers, and
+  // Named rather than positional because these counts are plain numbers, and
   // `Math.min` makes a swapped pair look right whenever the requested count is
   // the larger one — diverging only when an operator lowers it below the table
   // count, which is the one case this function exists to reason about.
@@ -151,7 +178,10 @@ export function copyWorkerCount({
     // `requested` is the floor rather than being ignored: an operator who asked
     // for more connections than the ceiling has already accepted that cost, and
     // silently lowering it here would be a different surprise.
-    return Math.min(numTables, Math.max(MAX_COPY_WORKERS, requested));
+    return Math.min(
+      numTables,
+      Math.max(win32CopyWorkerCeiling(maxConnections), requested),
+    );
   }
   return Math.min(requested, numTables);
 }
@@ -196,7 +226,7 @@ export async function initialSync(
   try {
     const copyProfiler = profileCopy ? await CpuProfiler.connect() : null;
     sql = await connectPgClient(lc, upstreamURI, 'initial-sync');
-    const pgVersion = await checkUpstreamConfig(sql);
+    const {version: pgVersion, maxConnections} = await checkUpstreamConfig(sql);
 
     // In shadow mode we assume the shard is already initialized and just
     // read back the existing publications. `ensurePublishedTables` would
@@ -244,11 +274,24 @@ export async function initialSync(
         requested: tableCopyWorkers,
         numTables,
         platform: platform(),
+        maxConnections,
       });
       if (numWorkers > tableCopyWorkers) {
         lc.warn?.(
           `Increasing the number of copy workers from ${tableCopyWorkers} to ` +
             `${numWorkers} to work around a Node/Postgres connection bug`,
+        );
+      }
+      // Reported because the workaround is only partly applied past the ceiling:
+      // each worker then copies several tables, which is the condition the bug
+      // needs. Without this the operator is told the workaround was applied at
+      // exactly the moment it was not, and a hang has no discoverable cause.
+      if (platform() === 'win32' && numTables > numWorkers) {
+        lc.warn?.(
+          `${numTables} tables share ${numWorkers} copy workers, bounded by ` +
+            `upstream's max_connections of ${maxConnections}. Each worker runs ` +
+            `several COPY streams, which older Node versions can hang on — run ` +
+            `zero-cache with Node v22+, or raise max_connections.`,
         );
       }
 
@@ -518,10 +561,11 @@ export async function shadowInitialSync(
 }
 
 async function checkUpstreamConfig(sql: PostgresDB) {
-  const {walLevel, version} = (
-    await sql<{walLevel: string; version: number}[]>`
-      SELECT current_setting('wal_level') as "walLevel", 
-             current_setting('server_version_num') as "version";
+  const {walLevel, version, maxConnections} = (
+    await sql<{walLevel: string; version: number; maxConnections: number}[]>`
+      SELECT current_setting('wal_level') as "walLevel",
+             current_setting('server_version_num') as "version",
+             current_setting('max_connections') as "maxConnections";
   `
   )[0];
 
@@ -535,7 +579,7 @@ async function checkUpstreamConfig(sql: PostgresDB) {
       `Must be running Postgres 15 or higher (currently: "${version}")`,
     );
   }
-  return version;
+  return {version, maxConnections};
 }
 
 async function ensurePublishedTables(

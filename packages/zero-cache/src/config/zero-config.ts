@@ -1349,6 +1349,12 @@ export const zeroOptions = {
         `10 MB of table data in memory during initial sync. Increasing the number of`,
         `workers may improve initial sync speed; however, note that local disk throughput`,
         `(i.e. IOPS), upstream CPU, and network bandwidth may also be bottlenecks.`,
+        ``,
+        `On Windows the count is raised to the number of published tables, because`,
+        `sharing one connection across several COPY streams there can leave the`,
+        `connection unresponsive. That raise is bounded by a quarter of upstream's`,
+        `max_connections, at most 50. Asking for more than the bound here still`,
+        `gets it: the bound limits only what the platform raise adds on its own.`,
       ],
     },
 
