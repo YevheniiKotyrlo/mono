@@ -69,9 +69,9 @@ describe('litestream/litestream-checkpointer', () => {
     db.pragma('wal_autocheckpoint = 0');
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     db.close();
-    dbFile.delete();
+    await dbFile.delete();
     vi.useRealTimers();
   });
 

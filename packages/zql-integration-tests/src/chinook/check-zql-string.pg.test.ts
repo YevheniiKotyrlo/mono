@@ -14,7 +14,7 @@ const QUERY_STRING = `track
 const pgContent = await getChinook();
 
 const harness = await bootstrap({
-  suiteName: 'frontend_analysis',
+  suiteName: 'check_zql_string',
   zqlSchema: schema,
   pgContent,
 });

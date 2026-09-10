@@ -333,7 +333,7 @@ test<PgTest>('aborts a slow hydration, evicts the query, and errors it to the cl
     await initial.vs.stop();
     await initial.viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -402,7 +402,7 @@ test<PgTest>('aborts a slow rehydration of an unchanged query on restart', async
     await (restarted ?? initial).vs.stop();
     await (restarted ?? initial).viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -453,7 +453,7 @@ test<PgTest>('a query sharing a tripped transformation is rejected in the same p
     await initial.vs.stop();
     await initial.viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -522,7 +522,7 @@ test<PgTest>('a gotten query sharing a tripped transformation is not rehydrated 
     await (restarted ?? initial).vs.stop();
     await (restarted ?? initial).viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });
 
@@ -560,6 +560,6 @@ test<PgTest>('a disabled timeout never aborts a hydration', async ({
     await initial.vs.stop();
     await initial.viewSyncerDone;
     await testDBs.drop(initial.cvrDB, initial.upstreamDb);
-    initial.replicaDbFile.delete();
+    await initial.replicaDbFile.delete();
   }
 });

@@ -68,7 +68,7 @@ describe('permissions', () => {
       await vs.stop();
       await viewSyncerDone;
       await testDBs.drop(cvrDB, upstreamDb);
-      replicaDbFile.delete();
+      await replicaDbFile.delete();
     };
   });
 

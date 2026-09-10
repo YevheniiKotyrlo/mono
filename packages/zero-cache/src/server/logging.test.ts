@@ -1,5 +1,3 @@
-import {mkdtempSync} from 'node:fs';
-import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {LogContext} from '@rocicorp/logger';
 import {describe, expect, test} from 'vitest';
@@ -9,6 +7,7 @@ import {
 } from '../../../shared/src/logging-test-utils.ts';
 import {Database} from '../../../zqlite/src/db.ts';
 import {registerSQLiteCorruptionDiagnosticTarget} from '../db/sqlite-corruption.ts';
+import {ownedTempDir} from '../test/lite.ts';
 import {
   CompositeLogSink,
   createLogContext,
@@ -118,7 +117,7 @@ describe('server/logging', () => {
 });
 
 function createSQLiteDB() {
-  const dir = mkdtempSync(join(tmpdir(), 'zero-cache-logging-test-'));
+  const dir = ownedTempDir('zero-cache-logging-test-');
   const dbPath = join(dir, 'replica.db');
   const db = new Database(createSilentLogContext(), dbPath);
   try {

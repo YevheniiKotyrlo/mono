@@ -683,7 +683,20 @@ type BenchDBs = {
 
 function setupDBs(c: BenchCase, testName: string): BenchDBs {
   const dbFile = new DbFile(testName);
-  cleanup.push(() => dbFile.delete());
+  // Synchronous, because this cleanup list is drained synchronously from `finally`
+  // blocks in sync helpers: `DbFile.delete()` returns a promise nothing here can
+  // await, and a `() => void` slot accepts it silently, so the file just leaks.
+  //
+  // Reported rather than thrown, for the reason `DbFile.delete()` gives — a
+  // benchmark exists to produce a measurement, and turning a temp file the OS was
+  // slow to release into a failed run buries the number that was being measured.
+  cleanup.push(() => {
+    try {
+      deleteLiteDB(dbFile.path);
+    } catch (error) {
+      console.warn(`left ${dbFile.path} behind`, error);
+    }
+  });
 
   const replica = new Database(lc, dbFile.path);
   replica.pragma(`journal_mode = ${REPLICA_JOURNAL_MODE}`);

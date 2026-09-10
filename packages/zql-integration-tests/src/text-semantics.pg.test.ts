@@ -25,8 +25,10 @@ import {afterAll, beforeAll, describe, expect, test} from 'vitest';
 import {testLogConfig} from '../../otel/src/test-log-config.ts';
 import type {JSONValue} from '../../shared/src/json.ts';
 import {createSilentLogContext} from '../../shared/src/logging-test-utils.ts';
+import {must} from '../../shared/src/must.ts';
 import {compile, extractZqlResult} from '../../z2s/src/compiler.ts';
 import {formatPgInternalConvert} from '../../z2s/src/sql.ts';
+import {testDBs} from '../../zero-cache/src/test/db.ts';
 import type {PostgresDB} from '../../zero-cache/src/types/pg.ts';
 import type {Row} from '../../zero-protocol/src/data.ts';
 import {createSchema} from '../../zero-schema/src/builder/schema-builder.ts';
@@ -43,6 +45,7 @@ import {
 } from '../../zqlite/src/test/source-factory.ts';
 import './helpers/comparePg.ts';
 import {fillPgAndSync} from './helpers/setup.ts';
+import {releaseAll} from './helpers/teardown.ts';
 
 const lc = createSilentLogContext();
 const DB_NAME = 'text-semantics-test';
@@ -122,8 +125,10 @@ const testData = {
   textItemDefault: rows,
 } satisfies Record<string, Row[]>;
 
-let pg: PostgresDB;
-let sqlite: Database;
+// Optional because `beforeAll` can fail before assigning either: the teardown
+// guards below are load-bearing, not defensive.
+let pg: PostgresDB | undefined;
+let sqlite: Database | undefined;
 let queryDelegate: QueryDelegate;
 
 beforeAll(async () => {
@@ -133,9 +138,13 @@ beforeAll(async () => {
   queryDelegate = newQueryDelegate(lc, testLogConfig, sqlite, schema);
 });
 
-afterAll(() => {
-  sqlite.close();
-});
+afterAll(() =>
+  // Guarded because `beforeAll` can fail before assigning either, and run through
+  // `releaseAll` so a failure closing the sqlite handle cannot skip the drop.
+  // Dropping releases the replication slot initial sync created, as well as the
+  // connections; leaving it means both leak for the rest of the run.
+  releaseAll([() => sqlite?.close(), () => pg && testDBs.drop(pg)]),
+);
 
 describe('text semantics oracle corpus', () => {
   const baseQuery = () => newQuery(schema, 'textItemC');
@@ -318,6 +327,9 @@ async function runAsSQL(q: Query<'textItemC' | 'textItemDefault', Schema>) {
   const c = compile(serverSchema, schema, asQueryInternals(q).ast);
   const sqlQuery = formatPgInternalConvert(c);
   return extractZqlResult(
-    await pg.unsafe(sqlQuery.text, sqlQuery.values as JSONValue[]),
+    // `must` rather than a non-null assertion: if `beforeAll` failed the cases
+    // still run, and this names the reason instead of raising a TypeError on a
+    // property of undefined.
+    await must(pg).unsafe(sqlQuery.text, sqlQuery.values as JSONValue[]),
   );
 }

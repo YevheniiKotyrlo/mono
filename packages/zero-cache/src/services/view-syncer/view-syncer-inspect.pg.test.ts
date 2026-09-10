@@ -122,7 +122,7 @@ describe('view-syncer/service', () => {
       await vs.stop();
       await viewSyncerDone;
       await testDBs.drop(cvrDB, upstreamDb);
-      replicaDbFile.delete();
+      await replicaDbFile.delete();
 
       delegate.clearAuthenticated(serviceID);
     };
@@ -808,7 +808,7 @@ describe('view-syncer/service', () => {
         await restrictiveVs.stop();
         await restrictiveViewSyncerDone;
         await testDBs.drop(restrictiveCvrDB, restrictiveUpstreamDb);
-        restrictiveReplicaDbFile.delete();
+        await restrictiveReplicaDbFile.delete();
         restrictiveDelegate.clearAuthenticated(serviceID);
       };
     });

@@ -601,7 +601,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -651,7 +651,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -695,7 +695,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -741,7 +741,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -805,7 +805,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -856,7 +856,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -948,7 +948,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1055,7 +1055,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1132,7 +1132,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1196,7 +1196,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1351,7 +1351,7 @@ describe('change-streamer/service', () => {
       await streamerDone;
       replica.close();
       deleteChangeLogDB(replicaFile.path);
-      replicaFile.delete();
+      await replicaFile.delete();
     }
   });
 
@@ -1445,7 +1445,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1548,7 +1548,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1627,7 +1627,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1740,7 +1740,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1825,7 +1825,7 @@ describe('change-streamer/service', () => {
         await streamer.stop();
         await streamerDone;
         deleteChangeLogDB(logFile.path);
-        logFile.delete();
+        await logFile.delete();
       },
     };
   }
@@ -2173,7 +2173,7 @@ describe('change-streamer/service', () => {
       catchupChangeLog.close();
       catchupReplica.close();
       deleteChangeLogDB(catchupReplicaFile.path);
-      catchupReplicaFile.delete();
+      await catchupReplicaFile.delete();
     }
   });
 
@@ -2226,6 +2226,15 @@ describe('change-streamer/service', () => {
       const fromSQLite = drainToQueue(sqliteSub);
       // The barrier holds the subscription: not even the status message is
       // delivered until the required head is readable.
+      //
+      // A delay, deliberately, and one of the few places it is the honest tool: a
+      // subscription registered while '06' is in flight is barriered BY that, so
+      // there is no second subscriber to anchor against — one registered here to
+      // act as the anchor is held by the same barrier and never reports. The
+      // assertion is a negative, and the risk is that it holds because setup has
+      // not happened rather than because the barrier works; the positive
+      // assertions below are what rule that out, by proving the same subscription
+      // does deliver once the writer commits.
       await sleep(50);
       expect(fromSQLite.size()).toBe(0);
 
@@ -2252,7 +2261,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -2359,7 +2368,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -2499,7 +2508,7 @@ describe('change-streamer/service', () => {
       catchupChangeLog.close();
       catchupReplica.close();
       deleteChangeLogDB(catchupReplicaFile.path);
-      catchupReplicaFile.delete();
+      await catchupReplicaFile.delete();
     }
   });
 
@@ -2581,7 +2590,7 @@ describe('change-streamer/service', () => {
       catchupChangeLog?.close();
       catchupReplica.close();
       deleteChangeLogDB(catchupReplicaFile.path);
-      catchupReplicaFile.delete();
+      await catchupReplicaFile.delete();
     }
   });
 
@@ -2668,7 +2677,7 @@ describe('change-streamer/service', () => {
       catchupChangeLog.close();
       catchupReplica.close();
       deleteChangeLogDB(catchupReplicaFile.path);
-      catchupReplicaFile.delete();
+      await catchupReplicaFile.delete();
     }
   });
 
@@ -2728,7 +2737,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       catchupReplica.close();
       deleteChangeLogDB(catchupReplicaFile.path);
-      catchupReplicaFile.delete();
+      await catchupReplicaFile.delete();
     }
   });
 

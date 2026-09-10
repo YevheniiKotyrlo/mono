@@ -69,7 +69,7 @@ test('streaming SET NOT NULL matches a fresh replica of the final PG schema', as
   } finally {
     changes?.cancel();
     streamed?.close();
-    replicaFile.delete();
+    await replicaFile.delete();
     await testDBs.drop(upstream);
   }
 });

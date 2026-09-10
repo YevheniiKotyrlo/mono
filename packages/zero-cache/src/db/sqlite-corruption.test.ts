@@ -1,5 +1,4 @@
-import {mkdtempSync, writeFileSync} from 'node:fs';
-import {tmpdir} from 'node:os';
+import {writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {LogContext} from '@rocicorp/logger';
 import {describe, expect, test} from 'vitest';
@@ -9,6 +8,7 @@ import {
 } from '../../../shared/src/logging-test-utils.ts';
 import {Database} from '../../../zqlite/src/db.ts';
 import {initReplicationState} from '../services/replicator/schema/replication-state.ts';
+import {ownedTempDir} from '../test/lite.ts';
 import {
   isSQLiteCorruption,
   logSQLiteCorruptionDiagnostics,
@@ -60,7 +60,7 @@ describe('sqlite-corruption', () => {
   });
 
   test('logs in-place diagnostics without row data', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'sqlite-corruption-test-'));
+    const dir = ownedTempDir('sqlite-corruption-test-');
     const dbPath = join(dir, 'replica.db');
     const db = new Database(createSilentLogContext(), dbPath);
     try {
@@ -107,7 +107,7 @@ describe('sqlite-corruption', () => {
   });
 
   test('skips full checks by default', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'sqlite-corruption-test-'));
+    const dir = ownedTempDir('sqlite-corruption-test-');
     const dbPath = join(dir, 'replica.db');
     new Database(createSilentLogContext(), dbPath).close();
     const sink = new TestLogSink();
@@ -125,7 +125,7 @@ describe('sqlite-corruption', () => {
   });
 
   test('logs file stats when readonly open fails', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'sqlite-corruption-test-'));
+    const dir = ownedTempDir('sqlite-corruption-test-');
     const dbPath = join(dir, 'replica.db');
     writeFileSync(dbPath, 'not sqlite');
 

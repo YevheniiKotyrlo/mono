@@ -669,8 +669,8 @@ describe('replica-schema-migrations', () => {
 
   beforeEach(() => {
     replicaFile = new DbFile('replica_schema_test');
-    return () => {
-      replicaFile.delete();
+    return async () => {
+      await replicaFile.delete();
       deleteLiteDB(`${replicaFile.path}.tmp`);
     };
   });
