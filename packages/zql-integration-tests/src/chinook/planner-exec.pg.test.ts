@@ -4,6 +4,7 @@ import {
   initializePlannerInfrastructure,
   initializeIndexedDatabase,
   executeAllPlanAttempts,
+  validatePlansAgree,
   validateCorrelation,
   validateWithinOptimal,
   validateWithinBaseline,
@@ -534,6 +535,34 @@ describe('Chinook planner execution cost validation', () => {
     },
 
     {
+      // A two-level EXISTS inside a disjunction. The single-level shapes above
+      // exercise the flip on its own, and the chained shape exercises nesting;
+      // this is both at once, which is the shape a search box produces when one
+      // of the things it searches is two hops away.
+      name: 'nested exists inside an or',
+      query: queries.track
+        .where(({or, exists}) =>
+          or(
+            exists('playlists'),
+            exists('album', album =>
+              album.whereExists('artist', artist =>
+                artist.where('name', 'Iron Maiden'),
+              ),
+            ),
+          ),
+        )
+        .limit(100),
+      // No cost validation: this case is here for the agreement invariant, which
+      // runs for every case regardless. A threshold picked to pass would assert
+      // nothing, and one picked honestly would need its own measurement.
+      validations: [],
+      // An empty array rather than absent: the indexed pass runs only when this
+      // is present, and an index is what changes which plan wins — so omitting it
+      // would leave the widest plan space in this suite checked on one DB.
+      extraIndexValidations: [],
+    },
+
+    {
       name: 'varying limit - limit 100',
       query: queries.track
         .whereExists('album', album =>
@@ -559,6 +588,14 @@ describe('Chinook planner execution cost validation', () => {
 
     // Verify we got multiple planning attempts
     expect(results.length).toBeGreaterThan(0);
+
+    // Unconditional, and ahead of the cost validations: those measure how well
+    // the estimates track reality, which a plan returning the wrong rows can do
+    // perfectly well — it scans less and it is faster. Every plan is a way of
+    // computing the same answer, so the answers agreeing is the premise the
+    // rest of this test rests on.
+    const baseAgreement = validatePlansAgree(results);
+    expect(baseAgreement.passed, baseAgreement.details).toBe(true);
 
     // Initialize summary entry
     const summary: TestSummary = {
@@ -602,6 +639,10 @@ describe('Chinook planner execution cost validation', () => {
       console.log('  [Indexed DB - with extra indices]');
 
       const indexedResults = executeAllPlanAttempts(query, true);
+
+      const indexedAgreement = validatePlansAgree(indexedResults);
+      expect(indexedAgreement.passed, indexedAgreement.details).toBe(true);
+
       const indexedValidationResults: ValidationResult[] = [];
 
       for (const validation of extraIndexValidations) {
