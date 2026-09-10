@@ -1,14 +1,8 @@
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  writeFileSync,
-  type RmOptions,
-} from 'node:fs';
-import {tmpdir} from 'node:os';
+import {existsSync, mkdirSync, writeFileSync, type RmOptions} from 'node:fs';
 import {join} from 'node:path';
 import {expect, test, vi} from 'vitest';
 import {SQLITE_FILE_SUFFIXES} from '../../../shared/src/sqlite-file-suffixes.ts';
+import {ownedTempDir} from '../test/lite.ts';
 import {
   ASYNC_REMOVE_DEADLINE_MS,
   deleteLiteDB,
@@ -30,7 +24,7 @@ test('covers every file a SQLite database can consist of', () => {
 });
 
 function makeDbWithSidecars(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'delete-lite-db-'));
+  const dir = ownedTempDir('delete-lite-db-');
   const dbFile = join(dir, 'replica.db');
   for (const suffix of EXPECTED_SUFFIXES) {
     writeFileSync(`${dbFile}${suffix}`, '');
@@ -60,7 +54,7 @@ test('deletes the database and every sidecar', () => {
 });
 
 test('is a no-op when nothing is there', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'delete-lite-db-'));
+  const dir = ownedTempDir('delete-lite-db-');
   expect(() => deleteLiteDB(join(dir, 'absent.db'))).not.toThrow();
 });
 
@@ -68,7 +62,7 @@ test('refuses a directory rather than removing one, before removing anything', (
   // The paths come from operator config, so this is reachable by misconfiguration.
   // The check runs over every path first: rejecting one mid-loop would leave the
   // database half-deleted, and the callers recreate it immediately.
-  const dir = mkdtempSync(join(tmpdir(), 'delete-lite-db-'));
+  const dir = ownedTempDir('delete-lite-db-');
   const dbFile = join(dir, 'replica.db');
   writeFileSync(dbFile, '');
   writeFileSync(`${dbFile}-wal`, '');
@@ -137,14 +131,14 @@ test('async: deletes the database and every sidecar', async () => {
 });
 
 test('async: is a no-op when nothing is there', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'delete-lite-db-'));
+  const dir = ownedTempDir('delete-lite-db-');
   await expect(
     deleteLiteDBAsync(join(dir, 'absent.db')),
   ).resolves.toBeUndefined();
 });
 
 test('async: refuses a directory before removing anything', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'delete-lite-db-'));
+  const dir = ownedTempDir('delete-lite-db-');
   const dbFile = join(dir, 'replica.db');
   writeFileSync(dbFile, '');
   mkdirSync(`${dbFile}-shm`);
@@ -163,7 +157,7 @@ test('async: attempts every suffix, then reports the failures together', async (
     );
   };
 
-  const file = join(mkdtempSync(join(tmpdir(), 'delete-lite-db-')), 'r.db');
+  const file = join(ownedTempDir('delete-lite-db-'), 'r.db');
   let caught: unknown;
   vi.useFakeTimers();
   try {
@@ -197,7 +191,7 @@ test('async: retries itself rather than handing rm a per-file budget', async () 
     return Promise.resolve();
   };
 
-  const file = join(mkdtempSync(join(tmpdir(), 'delete-lite-db-')), 'r.db');
+  const file = join(ownedTempDir('delete-lite-db-'), 'r.db');
   await deleteLiteDBAsync(file, 'win32', record);
 
   expect(seen).toHaveLength(SQLITE_FILE_SUFFIXES.length);
@@ -214,7 +208,7 @@ test('async: keeps trying a held file, and only that file, until it goes', async
   // becomes free a moment later, and only the paths still held are re-attempted.
   const attempts: string[] = [];
   let held = 3;
-  const file = join(mkdtempSync(join(tmpdir(), 'delete-lite-db-')), 'r.db');
+  const file = join(ownedTempDir('delete-lite-db-'), 'r.db');
   const wal = `${file}-wal`;
   const flaky = (path: string): Promise<void> => {
     attempts.push(path);
@@ -241,7 +235,7 @@ test('async: reports what is still held once the deadline passes', async () => {
   const stuck = (path: string): Promise<void> =>
     Promise.reject(Object.assign(new Error(`EBUSY: ${path}`), {code: 'EBUSY'}));
 
-  const file = join(mkdtempSync(join(tmpdir(), 'delete-lite-db-')), 'r.db');
+  const file = join(ownedTempDir('delete-lite-db-'), 'r.db');
   vi.useFakeTimers();
   try {
     const removing = deleteLiteDBAsync(file, 'win32', stuck).catch(e => e);

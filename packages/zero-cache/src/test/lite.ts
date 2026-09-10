@@ -2,14 +2,39 @@
 // Warns about a temp file it could not remove, the way ./db.ts warns about a
 // database it could not drop: a test helper reporting leftovers has no log
 // context to route through, and staying silent is what lets them accumulate.
+import {mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import type {LogContext} from '@rocicorp/logger';
-import {expect} from 'vitest';
+import {afterEach, expect} from 'vitest';
 import {randInt} from '../../../shared/src/rand.ts';
 import {Database} from '../../../zqlite/src/db.ts';
 import {deleteLiteDBAsync} from '../db/delete-lite-db.ts';
 import {id} from '../types/sql.ts';
+
+/** Every directory handed out below, removed after the case that asked for one. */
+const ownedDirs: string[] = [];
+
+// Registered here rather than per file, the way ./db.ts ends its pool: the hook
+// belongs with the thing that needs it, and a helper that hands out a directory
+// without removing it is how thousands of them collect in the system temp
+// directory — nothing else ever cleans that up.
+afterEach(() => {
+  for (const dir of ownedDirs.splice(0)) {
+    try {
+      rmSync(dir, {recursive: true, force: true});
+    } catch (e) {
+      console.warn(`Unable to remove temp directory ${dir}`, e);
+    }
+  }
+});
+
+/** A temp directory owned by the running case. */
+export function ownedTempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  ownedDirs.push(dir);
+  return dir;
+}
 
 export class DbFile {
   readonly path;

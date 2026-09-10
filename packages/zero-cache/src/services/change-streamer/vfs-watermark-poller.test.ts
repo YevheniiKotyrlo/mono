@@ -1,6 +1,6 @@
 import * as childProcess from 'node:child_process';
 import {EventEmitter} from 'node:events';
-import {mkdtempSync} from 'node:fs';
+import {mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {PassThrough} from 'node:stream';
@@ -173,6 +173,10 @@ describe('change-streamer/vfs-watermark-poller', () => {
   afterEach(() => {
     source?.cancel();
     spawnMock.mockClear();
+    // The replica lives in this directory, so it goes with the case. Left
+    // behind, one collects in the system temp directory per run and nothing
+    // else removes them.
+    rmSync(dir, {recursive: true, force: true});
   });
 
   test('spawns the remote poller with the expected args when local diverges from remote', () => {
