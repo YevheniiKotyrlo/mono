@@ -53,6 +53,10 @@ function resolveOxlint() {
 
 const OXLINT = resolveOxlint();
 
+/** A built-in rule and a file that violates it, proving the harness can lint. */
+const CANARY_RULE = 'no-debugger';
+const CANARY_FILE = '__canary.ts';
+
 const fixtureRoots = [];
 
 afterEach(() => {
@@ -71,6 +75,14 @@ function lintFixture(relativeFilePath, source, ruleName, ruleOptions) {
   mkdirSync(dirname(filePath), {recursive: true});
   writeFileSync(filePath, source);
 
+  // A file that always violates a built-in rule, at WARNING level so it never
+  // moves the exit code the assertions below read. Its diagnostic is the proof
+  // that oxlint reached this fixture at all.
+  writeFileSync(
+    join(root, CANARY_FILE),
+    'debugger;\nexport const canary = 1;\n',
+  );
+
   writeFileSync(
     join(root, '.oxlintrc.json'),
     JSON.stringify({
@@ -86,6 +98,7 @@ function lintFixture(relativeFilePath, source, ruleName, ruleOptions) {
         perf: 'off',
       },
       rules: {
+        [CANARY_RULE]: 'warn',
         [ruleName]:
           ruleOptions === undefined ? 'error' : ['error', ruleOptions],
       },
@@ -100,10 +113,15 @@ function lintFixture(relativeFilePath, source, ruleName, ruleOptions) {
 
   // A harness that cannot lint would satisfy every "does not report" assertion
   // below — a plugin that fails to load, a rejected config, a wrong oxlint path.
-  // So each run proves it actually linked the fixture before its own assertion
+  // So each run proves it actually linted the fixture before its own assertion
   // is allowed to mean anything. This is the same failure the rule under test
   // had (silence is indistinguishable from clean), reintroduced one level up.
-  if (!/Found \d+ warnings? and \d+ errors?/.test(output)) {
+  //
+  // The canary's own diagnostic is the proof, rather than oxlint's summary line:
+  // that line is prose, it is not emitted for every invocation, and keying a
+  // correctness guard on it turns an oxlint upgrade into a suite that passes
+  // while checking nothing.
+  if (!output.includes(CANARY_RULE)) {
     throw new Error(
       `oxlint did not lint the fixture (status ${result.status}):\n${output}`,
     );
@@ -120,7 +138,6 @@ function expectReported(result, ruleName) {
 /** Asserts the rule stayed silent on a fixture that does not violate it. */
 function expectSilent(result, ruleName) {
   expect(result.output).not.toContain(ruleName);
-  expect(result.output).toMatch(/Found 0 warnings and 0 errors/);
   expect(result.status).toBe(0);
 }
 
