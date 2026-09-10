@@ -56,11 +56,12 @@ afterEach(async () => {
   for (const {file, db} of opened.splice(0)) {
     // Isolated per entry: a throwing close would otherwise abandon every later
     // handle and every later file. `DbFile.delete()` tolerates a double close for
-    // the same reason.
+    // the same reason, and the removal below reports what is still held — so the
+    // close's own failure needs no separate voice.
     try {
       db.close();
-    } catch (e) {
-      console.warn(`Unable to close ${file.path}`, e);
+    } catch {
+      // Reported by the removal below if it actually still holds the file.
     }
     deleteChangeLogDB(file.path);
     await file.delete();

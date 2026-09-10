@@ -136,10 +136,16 @@ export interface Subprocess extends EventEmitter {
 
   kill(signal?: NodeJS.Signals): void;
 
-  send?: Sender['send'];
+  /**
+   * Explicitly `| undefined`: this is what a channel-less child REPORTS, not
+   * merely a key it omits. `child_process.spawn` returns a handle whose `send`
+   * reads `undefined` and whose `connected` reads `false`, so a fake that models
+   * one has to be able to say that rather than leave the property out.
+   */
+  send?: Sender['send'] | undefined;
 
   /** Whether an IPC channel is open, and therefore whether `send` exists. */
-  readonly connected?: boolean;
+  readonly connected?: boolean | undefined;
 }
 
 export interface Receiver extends EventEmitter {
