@@ -1,5 +1,6 @@
 import {
   createPlannerInfrastructure,
+  validatePlansAgree,
   validateCorrelation,
   validateWithinOptimal,
   validateWithinBaseline,
@@ -58,6 +59,7 @@ export const indexedTableSpecs = infra.indexedTableSpecs;
 
 // Re-export types and validation functions from shared module
 export {
+  validatePlansAgree,
   validateCorrelation,
   validateWithinOptimal,
   validateWithinBaseline,

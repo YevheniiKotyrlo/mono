@@ -40,6 +40,19 @@ export type PlanAttemptResult = {
   estimatedCost: number;
   actualRowsScanned: number;
   flipPattern: number;
+  /**
+   * The primary keys of the ROOT-table rows the plan returned.
+   *
+   * Every plan for one query is a different way of computing the same answer, so
+   * the answers have to agree; a cost that correlates with reality says nothing
+   * about whether the rows were right.
+   *
+   * Root table only: the hydration stream carries rows for every table in the
+   * pipeline, and which of them flow through is exactly what a flip changes — so
+   * the whole stream differs between plans that agree completely on the query's
+   * result. Keys rather than whole rows because that is what identifies the set.
+   */
+  resultKeys: readonly string[];
 };
 
 export type PlanValidation =
@@ -48,7 +61,7 @@ export type PlanValidation =
   | ['within-baseline', number];
 
 export type ValidationResult = {
-  type: 'correlation' | 'within-optimal' | 'within-baseline';
+  type: 'correlation' | 'within-optimal' | 'within-baseline' | 'plans-agree';
   passed: boolean;
   details: string;
   actualValue: number;
@@ -77,6 +90,52 @@ function sumRowCounts(
 /**
  * Validate correlation between estimated costs and actual costs using Spearman correlation
  */
+/**
+ * Every plan for one query returned the same rows.
+ *
+ * A plan is a different way of computing one answer, so this is the invariant
+ * the whole plan space rests on — and it is the one thing the cost validations
+ * cannot see. A rewrite that drops rows correlates with reality just fine: it
+ * scans less and it is faster, which is what a cheaper plan is supposed to look
+ * like. The only way to catch it is to compare what came back.
+ *
+ * Attempt 0 is the unplanned baseline, so it is what the others are compared
+ * against rather than each other: that names the plan that disagrees AND says
+ * which side is wrong.
+ */
+export function validatePlansAgree(
+  results: PlanAttemptResult[],
+): ValidationResult {
+  const baseline = results.find(r => r.attemptNumber === 0) ?? results[0];
+  const disagreeing = results.filter(
+    r =>
+      r !== baseline &&
+      (r.resultKeys.length !== baseline.resultKeys.length ||
+        r.resultKeys.some((key, i) => key !== baseline.resultKeys[i])),
+  );
+
+  const passed = disagreeing.length === 0;
+  const details = passed
+    ? `all ${results.length} plans returned the same ${baseline.resultKeys.length} row(s)`
+    : `${disagreeing.length} of ${results.length} plans disagree with the ` +
+      `unplanned baseline (${baseline.resultKeys.length} rows): ` +
+      disagreeing
+        .map(
+          r =>
+            `attempt ${r.attemptNumber} (flips ${r.flipPattern}) returned ` +
+            `${r.resultKeys.length}`,
+        )
+        .join('; ');
+
+  return {
+    type: 'plans-agree',
+    passed,
+    details,
+    actualValue: disagreeing.length,
+    threshold: 0,
+  };
+}
+
 export function validateCorrelation(
   results: PlanAttemptResult[],
   threshold: number,
@@ -566,7 +625,9 @@ export async function createPlannerInfrastructure(config: {
         );
 
         // Execute query
-        for (const _rowChange of hydrate(
+        const rootTable = astWithFlips.table;
+        const resultKeys: string[] = [];
+        for (const rowChange of hydrate(
           pipeline,
           hashOfAST(astWithFlips),
           clientSchemaFrom(schema).clientSchema,
@@ -574,8 +635,11 @@ export async function createPlannerInfrastructure(config: {
             includeBackfillingColumns: false,
           }),
         )) {
-          // Consume rows to execute the query
+          if (rowChange !== 'yield' && rowChange.table === rootTable) {
+            resultKeys.push(JSON.stringify(rowChange.rowKey));
+          }
         }
+        resultKeys.sort();
 
         // Collect actual row counts
         const nvisitCounts = debug.getNVisitCounts();
@@ -586,6 +650,7 @@ export async function createPlannerInfrastructure(config: {
           estimatedCost: planEvent.totalCost,
           actualRowsScanned,
           flipPattern: planEvent.flipPattern,
+          resultKeys,
         });
       } finally {
         // Disable tracking for next iteration
