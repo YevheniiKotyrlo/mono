@@ -102,6 +102,34 @@ export type ReplicaOptions = {
 export type ServerContext = JSONObject;
 
 /**
+ * How many workers copy the tables, which is not simply the requested count.
+ *
+ * On Windows a worker is given exactly one table: sharing a connection across
+ * several COPY streams there trips a Node/Postgres bug where the connection stops
+ * responding after a certain sequence of them. Everywhere else the requested count
+ * applies, capped at the number of tables since idle workers do nothing.
+ *
+ * The platform is a parameter so both outcomes are testable on either one — the
+ * Windows branch would otherwise be unreachable on CI, and a test that re-derives
+ * this rule can drift from it silently.
+ */
+export function copyWorkerCount({
+  requested,
+  numTables,
+  platform,
+}: {
+  requested: number;
+  numTables: number;
+  platform: NodeJS.Platform;
+}): number {
+  // Named rather than positional because both counts are plain numbers, and
+  // `Math.min` makes a swapped pair look right whenever the requested count is
+  // the larger one — diverging only when an operator lowers it below the table
+  // count, which is the one case this function exists to reason about.
+  return platform === 'win32' ? numTables : Math.min(requested, numTables);
+}
+
+/**
  * @returns The {@link ReplicaState} of the initialized replica, or `undefined`
  *          for a shadow sync.
  */
@@ -185,16 +213,17 @@ export async function initialSync(
       // Now that tables have been validated, kick off the copiers.
       const {tables, indexes} = published;
       const numTables = tables.length;
-      if (platform() === 'win32' && tableCopyWorkers < numTables) {
+      const numWorkers = copyWorkerCount({
+        requested: tableCopyWorkers,
+        numTables,
+        platform: platform(),
+      });
+      if (numWorkers > tableCopyWorkers) {
         lc.warn?.(
           `Increasing the number of copy workers from ${tableCopyWorkers} to ` +
-            `${numTables} to work around a Node/Postgres connection bug`,
+            `${numWorkers} to work around a Node/Postgres connection bug`,
         );
       }
-      const numWorkers =
-        platform() === 'win32'
-          ? numTables
-          : Math.min(tableCopyWorkers, numTables);
 
       const copyPool = await connectPgClient(
         lc,
