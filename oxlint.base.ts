@@ -1,9 +1,9 @@
+import {fileURLToPath} from 'node:url';
 import type {OxlintConfig} from 'oxlint';
 
-const zeroPlugin = new URL(
-  './tools/oxlint-plugin-zero/index.js',
-  import.meta.url,
-).pathname;
+const zeroPlugin = fileURLToPath(
+  new URL('./tools/oxlint-plugin-zero/index.js', import.meta.url),
+);
 
 /**
  * Shared oxlint configuration for all packages in the monorepo.
