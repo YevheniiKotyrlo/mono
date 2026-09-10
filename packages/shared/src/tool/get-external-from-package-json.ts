@@ -38,8 +38,11 @@ function getRecursiveExternals(
   includePeerDeps: boolean,
 ): Promise<string[]> {
   if (name === 'shared') {
+    // fileURLToPath, not `.pathname`: that yields '/C:/…' on Windows, which then
+    // fails the `startsWith('file:')` test above, skips conversion, and sends a
+    // nonexistent path to packageUp.
     return getExternalFromPackageJSON(
-      new URL(import.meta.url).pathname,
+      fileURLToPath(import.meta.url),
       includePeerDeps,
     );
   }
