@@ -1458,7 +1458,15 @@ export class Zero<
 
       lc = addWebSocketIDFromSocketToLogContext(this.#socket, lc);
       if (this.#connectStart === undefined) {
-        throw new Error('Got open event but connect start time is undefined.');
+        // Logged rather than raised: the metric below is everything
+        // `#connectStart` feeds here, so an `open` that arrives without one —
+        // a stray or duplicate event, or one belonging to an attempt that has
+        // already completed — costs a log line and nothing else. Throwing
+        // reaches the catch below, which disconnects a socket that is working,
+        // and an in-flight mutation then loses the push response it is waiting
+        // on and reports a write that already committed as failed.
+        // `#handleConnectedMessage` treats the identical condition this way.
+        lc.error?.('Got open event but connect start time is undefined.');
       } else {
         const now = Date.now();
         const timeToOpenMs = now - this.#connectStart;

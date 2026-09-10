@@ -4833,6 +4833,39 @@ describe('WebSocket event error handling', () => {
 
     await z.close().catch(() => {});
   });
+
+  test('a stray open event keeps the connection it arrives on', async () => {
+    // `#connectStart` is cleared once the connected message lands, so a second
+    // `open` on the same socket reaches `#onOpen` without one. That is the
+    // shape of a duplicate or late event during a reconnect, and it must not
+    // take a working socket down with it: an in-flight mutation would lose the
+    // push response it is waiting on and report a committed write as failed.
+    const z = zeroForTest({logLevel: 'debug'});
+    await z.triggerConnected();
+    await z.waitForConnectionStatus(ConnectionStatus.Connected);
+    const socket = (await z.socket) as unknown as MockSocket;
+
+    socket.dispatchEvent(new Event('open'));
+
+    expect(z.connectionStatus).toBe(ConnectionStatus.Connected);
+    expect(socket.closed).toBe(false);
+    // Still reported, because it is still an anomaly — just not a fatal one.
+    expect(
+      z.testLogSink.messages.some(
+        ([level, _context, args]) =>
+          level === 'error' &&
+          args[0] === 'Got open event but connect start time is undefined.',
+      ),
+    ).toBe(true);
+    expect(
+      z.testLogSink.messages.some(
+        ([level, _context, args]) =>
+          level === 'error' && args[0] === 'Unhandled error in onOpen',
+      ),
+    ).toBe(false);
+
+    await z.close().catch(() => {});
+  });
 });
 
 test('socket close code 1006 is logged as info, not error', async () => {
