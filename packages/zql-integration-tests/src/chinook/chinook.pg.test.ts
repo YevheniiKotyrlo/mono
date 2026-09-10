@@ -201,12 +201,22 @@ describe('Chinook PG Tests', async () => {
         {
           name: 'In operator',
           createQuery: q =>
-            q.album
-              .where('title', 'IN', [
-                'Riot Act',
-                'For Those About To Rock We Salute You',
-              ])
-              .limit(10),
+            q.album.where('title', 'IN', [
+              'Riot Act',
+              'For Those About To Rock We Salute You',
+            ]),
+          manualVerification: [
+            {
+              artistId: 1,
+              id: 1,
+              title: 'For Those About To Rock We Salute You',
+            },
+            {
+              artistId: 118,
+              id: 180,
+              title: 'Riot Act',
+            },
+          ],
         },
         {
           name: 'Not in operator',
