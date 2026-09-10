@@ -1,5 +1,5 @@
 import {expect, test} from 'vitest';
-import {copyWorkerCount} from './initial-sync.ts';
+import {copyWorkerCount, MAX_COPY_WORKERS} from './initial-sync.ts';
 
 // The platform is a parameter precisely so both outcomes are covered wherever this
 // runs. Reading it from the host instead would leave the Windows branch — the one
@@ -56,4 +56,45 @@ test('the two counts are not interchangeable', () => {
   expect(
     copyWorkerCount({requested: 1, numTables: 7, platform: 'win32'}),
   ).not.toBe(copyWorkerCount({requested: 7, numTables: 1, platform: 'win32'}));
+});
+
+// The ceiling on upstream connections. A worker is a connection, so the win32
+// branch — which counts TABLES rather than a setting — is what makes a ceiling
+// necessary: nothing about a publication's size is bounded.
+test.each([
+  // Below the ceiling nothing changes: one worker per table, as before.
+  [5, 7, 7],
+  [5, MAX_COPY_WORKERS, MAX_COPY_WORKERS],
+  // Above it, the table count no longer decides how many connections are opened.
+  [5, MAX_COPY_WORKERS + 1, MAX_COPY_WORKERS],
+  [5, 1_182, MAX_COPY_WORKERS],
+] as const)(
+  'on win32, %i requested over %i tables opens %i connections',
+  (requested, numTables, expected) => {
+    expect(copyWorkerCount({requested, numTables, platform: 'win32'})).toBe(
+      expected,
+    );
+  },
+);
+
+test('an operator who asks for more than the ceiling still gets it', () => {
+  // The ceiling bounds what the platform workaround adds on its own. Lowering a
+  // count the operator set explicitly would be a different surprise, and they
+  // have already accepted the connection cost by naming it.
+  const requested = MAX_COPY_WORKERS * 3;
+  expect(
+    copyWorkerCount({requested, numTables: 10_000, platform: 'win32'}),
+  ).toBe(requested);
+  expect(
+    copyWorkerCount({requested, numTables: 10_000, platform: 'linux'}),
+  ).toBe(requested);
+});
+
+test('the ceiling never invents work there are no tables for', () => {
+  expect(copyWorkerCount({requested: 5, numTables: 3, platform: 'win32'})).toBe(
+    3,
+  );
+  expect(copyWorkerCount({requested: 5, numTables: 0, platform: 'win32'})).toBe(
+    0,
+  );
 });

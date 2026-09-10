@@ -102,12 +102,33 @@ export type ReplicaOptions = {
 export type ServerContext = JSONObject;
 
 /**
+ * The most upstream connections initial sync will open to copy tables.
+ *
+ * A worker is a connection, so this is the ceiling on what initial sync asks of
+ * upstream. It exists because the Windows path below raises the worker count to
+ * the TABLE count, which is a property of the publication rather than of any
+ * setting: a 1,000-table publication asked for 1,000 connections and failed
+ * against a `max_connections` of 100 — trading a client bug for a server limit.
+ *
+ * Above the ceiling, Windows workers copy more than one table each and the
+ * Node/Postgres bug is back in scope. That is the better failure of the two: it
+ * is fixed by running Node 22 or later, which the startup warning already asks
+ * for, whereas exhausting `max_connections` cannot be worked around from the
+ * client at all. An operator who asks for more than this many workers still gets
+ * them — the ceiling only bounds what the platform workaround adds on its own.
+ */
+export const MAX_COPY_WORKERS = 50;
+
+/**
  * How many workers copy the tables, which is not simply the requested count.
  *
  * On Windows a worker is given exactly one table: sharing a connection across
  * several COPY streams there trips a Node/Postgres bug where the connection stops
  * responding after a certain sequence of them. Everywhere else the requested count
  * applies, capped at the number of tables since idle workers do nothing.
+ *
+ * Either way the result is bounded by {@link MAX_COPY_WORKERS}, unless the
+ * operator asked for more than that outright.
  *
  * The platform is a parameter so both outcomes are testable on either one — the
  * Windows branch would otherwise be unreachable on CI, and a test that re-derives
@@ -126,7 +147,13 @@ export function copyWorkerCount({
   // `Math.min` makes a swapped pair look right whenever the requested count is
   // the larger one — diverging only when an operator lowers it below the table
   // count, which is the one case this function exists to reason about.
-  return platform === 'win32' ? numTables : Math.min(requested, numTables);
+  if (platform === 'win32') {
+    // `requested` is the floor rather than being ignored: an operator who asked
+    // for more connections than the ceiling has already accepted that cost, and
+    // silently lowering it here would be a different surprise.
+    return Math.min(numTables, Math.max(MAX_COPY_WORKERS, requested));
+  }
+  return Math.min(requested, numTables);
 }
 
 /**
