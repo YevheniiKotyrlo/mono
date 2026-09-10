@@ -24,7 +24,7 @@ import process from 'node:process';
 import {promisify} from 'node:util';
 import commandLineArgs from 'command-line-args';
 import commandLineUsage from 'command-line-usage';
-import {resolveNodeShimCommand} from '../../../packages/shared/src/node-shim-command.ts';
+import {resolveNodeShimCommand} from '../../../scripts/src/node-shim-command.ts';
 import {
   type BencherMetricsFormat,
   toBencherMetricFormat,

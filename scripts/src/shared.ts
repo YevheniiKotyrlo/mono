@@ -3,7 +3,7 @@ import {appendFileSync, existsSync, readFileSync, writeFileSync} from 'node:fs';
 import {
   resolveNodeShimCommand,
   type ResolvedCommand,
-} from '../../packages/shared/src/node-shim-command.ts';
+} from './node-shim-command.ts';
 
 export {resolveNodeShimCommand, type ResolvedCommand};
 
