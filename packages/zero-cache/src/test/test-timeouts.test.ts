@@ -246,6 +246,35 @@ function staticNumber(
  * `test` -> `test`; `describe.skipIf(x)` -> `describe`; `foo.test` -> `foo`, which
  * is how a method that merely shares vitest's name stays out of the scan.
  */
+/**
+ * Local name -> the name it was imported under.
+ *
+ * The construct is what a budget attaches to, and a rename at the import hides it
+ * from a matcher that reads the local name: `import {test as testPg}` is still
+ * `test`, and every budget in a file that does it was invisible.
+ */
+function importAliases(root: Node): ReadonlyMap<string, string> {
+  const aliases = new Map<string, string>();
+  for (const statement of children(root, 'body')) {
+    if (statement.type !== 'ImportDeclaration') {
+      continue;
+    }
+    for (const specifier of children(statement, 'specifiers')) {
+      if (specifier.type !== 'ImportSpecifier') {
+        continue;
+      }
+      const local = child(specifier, 'local');
+      const imported = child(specifier, 'imported');
+      const localName = local && local['name'];
+      const importedName = imported && imported['name'];
+      if (typeof localName === 'string' && typeof importedName === 'string') {
+        aliases.set(localName, importedName);
+      }
+    }
+  }
+  return aliases;
+}
+
 function rootIdentifier(node: Node): string | undefined {
   if (node.type === 'Identifier') {
     const name = node['name'];
@@ -356,6 +385,7 @@ function timeoutDeclarations(
   fileName = 'input.ts',
 ): TimeoutDeclaration[] {
   const {root, constants, lineOf, textOf} = parseSource(fileName, source);
+  const aliases = importAliases(root);
   const found: TimeoutDeclaration[] = [];
 
   walk(root, node => {
@@ -363,11 +393,37 @@ function timeoutDeclarations(
       return;
     }
     const callee = child(node, 'callee');
-    const construct = callee && rootIdentifier(callee);
+    const local = callee && rootIdentifier(callee);
+    const construct =
+      local === undefined ? undefined : (aliases.get(local) ?? local);
     if (construct === undefined || !TIMEOUT_BEARING.has(construct)) {
       return;
     }
     const args = children(node, 'arguments');
+
+    // The options position: between the name and the body. An argument there
+    // that is not an inline object holds a budget this cannot read — an options
+    // object bound to a name is the natural shape the moment two cases want the
+    // same settings — so it is reported rather than skipped, exactly as a spread
+    // is. Keyed on a function following it, which is what distinguishes
+    // `test(name, options, body)` from `test(name, body, timeout)`.
+    const optionsPosition = args[1];
+    const afterOptions = args[2];
+    if (
+      args.length >= 3 &&
+      optionsPosition !== undefined &&
+      afterOptions !== undefined &&
+      FUNCTION_TYPES.has(afterOptions.type) &&
+      optionsPosition.type !== 'ObjectExpression'
+    ) {
+      found.push({
+        line: lineOf(optionsPosition.start),
+        construct,
+        form: 'options',
+        ms: null,
+        text: textOf(optionsPosition),
+      });
+    }
     for (const argument of args) {
       // Only this object's OWN properties: a `{poll: {timeout: 50}}` nested
       // inside is some other API's budget, not this call's.
@@ -509,25 +565,37 @@ test('a budget this cannot evaluate is reported, not skipped', () => {
   // file would inherit the exemption — the same illegibility-as-exemption this
   // refuses, one level up. Each entry is a RAISE or a documented detector.
   const SANCTIONED = new Set([
-    // The crafted COPY detector: a per-case value, so no constant to resolve.
-    // Documented at its call site and in this file's header.
-    'packages/zero-cache/src/services/change-source/pg/initial-sync.pg.test.ts :: c.timeoutMs',
-    'packages/zero-cache/src/services/change-source/pg/initial-sync.pg.test.ts :: timeoutMs',
+    // The crafted COPY detector's per-case budget, reached through the options
+    // object it is built into: a conditional expression, so there is no constant
+    // to resolve. Documented at its call site and in this file's header, and it
+    // is the shape that hides a budget from a reader descending only into an
+    // inline object — which is why it is reported and granted rather than
+    // skipped.
+    'packages/zero-cache/src/services/change-source/pg/initial-sync.pg.test.ts :: options',
   ]);
 
   const unreadable: string[] = [];
+  const suppressed = new Set<string>();
   for (const file of files) {
     for (const {line, ms, text} of timeoutDeclarations(
       readFileSync(file, 'utf8'),
       file,
     )) {
       const key = `${rel(file)} :: ${text}`;
-      if (ms === null && !SANCTIONED.has(key)) {
-        unreadable.push(`${key} (line ${line})`);
+      if (ms === null) {
+        if (SANCTIONED.has(key)) {
+          suppressed.add(key);
+        } else {
+          unreadable.push(`${key} (line ${line})`);
+        }
       }
     }
   }
   expect(unreadable).toEqual([]);
+
+  // A grant that no longer suppresses anything is a standing exemption for
+  // whatever is written in that file next, so it fails rather than lingering.
+  expect([...SANCTIONED].filter(key => !suppressed.has(key))).toEqual([]);
 });
 
 /** Every `vitest.config*.ts` under a package, where projects are assembled. */
@@ -696,6 +764,40 @@ test('the scan reads every form a budget is written in', () => {
     {construct: 'describe', ms: 20000, form: 'options'},
   ]);
   expect(read("describe('x', () => {});")).toEqual([]);
+
+  // An options object bound to a name. The value cannot be resolved, so it is
+  // reported as unreadable rather than skipped: this is the shape a budget hides
+  // in from a reader that descends only into an inline object.
+  expect(read("test('x', options, () => {});")).toEqual([
+    {construct: 'test', ms: null, form: 'options'},
+  ]);
+  expect(read("const o = {timeout: 1};\ndescribe('x', o, () => {});")).toEqual([
+    {construct: 'describe', ms: null, form: 'options'},
+  ]);
+
+  // Not the options position: the argument before the body is the NAME, and a
+  // trailing budget after a body is the other form entirely.
+  expect(read('test(NAME, () => {});')).toEqual([]);
+  expect(read("test('x', () => {}, 5_000);")).toEqual([
+    {construct: 'test', ms: 5000, form: 'trailing'},
+  ]);
+
+  // A construct reached through a renamed import is the same construct, so its
+  // budget is still in scope. Matching the local name hid every budget in a file
+  // that renames one.
+  expect(
+    read(
+      "import {test as testPg} from './db.ts';" +
+        "\ntestPg('x', {timeout: 1_000}, () => {});",
+    ),
+  ).toEqual([{construct: 'test', ms: 1000, form: 'options'}]);
+  // And a rename of something that is not a construct stays out of scope.
+  expect(
+    read(
+      "import {expect as check} from 'vitest';" +
+        "\ncheck('x', {timeout: 1_000});",
+    ),
+  ).toEqual([]);
 
   // Wrapped past 80 columns, which is what `oxfmt` produces and CI enforces.
   expect(

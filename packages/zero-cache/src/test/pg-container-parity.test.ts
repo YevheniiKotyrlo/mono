@@ -1,4 +1,4 @@
-import {readFileSync} from 'node:fs';
+import {readdirSync, readFileSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {describe, expect, test} from 'vitest';
@@ -44,20 +44,29 @@ const compose = readFileSync(COMPOSE_FILE, 'utf8');
  * absence is a precondition for the cases below meaning anything rather than a
  * property of the thing under test.
  */
-function commandOf(service: string): string[] {
+/**
+ * One compose service's own block.
+ *
+ * Every assertion about a service reads from here rather than from the whole
+ * file: a file-wide match passes when two services hold each other's values,
+ * which is the drift a copied-neighbour major produces.
+ */
+function blockOf(service: string): string {
   const header = compose.indexOf(`\n  ${service}:\n`);
   if (header === -1) {
     throw new Error(
       `.devcontainer/docker-compose.yml declares no ${service} service`,
     );
   }
-
-  // The service block ends at the next line indented two spaces, which is the
-  // next service or a top-level key.
+  // The block ends at the next line indented two spaces, which is the next
+  // service or a top-level key.
   const rest = compose.slice(header + 1);
   const end = rest.search(/\n {2}\S/u);
-  const block = end === -1 ? rest : rest.slice(0, end);
+  return end === -1 ? rest : rest.slice(0, end);
+}
 
+function commandOf(service: string): string[] {
+  const block = blockOf(service);
   const command = block.indexOf('command:');
   if (command === -1) {
     throw new Error(`${service} declares no command`);
@@ -90,14 +99,29 @@ function setupArgumentsFor(major: number): {image: string; timezone: string} {
   return {image: call[1], timezone: call[2]};
 }
 
-// Driven off the setup files rather than a literal list, so a new major joins by
-// existing.
-const MAJORS = [15, 16, 17, 18] as const;
+/**
+ * The majors, read from the setup files that define them.
+ *
+ * A literal list defeats the direction that matters: adding `pg-19.ts` would not
+ * change it, so the new major would join neither the per-major cases nor the
+ * service check, and the gate would report parity it never looked at.
+ */
+const MAJORS: readonly number[] = readdirSync(SETUP_DIR)
+  .flatMap(name => {
+    const match = /^pg-(\d+)\.ts$/u.exec(name);
+    return match ? [Number(match[1])] : [];
+  })
+  .toSorted((a, b) => a - b);
+
+test('there are setup files to check', () => {
+  // Were the directory renamed, every case below would pass over an empty list.
+  expect(MAJORS.length).toBeGreaterThan(0);
+});
 
 test('every Postgres major with a setup file has a dev container service', () => {
-  // Guards the direction the per-major cases cannot: adding pg-19.ts and
-  // forgetting the compose service would otherwise leave the new major
-  // unchecked.
+  // Guards the direction the per-major cases cannot: a setup file with no compose
+  // service leaves that major unreachable in the one environment that cannot start
+  // a container.
   const declared = Array.from(compose.matchAll(/^ {2}pg(\d+):$/gmu), m =>
     Number(m[1]),
   );
@@ -120,7 +144,10 @@ describe.each(MAJORS)('pg%d', major => {
   });
 
   test('runs the same image', () => {
-    expect(compose).toContain(`image: ${image}`);
+    // Scoped to this service's own block: searching the whole file passes when
+    // two services have each other's image, which is the drift most likely to
+    // happen when a major is added by copying its neighbour.
+    expect(blockOf(`pg${major}`)).toContain(`image: ${image}`);
   });
 
   test('sets no server setting the container does not', () => {
