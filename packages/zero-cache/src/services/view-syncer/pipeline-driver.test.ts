@@ -63,25 +63,44 @@ describe('view-syncer/pipeline-driver', () => {
   let pipelines: PipelineDriver;
   let replicator: FakeReplicator;
 
+  /** Every driver a case builds, destroyed after the case that built it. */
+  const drivers: PipelineDriver[] = [];
+
+  /**
+   * A driver, registered for teardown.
+   *
+   * Every driver owns a Snapshotter holding its own connections to the replica,
+   * and a case that builds a second one leaves the first's connections open —
+   * which is the handle that stops the replica being removed. Registering here
+   * rather than at each call site is what keeps that unreachable.
+   */
+  function newPipelineDriver(
+    driverLc: LogContext = lc,
+    clientGroupID = 'pipeline-driver.test.ts',
+  ): PipelineDriver {
+    const storage = new Database(driverLc, ':memory:');
+    storage.prepare(CREATE_STORAGE_TABLE).run();
+    const driver = new PipelineDriver(
+      driverLc,
+      testLogConfig,
+      new Snapshotter(driverLc, dbFile.path, {appID: shardID.appID}),
+      shardID,
+      new DatabaseStorage(storage).createClientGroupStorage('foo-client-group'),
+      clientGroupID,
+      new InspectorDelegate(undefined),
+      () => 200 /** yield threshold */,
+    );
+    drivers.push(driver);
+    return driver;
+  }
+
   beforeEach(() => {
     logSink = new TestLogSink();
     lc = new LogContext('error', undefined, logSink);
     dbFile = new DbFile('pipelines_test');
     dbFile.connect(lc).pragma('journal_mode = wal2');
 
-    const storage = new Database(lc, ':memory:');
-    storage.prepare(CREATE_STORAGE_TABLE).run();
-
-    pipelines = new PipelineDriver(
-      lc,
-      testLogConfig,
-      new Snapshotter(lc, dbFile.path, {appID: shardID.appID}),
-      shardID,
-      new DatabaseStorage(storage).createClientGroupStorage('foo-client-group'),
-      'pipeline-driver.test.ts',
-      new InspectorDelegate(undefined),
-      () => 200 /** yield threshold */,
-    );
+    pipelines = newPipelineDriver();
 
     db = dbFile.connect(lc);
     initReplicationState(db, ['zero_data'], '123');
@@ -163,11 +182,13 @@ describe('view-syncer/pipeline-driver', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    // The driver owns a Snapshotter that opened its own connection to the
-    // replica; destroying it releases those before the file is removed.
+    // Each driver owns a Snapshotter that opened its own connections to the
+    // replica; destroying them releases those before the file is removed.
     // Windows cannot unlink a file that still has an open handle.
     try {
-      pipelines.destroy();
+      for (const driver of drivers.splice(0)) {
+        driver.destroy();
+      }
     } finally {
       // In a `finally` so a failing destroy still removes the replica, rather
       // than leaking it on top of the failure it is already reporting.
@@ -754,18 +775,7 @@ describe('view-syncer/pipeline-driver', () => {
       logSink,
     );
 
-    const storage = new Database(lc, ':memory:');
-    storage.prepare(CREATE_STORAGE_TABLE).run();
-    pipelines = new PipelineDriver(
-      lc,
-      testLogConfig,
-      new Snapshotter(lc, dbFile.path, {appID: shardID.appID}),
-      shardID,
-      new DatabaseStorage(storage).createClientGroupStorage('foo-client-group'),
-      'foo-client-group',
-      new InspectorDelegate(undefined),
-      () => 200 /** yield threshold */,
-    );
+    pipelines = newPipelineDriver(lc, 'foo-client-group');
     pipelines.init(clientSchema);
 
     [
@@ -2504,20 +2514,7 @@ describe('view-syncer/pipeline-driver', () => {
     function warningsFrom(query: AST): string[] {
       logSink.messages.length = 0;
       const warnLc = new LogContext('warn', undefined, logSink);
-      const storage = new Database(warnLc, ':memory:');
-      storage.prepare(CREATE_STORAGE_TABLE).run();
-      pipelines = new PipelineDriver(
-        warnLc,
-        testLogConfig,
-        new Snapshotter(warnLc, dbFile.path, {appID: shardID.appID}),
-        shardID,
-        new DatabaseStorage(storage).createClientGroupStorage(
-          'foo-client-group',
-        ),
-        'pipeline-driver.test.ts',
-        new InspectorDelegate(undefined),
-        () => 200 /** yield threshold */,
-      );
+      pipelines = newPipelineDriver(warnLc);
       pipelines.init(clientSchema);
       [...pipelines.addQuery('hash-warn', 'queryWarn', query, startTimer())];
       return logSink.messages

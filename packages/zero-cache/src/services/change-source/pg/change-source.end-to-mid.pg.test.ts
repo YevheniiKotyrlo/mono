@@ -2242,7 +2242,7 @@ describe('change-source/pg/end-to-mid-test', () => {
       }
       const indexes = new Map(listIndexes(replica).map(idx => [idx.name, idx]));
       for (const index of expectedIndexes) {
-        expect(indexes.has(index.name));
+        expect(indexes.has(index.name)).toBe(true);
         // Check the stringified indexes to verify field ordering.
         expect(JSON.stringify(indexes.get(index.name), null, 2)).toBe(
           JSON.stringify(index, null, 2),

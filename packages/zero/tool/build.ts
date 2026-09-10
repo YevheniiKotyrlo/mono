@@ -282,6 +282,19 @@ async function assertBareImportsAreDeclared() {
     files.map(async path => {
       for (const id of await collectImportSpecifiers(path)) {
         if (isFileModuleId(id)) {
+          // A file id is fine, but not a TypeScript one: nothing under `out` is
+          // resolvable from a consumer's tree, so a `.ts` specifier there is a
+          // module that was externalized instead of bundled. The emitted file is
+          // then a stub re-exporting a source path that is never published, which
+          // loads nowhere — while the build reports success. Reported here so
+          // that silence is impossible whatever route produced it, rather than
+          // only when the externality predicate is the thing that regressed.
+          if (/\.tsx?$/u.test(id)) {
+            violations.set(id, [
+              ...(violations.get(id) ?? []),
+              path.slice(outDir.length + 1),
+            ]);
+          }
           continue;
         }
         const name = id.startsWith('node:')
@@ -302,9 +315,11 @@ async function assertBareImportsAreDeclared() {
       .map(([id, files]) => `  '${id}' in ${files.join(', ')}`)
       .join('\n');
     throw new Error(
-      `Build output imports undeclared modules:\n${details}\n` +
-        `Add them to dependencies in package.json, or to allowedUndeclaredImports ` +
-        `in build.ts if consumers provide them.`,
+      `Build output imports modules a consumer cannot resolve:\n${details}\n` +
+        `Add a bare specifier to dependencies in package.json, or to ` +
+        `allowedUndeclaredImports in build.ts if consumers provide it. A ` +
+        `TypeScript specifier means the module was externalized rather than ` +
+        `bundled: check isExternalModuleId in shared/src/build.ts.`,
     );
   }
 }

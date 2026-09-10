@@ -35,8 +35,15 @@ afterEach(() => {
  * Builds a throwaway workspace with two packages where `alpha` imports across
  * into `beta`. `betaDeclared` decides whether alpha declares that dependency,
  * which is the difference between a clean run and a reported violation.
+ *
+ * `specifier` picks how alpha reaches beta. Both shapes occur in this repo and
+ * they exercise different code: a relative path is attributed by
+ * `packageOfRelativePath`, a bare name by the package-name-to-path map.
  */
-function makeFixture(betaDeclared: boolean): string {
+function makeFixture(
+  betaDeclared: boolean,
+  specifier: 'relative' | 'bare' = 'relative',
+): string {
   const root = mkdtempSync(join(tmpdir(), 'verify-deps-smoke-'));
   fixtureRoots.push(root);
   // The gate refuses a --root that is not a workspace, so the fixture declares
@@ -76,9 +83,30 @@ function makeFixture(betaDeclared: boolean): string {
   writeFileSync(join(beta, 'src', 'b.ts'), 'export const b = 1;\n');
   writeFileSync(
     join(alpha, 'src', 'a.ts'),
-    "import {b} from '../../beta/src/b.ts';\nexport const a = b;\n",
+    specifier === 'relative'
+      ? "import {b} from '../../beta/src/b.ts';\nexport const a = b;\n"
+      : "import {b} from 'beta';\nexport const a = b;\n",
   );
 
+  return root;
+}
+
+/**
+ * A workspace whose package roots exist but hold nothing.
+ *
+ * The gate reports success by saying nothing was wrong, so a scan that found no
+ * input has to fail rather than pass.
+ */
+function makeEmptyFixture(): string {
+  const root = mkdtempSync(join(tmpdir(), 'verify-deps-empty-'));
+  fixtureRoots.push(root);
+  writeFileSync(
+    join(root, 'pnpm-workspace.yaml'),
+    "packages:\n  - 'packages/*'\n",
+  );
+  for (const dir of ['packages', 'apps', 'tools']) {
+    mkdirSync(join(root, dir), {recursive: true});
+  }
   return root;
 }
 
@@ -110,6 +138,36 @@ test('reports a cross-package import that is not declared', () => {
   // are properly declared".
   expect(output).toContain('packages/alpha');
   expect(output).toContain('beta');
+  expect(status).not.toBe(0);
+});
+
+test('reports an undeclared bare workspace specifier', () => {
+  // The other half of the attribution fix: a bare `beta` is resolved through the
+  // package-name-to-path map rather than by splitting a relative path, and that
+  // map is keyed with the same canonical `dir/name` identifier. A key that
+  // matches nothing makes every edge through it invisible instead of reported —
+  // and 50 bare workspace imports in this repo take that path.
+  const {status, output} = runVerification(makeFixture(false, 'bare'));
+
+  expect(output).toContain('packages/alpha');
+  expect(output).toContain('beta');
+  expect(status).not.toBe(0);
+});
+
+test('passes when a bare workspace specifier is declared', () => {
+  const {status, output} = runVerification(makeFixture(true, 'bare'));
+
+  expect(output).toContain('properly declared');
+  expect(status).toBe(0);
+});
+
+test('fails when the scan finds nothing rather than reporting success', () => {
+  // Every way of ending up with no input — a moved tool directory, a renamed
+  // source root, an unreadable subtree — otherwise reads as a clean workspace,
+  // which is the shape the separator bug took.
+  const {status, output} = runVerification(makeEmptyFixture());
+
+  expect(output).toContain('Nothing was verified');
   expect(status).not.toBe(0);
 });
 

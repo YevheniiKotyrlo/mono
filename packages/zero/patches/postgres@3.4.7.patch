@@ -1,8 +1,16 @@
 diff --git a/cf/src/connection.js b/cf/src/connection.js
-index 203af80d072552c32d5f748b8245c0052e2998bc..62765c2f347340c6f56713cfecb99bcc08d637bc 100644
+index 203af80..c560ff8 100644
 --- a/cf/src/connection.js
 +++ b/cf/src/connection.js
-@@ -157,6 +157,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -106,6 +106,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     , nonce = null
+     , query = null
+     , final = null
++    , copyPaused = false
+ 
+   const connection = {
+     queue: queues.closed,
+@@ -157,6 +158,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      if (terminated)
        return queryError(q, Errors.connection('CONNECTION_DESTROYED', options))
  
@@ -12,7 +20,15 @@ index 203af80d072552c32d5f748b8245c0052e2998bc..62765c2f347340c6f56713cfecb99bcc
      if (q.cancelled)
        return
  
-@@ -418,6 +421,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -382,6 +386,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+ 
+   function errored(err) {
+     stream && (stream.destroy(err), stream = null)
++    resumeAfterCopy()
+     query && queryError(query, err)
+     initial && (queryError(initial, err), initial = null)
+   }
+@@ -418,6 +423,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        error(Errors.connection('CONNECTION_DESTROYED', options))
  
      clearImmediate(nextWriteTimer)
@@ -20,41 +36,61 @@ index 203af80d072552c32d5f748b8245c0052e2998bc..62765c2f347340c6f56713cfecb99bcc
      if (socket) {
        socket.removeListener('data', data)
        socket.removeListener('connect', connected)
-@@ -431,6 +435,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -431,6 +437,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      remaining = 0
      incomings = null
      clearImmediate(nextWriteTimer)
 +    chunk = nextWriteTimer = null
++    copyPaused = false
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -892,6 +897,21 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -886,12 +894,31 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function CopyData(x) {
+-    stream && (stream.push(x.subarray(5)) || socket.pause())
++    stream && (stream.push(x.subarray(5)) || (copyPaused = true, socket.pause()))
+   }
+ 
    function CopyDone() {
      stream && stream.push(null)
      stream = null
-+    // Lift any backpressure the copy left on the socket.
-+    //
-+    // CopyData pauses the socket when the readable's buffer fills, and relies on
-+    // that readable's `read()` to resume it. Once the copy ends the readable is
-+    // done and never calls `read()` again, so a pause outstanding at this point is
-+    // permanent: the connection stops reading for good, and the next statement on
-+    // it -- the COMMIT, for a copy inside a transaction -- is never answered. The
-+    // server sits in `idle in transaction` on `ClientRead` while the client waits
-+    // for a reply it can no longer receive.
-+    //
-+    // Whether the buffer fills before a consumer attaches depends on how the
-+    // server's writes land in socket chunks, which is why this shows up on some
-+    // platforms and not others: on Windows a whole small copy commonly arrives in
-+    // one chunk, so every row is pushed before the awaiting consumer runs.
-+    socket.resume()
++    resumeAfterCopy()
++  }
++
++  // A paused socket is resumed by the readable's `read()`, which a finished copy
++  // never calls again: the stream has pushed EOF, so there is no reader left to
++  // ask for more. An outstanding pause is therefore permanent -- the connection
++  // stops reading, and the next statement on it (the COMMIT, for a copy inside a
++  // transaction) is never answered, leaving the backend `idle in transaction` on
++  // ClientRead while the client awaits a reply it can no longer receive.
++  //
++  // Only a copy that actually paused is resumed. `socket.pause` and `.resume` are
++  // Node stream methods that the Cloudflare socket does not implement, so a copy
++  // that never filled the buffer must not reach them.
++  function resumeAfterCopy() {
++    if (!copyPaused)
++      return
++
++    copyPaused = false
++    socket && socket.resume()
    }
  
    function NoticeResponse(x) {
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
-index 589d36382ca943c90679dbe22aaff06d252f6532..b6a5ef3f88c1e358414ad1a571e0c04b5640ecaa 100644
+index 589d363..d1f603c 100644
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
-@@ -155,6 +155,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -104,6 +104,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     , nonce = null
+     , query = null
+     , final = null
++    , copyPaused = false
+ 
+   const connection = {
+     queue: queues.closed,
+@@ -155,6 +156,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      if (terminated)
        return queryError(q, Errors.connection('CONNECTION_DESTROYED', options))
  
@@ -64,7 +100,15 @@ index 589d36382ca943c90679dbe22aaff06d252f6532..b6a5ef3f88c1e358414ad1a571e0c04b
      if (q.cancelled)
        return
  
-@@ -416,6 +419,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -380,6 +384,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+ 
+   function errored(err) {
+     stream && (stream.destroy(err), stream = null)
++    resumeAfterCopy()
+     query && queryError(query, err)
+     initial && (queryError(initial, err), initial = null)
+   }
+@@ -416,6 +421,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        error(Errors.connection('CONNECTION_DESTROYED', options))
  
      clearImmediate(nextWriteTimer)
@@ -72,41 +116,61 @@ index 589d36382ca943c90679dbe22aaff06d252f6532..b6a5ef3f88c1e358414ad1a571e0c04b
      if (socket) {
        socket.removeListener('data', data)
        socket.removeListener('connect', connected)
-@@ -429,6 +433,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -429,6 +435,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      remaining = 0
      incomings = null
      clearImmediate(nextWriteTimer)
 +    chunk = nextWriteTimer = null
++    copyPaused = false
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -890,6 +895,21 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -884,12 +892,31 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function CopyData(x) {
+-    stream && (stream.push(x.subarray(5)) || socket.pause())
++    stream && (stream.push(x.subarray(5)) || (copyPaused = true, socket.pause()))
+   }
+ 
    function CopyDone() {
      stream && stream.push(null)
      stream = null
-+    // Lift any backpressure the copy left on the socket.
-+    //
-+    // CopyData pauses the socket when the readable's buffer fills, and relies on
-+    // that readable's `read()` to resume it. Once the copy ends the readable is
-+    // done and never calls `read()` again, so a pause outstanding at this point is
-+    // permanent: the connection stops reading for good, and the next statement on
-+    // it -- the COMMIT, for a copy inside a transaction -- is never answered. The
-+    // server sits in `idle in transaction` on `ClientRead` while the client waits
-+    // for a reply it can no longer receive.
-+    //
-+    // Whether the buffer fills before a consumer attaches depends on how the
-+    // server's writes land in socket chunks, which is why this shows up on some
-+    // platforms and not others: on Windows a whole small copy commonly arrives in
-+    // one chunk, so every row is pushed before the awaiting consumer runs.
-+    socket.resume()
++    resumeAfterCopy()
++  }
++
++  // A paused socket is resumed by the readable's `read()`, which a finished copy
++  // never calls again: the stream has pushed EOF, so there is no reader left to
++  // ask for more. An outstanding pause is therefore permanent -- the connection
++  // stops reading, and the next statement on it (the COMMIT, for a copy inside a
++  // transaction) is never answered, leaving the backend `idle in transaction` on
++  // ClientRead while the client awaits a reply it can no longer receive.
++  //
++  // Only a copy that actually paused is resumed. `socket.pause` and `.resume` are
++  // Node stream methods that the Cloudflare socket does not implement, so a copy
++  // that never filled the buffer must not reach them.
++  function resumeAfterCopy() {
++    if (!copyPaused)
++      return
++
++    copyPaused = false
++    socket && socket.resume()
    }
  
    function NoticeResponse(x) {
 diff --git a/src/connection.js b/src/connection.js
-index c3f554aada71a79dc3c3cb489b722e9cf53961f3..399e7796e0a3bf643085ee9cb69860979a107e8b 100644
+index c3f554a..e58d186 100644
 --- a/src/connection.js
 +++ b/src/connection.js
-@@ -155,6 +155,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -104,6 +104,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     , nonce = null
+     , query = null
+     , final = null
++    , copyPaused = false
+ 
+   const connection = {
+     queue: queues.closed,
+@@ -155,6 +156,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      if (terminated)
        return queryError(q, Errors.connection('CONNECTION_DESTROYED', options))
  
@@ -116,7 +180,15 @@ index c3f554aada71a79dc3c3cb489b722e9cf53961f3..399e7796e0a3bf643085ee9cb6986097
      if (q.cancelled)
        return
  
-@@ -416,6 +419,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -380,6 +384,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+ 
+   function errored(err) {
+     stream && (stream.destroy(err), stream = null)
++    resumeAfterCopy()
+     query && queryError(query, err)
+     initial && (queryError(initial, err), initial = null)
+   }
+@@ -416,6 +421,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        error(Errors.connection('CONNECTION_DESTROYED', options))
  
      clearImmediate(nextWriteTimer)
@@ -124,33 +196,45 @@ index c3f554aada71a79dc3c3cb489b722e9cf53961f3..399e7796e0a3bf643085ee9cb6986097
      if (socket) {
        socket.removeListener('data', data)
        socket.removeListener('connect', connected)
-@@ -429,6 +433,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -429,6 +435,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      remaining = 0
      incomings = null
      clearImmediate(nextWriteTimer)
 +    chunk = nextWriteTimer = null
++    copyPaused = false
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -890,6 +895,21 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -884,12 +892,31 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
+ 
+   function CopyData(x) {
+-    stream && (stream.push(x.subarray(5)) || socket.pause())
++    stream && (stream.push(x.subarray(5)) || (copyPaused = true, socket.pause()))
+   }
+ 
    function CopyDone() {
      stream && stream.push(null)
      stream = null
-+    // Lift any backpressure the copy left on the socket.
-+    //
-+    // CopyData pauses the socket when the readable's buffer fills, and relies on
-+    // that readable's `read()` to resume it. Once the copy ends the readable is
-+    // done and never calls `read()` again, so a pause outstanding at this point is
-+    // permanent: the connection stops reading for good, and the next statement on
-+    // it -- the COMMIT, for a copy inside a transaction -- is never answered. The
-+    // server sits in `idle in transaction` on `ClientRead` while the client waits
-+    // for a reply it can no longer receive.
-+    //
-+    // Whether the buffer fills before a consumer attaches depends on how the
-+    // server's writes land in socket chunks, which is why this shows up on some
-+    // platforms and not others: on Windows a whole small copy commonly arrives in
-+    // one chunk, so every row is pushed before the awaiting consumer runs.
-+    socket.resume()
++    resumeAfterCopy()
++  }
++
++  // A paused socket is resumed by the readable's `read()`, which a finished copy
++  // never calls again: the stream has pushed EOF, so there is no reader left to
++  // ask for more. An outstanding pause is therefore permanent -- the connection
++  // stops reading, and the next statement on it (the COMMIT, for a copy inside a
++  // transaction) is never answered, leaving the backend `idle in transaction` on
++  // ClientRead while the client awaits a reply it can no longer receive.
++  //
++  // Only a copy that actually paused is resumed. `socket.pause` and `.resume` are
++  // Node stream methods that the Cloudflare socket does not implement, so a copy
++  // that never filled the buffer must not reach them.
++  function resumeAfterCopy() {
++    if (!copyPaused)
++      return
++
++    copyPaused = false
++    socket && socket.resume()
    }
  
    function NoticeResponse(x) {

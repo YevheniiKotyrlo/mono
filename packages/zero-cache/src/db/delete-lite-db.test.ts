@@ -6,6 +6,7 @@ import {ownedTempDir} from '../test/lite.ts';
 import {
   ASYNC_REMOVE_DEADLINE_MS,
   deleteLiteDB,
+  ASYNC_REMOVE_OPTIONS,
   deleteLiteDBAsync,
 } from './delete-lite-db.ts';
 
@@ -227,6 +228,50 @@ test('async: keeps trying a held file, and only that file, until it goes', async
   // Every path once on the first pass, then the held one alone until it succeeds.
   expect(attempts.filter(p => p === wal)).toHaveLength(4);
   expect(attempts.filter(p => p === file)).toHaveLength(1);
+});
+
+test('async: a POSIX refusal is reported on the first pass', async () => {
+  // Retrying is a Windows instrument: there a handle a departing process drops is
+  // released a moment later. Everywhere else unlink-while-open is legal, so a
+  // refusal is a real one — EPERM, ENOTEMPTY, EMFILE and ENFILE all occur there
+  // legitimately and none is fixed by waiting. Retrying anyway would spend the
+  // whole deadline before reporting an error the first attempt already had.
+  const attempts: string[] = [];
+  const refusing = (path: string): Promise<void> => {
+    attempts.push(path);
+    return Promise.reject(
+      Object.assign(new Error(`EACCES: ${path}`), {code: 'EACCES'}),
+    );
+  };
+
+  const file = join(ownedTempDir('delete-lite-db-'), 'r.db');
+  const error = await deleteLiteDBAsync(file, 'linux', refusing).catch(e => e);
+
+  // Every suffix once, and no second pass — no fake timers here, because a run
+  // that needed them would be the defect.
+  expect(attempts).toHaveLength(SQLITE_FILE_SUFFIXES.length);
+  expect(error).toBeInstanceOf(AggregateError);
+  expect((error as AggregateError).message).toContain('EACCES');
+});
+
+test('async: hands rm the same options on every platform', async () => {
+  // The platform decides whether to retry, not what to ask `rm` for: a budget
+  // inside `rm` blocks the event loop, and the release being waited for is
+  // event-loop work.
+  const perPlatform = new Map<NodeJS.Platform, RmOptions[]>();
+  for (const platform of ['win32', 'linux'] as const) {
+    const seen: RmOptions[] = [];
+    const file = join(ownedTempDir('delete-lite-db-'), 'r.db');
+    await deleteLiteDBAsync(file, platform, (_path, options) => {
+      seen.push(options);
+      return Promise.resolve();
+    });
+    perPlatform.set(platform, seen);
+  }
+  expect(perPlatform.get('linux')).toEqual(perPlatform.get('win32'));
+  expect(perPlatform.get('linux')).toEqual(
+    SQLITE_FILE_SUFFIXES.map(() => ASYNC_REMOVE_OPTIONS),
+  );
 });
 
 test('async: reports what is still held once the deadline passes', async () => {

@@ -482,6 +482,11 @@ describe('integration', () => {
     customChangeSourceURI =
       (await customBackend.listen({port: 0})) + CHANGE_SOURCE_PATH;
 
+    // Chosen rather than bound, unlike the suites that listen in process: these
+    // ports are handed to a spawned zero-cache through its environment, so they
+    // have to be known before anything binds them. Binding 0 here to learn a free
+    // one and then releasing it for the child to take is a race with every other
+    // process on the machine, which is strictly worse than picking.
     port = randInt(5000, 16000);
     port2 = randInt(5000, 16000);
 

@@ -2475,21 +2475,31 @@ describe('change-source/pg/initial-sync', () => {
     },
     {
       name: 'multiple copy commands per copy worker',
-      // Detector, not a limit: the bug below leaves Postgres unresponsive, so this
-      // is how long to wait before saying so.
+      // Detector, not a limit: the defect below stops the client reading, so the
+      // sync never finishes and this is how long to wait before saying so.
       timeoutMs: 10_000,
       setupUpstreamQuery: Array.from({length: 10}, (_, i) =>
         [
-          // This is a carefully crafted test that hits a bug in Postgres in which
-          // the database stops responding to commands after a certain type/sequence
-          // of COPY streams.
+          // The end-to-end repro for the COPY backpressure defect that
+          // `packages/zero/patches/postgres@3.4.7.patch` fixes. Postgres is not
+          // the unresponsive side: the CLIENT stops reading. `CopyData` pauses
+          // the socket when the readable's buffer fills and relies on that
+          // readable's `read()` to resume it, which a finished copy never calls
+          // again — so a pause outstanding when the copy ends is permanent, and
+          // the next statement on that connection (here the post-COPY commands)
+          // is never answered.
           //
-          // The following conditions appear to be necessary to trigger the bug:
-          // - Sufficient table data streamed from the COPY (hence the 400 rows and `b` column)
-          // - A randomly ordered primary key column (the `a` column)
-          // - More tables than copy workers, to exercise post-COPY commands (hence the 10 tables).
+          // What the shape below arranges is a pause that is still outstanding at
+          // the end of a copy:
+          // - enough streamed data to fill the readable's buffer (400 rows and the
+          //   wide `b` column)
+          // - a randomly ordered primary key (`a`), so the rows do not compress
+          //   into fewer socket writes
+          // - more tables than copy workers, so each worker runs a statement after
+          //   its copy rather than ending with it (hence 10 tables)
           //
-          // A failure manifests as a "Test timed out" error as Postgres becomes unresponsive.
+          // A failure manifests as a "Test timed out" error, with the backend
+          // sitting in `idle in transaction` on `ClientRead`.
           `CREATE TABLE t${i} (a TEXT PRIMARY KEY, b TEXT, val INT);`,
           ...Array.from(
             {length: 400},
@@ -3184,12 +3194,12 @@ describe('change-source/pg/initial-sync', () => {
       // Shadow sync asks for one copy worker and gets one, except on Windows,
       // where each table gets its own to work around a Node/Postgres bug.
       //
-      // Stated independently rather than by calling `copyWorkerCount`: production
-      // builds this message from that same function with these same arguments, so
-      // computing the expectation with it would reproduce any bug on both sides of
-      // the comparison. Both arms of the rule itself are covered on every runner
-      // by `copy-worker-count.test.ts`, which injects the platform; this asserts
-      // that initial sync is wired to it.
+      // Stated independently rather than derived from production's own helper:
+      // this message is built by that helper with these arguments, so computing
+      // the expectation from it would reproduce any bug on both sides of the
+      // comparison. What this asserts is that shadow sync reaches the rule at
+      // all; the rule's own arms belong to a unit test that can inject a
+      // platform, since only one arm is reachable on any given runner.
       const expectedWorkers = process.platform === 'win32' ? tables : 1;
       expect(message).toBe(
         `Started ${expectedWorkers} workers to copy ${tables} tables`,

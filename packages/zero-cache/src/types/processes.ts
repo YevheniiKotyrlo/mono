@@ -23,8 +23,7 @@ export const MESSAGE_TYPES = {
   subscribe: 'subscribe',
   notify: 'notify',
   ready: 'ready',
-  backupWatermarkRequest: 'backupWatermarkRequest',
-  backupWatermarkResponse: 'backupWatermarkResponse',
+  backupWatermarkUpdate: 'backupWatermakUpdate',
   profile: 'profile',
   profileResponse: 'profileResponse',
   // A request to shut down gracefully, for callers that cannot send a signal.
@@ -123,8 +122,24 @@ export interface Sender {
   kill(signal?: NodeJS.Signals): void;
 }
 
-export interface Subprocess extends Sender, EventEmitter {
+/**
+ * A child process this one supervises.
+ *
+ * `send` is optional because an IPC channel is: `fork` opens one, and a bare
+ * `spawn` of an external binary does not — there `send` is `undefined` and
+ * `connected` is `false`, so calling it throws a TypeError. Declaring it as
+ * always present would let a request to shut down be addressed to a child that
+ * cannot receive one, which the type should refuse rather than the runtime.
+ */
+export interface Subprocess extends EventEmitter {
   pid?: number | undefined;
+
+  kill(signal?: NodeJS.Signals): void;
+
+  send?: Sender['send'];
+
+  /** Whether an IPC channel is open, and therefore whether `send` exists. */
+  readonly connected?: boolean;
 }
 
 export interface Receiver extends EventEmitter {
@@ -149,7 +164,13 @@ export interface Receiver extends EventEmitter {
   ): this;
 }
 
-export interface Worker extends Subprocess, Receiver {}
+export interface Worker extends Subprocess, Receiver {
+  /**
+   * Always present, unlike {@link Subprocess.send}: a `Worker` is a fork, so it
+   * has an IPC channel by construction.
+   */
+  send: Sender['send'];
+}
 
 /**
  * Adds the {@link Receiver.onMessageType()} and {@link Receiver.onceMessageType()}

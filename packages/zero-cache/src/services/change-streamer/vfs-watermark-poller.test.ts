@@ -4,7 +4,7 @@ import {mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {PassThrough} from 'node:stream';
-import {afterEach, describe, expect, test, vi} from 'vitest';
+import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
 import {Database} from '../../../../zqlite/src/db.ts';
 import {StatementRunner} from '../../db/statements.ts';
@@ -26,7 +26,16 @@ import {
 // litestream/commands.test.ts for the same pattern.
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof childProcess>();
-  return {...actual, spawn: vi.fn(() => fakeChild(nextBehaviour))};
+  return {
+    ...actual,
+    spawn: vi.fn(
+      (
+        _command: string,
+        _args: readonly string[],
+        options: Pick<childProcess.SpawnOptions, 'stdio'>,
+      ) => fakeChild(nextBehaviour, options),
+    ),
+  };
 });
 const spawnMock = vi.mocked(childProcess.spawn);
 
@@ -59,21 +68,27 @@ const BLOCK: FakeVfsQuery = {kind: 'emits', lines: []};
 const FAKE_EXECUTABLE = join('fake', 'bin', 'fake-vfs-query');
 
 /**
- * Stands in for a spawned `vfs-query`, implementing only what the poller
- * consumes: a readable stdout, `error`/`close`, `kill`, and a pid — the poller
- * reads the pid to tell a running process from a spawn that never started.
+ * Stands in for a spawned `vfs-query`, implementing what the poller consumes: a
+ * readable stdout, `error`/`close`, and `kill`.
+ *
+ * `pid` and `killed` are what a real spawn handle carries once its process
+ * started, and the cases below assert against `killed`.
  */
-function fakeChild(behaviour: FakeVfsQuery) {
+function fakeChild(
+  behaviour: FakeVfsQuery,
+  options: Pick<childProcess.SpawnOptions, 'stdio'> = {},
+) {
   const child = new EventEmitter() as EventEmitter & {
-    stdout: PassThrough;
-    stdin: PassThrough;
+    stdout: PassThrough | null;
     pid: number;
     killed: boolean;
-    kill: ReturnType<typeof vi.fn>;
+    kill: ReturnType<typeof vi.fn<(signal?: NodeJS.Signals) => boolean>>;
   };
-  child.stdout = new PassThrough();
-  child.stdin = new PassThrough();
-  // Any number will do; that it is defined is what the poller reads.
+
+  // A stream exists only for a piped slot, so code that reads an inherited one
+  // fails here as it would in production.
+  const stdio = Array.isArray(options.stdio) ? options.stdio : [];
+  child.stdout = stdio[1] === 'pipe' ? new PassThrough() : null;
   child.pid = 4242;
   child.killed = false;
 
@@ -83,12 +98,16 @@ function fakeChild(behaviour: FakeVfsQuery) {
       return;
     }
     closed = true;
-    child.stdout.end();
+    child.stdout?.end();
     child.emit('close', code, signal);
   };
+  // The close is deferred: a real process exits asynchronously, so a `close`
+  // handler that runs inside the `kill()` call observes state the caller has not
+  // finished updating. Emitting it synchronously would collapse the interleaving
+  // that a replacement spawned before the old child exits depends on.
   child.kill = vi.fn((signal?: NodeJS.Signals) => {
     child.killed = true;
-    close(null, signal ?? 'SIGTERM');
+    setImmediate(() => close(null, signal ?? 'SIGTERM'));
     return true;
   });
 
@@ -101,7 +120,7 @@ function fakeChild(behaviour: FakeVfsQuery) {
       return;
     }
     for (const line of behaviour.lines) {
-      child.stdout.write(`${line}\n`);
+      child.stdout?.write(`${line}\n`);
     }
     // Deliberately no close: the real process stays up between emissions.
   });
@@ -112,8 +131,8 @@ function fakeChild(behaviour: FakeVfsQuery) {
 let nextBehaviour: FakeVfsQuery = BLOCK;
 
 describe('change-streamer/vfs-watermark-poller', () => {
-  let dir: string;
-  let replicaFile: string;
+  let dir = '';
+  let replicaFile = '';
   let setupDb: Database;
   let source: Source<BackedUpWatermark> | undefined;
   let pushed: BackedUpWatermark[];
@@ -162,9 +181,13 @@ describe('change-streamer/vfs-watermark-poller', () => {
     }
   }
 
-  function setUp() {
+  beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'vfs-watermark-poller-test-'));
     replicaFile = join(dir, 'replica.db');
+  });
+
+  /** Gives the configured replica path a database at watermark '00'. */
+  function setUp() {
     setupDb = new Database(createSilentLogContext(), replicaFile);
     initReplicationState(setupDb, ['zero_pub'], '00');
     setupDb.close();
@@ -316,6 +339,37 @@ describe('change-streamer/vfs-watermark-poller', () => {
     poller.checkLocalWatermark();
     expect(child2.killed).toBe(true);
   });
+
+  // BEGIN pid-guard
+  test('stopping a spawn that never started does not signal it', () => {
+    setUp();
+    // A spawn that fails reports through 'error' and leaves the handle with no
+    // pid. Signalling one is not the no-op it is on POSIX, where the ESRCH is
+    // swallowed and `kill` returns false: on Windows it throws EINVAL, out of a
+    // cleanup path that has no reason to fail. So the throw is what this fake
+    // does, and the assertion is that it is never reached.
+    const kill = vi.fn<(signal?: NodeJS.Signals) => boolean>(() => {
+      throw Object.assign(new Error('kill EINVAL'), {code: 'EINVAL'});
+    });
+    const neverStarted = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      pid: undefined,
+      killed: false,
+      kill,
+    }) as unknown as childProcess.ChildProcess;
+    spawnMock.mockImplementationOnce(() => neverStarted);
+
+    const poller = makePoller(BLOCK, {remotePollIntervalMs: 250});
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    neverStarted.emit('error', new Error('spawn ENOENT'));
+
+    // Catching up disables the remote poller, which is where the signal goes.
+    setLocalWatermark('00', 1);
+    poller.checkLocalWatermark();
+
+    expect(kill).not.toHaveBeenCalled();
+  });
+  // END pid-guard
 
   test('an unexpected exit while still behind schedules a respawn', async () => {
     setUp();

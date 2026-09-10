@@ -1,17 +1,22 @@
+import {once} from 'node:events';
+import type {AddressInfo} from 'node:net';
 import {resolver} from '@rocicorp/resolver';
 import {afterAll, beforeAll, describe, expect, test} from 'vitest';
 import WebSocket, {WebSocketServer} from 'ws';
 import {createSilentLogContext} from '../../../shared/src/logging-test-utils.ts';
-import {randInt} from '../../../shared/src/rand.ts';
+import {must} from '../../../shared/src/must.ts';
 import {closeWithError, PROTOCOL_ERROR} from './ws.ts';
 
 describe('types/ws', () => {
   let port: number;
   let wss: WebSocketServer;
 
-  beforeAll(() => {
-    port = randInt(10000, 20000);
-    wss = new WebSocketServer({port});
+  beforeAll(async () => {
+    // Bound rather than chosen: a picked port collides with whatever already
+    // holds it, and that collision is a flake nobody can reproduce on purpose.
+    wss = new WebSocketServer({port: 0});
+    await once(wss, 'listening');
+    port = must(wss.address() as AddressInfo | null).port;
   });
 
   afterAll(() => {

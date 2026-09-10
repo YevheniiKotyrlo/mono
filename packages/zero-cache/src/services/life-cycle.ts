@@ -3,7 +3,7 @@ import {pid} from 'node:process';
 import type {EventEmitter} from 'stream';
 import type {LogContext} from '@rocicorp/logger';
 import {resolver} from '@rocicorp/resolver';
-import {promiseVoid} from '../../../shared/src/resolved-promises.ts';
+import {must} from '../../../shared/src/must.ts';
 import {logLastChanceSQLiteCorruptionDiagnostics} from '../db/sqlite-corruption.ts';
 import {
   getOrCreateHistogram,
@@ -11,7 +11,9 @@ import {
 } from '../observability/metrics.ts';
 import {ConfigurationError} from '../types/configuration-error.ts';
 import {
+  MESSAGE_TYPES,
   singleProcessMode,
+  type Message,
   type Subprocess,
   type Worker,
 } from '../types/processes.ts';
@@ -36,15 +38,35 @@ export type WorkerType = 'user-facing' | 'supporting';
 export const GRACEFUL_SHUTDOWN = ['SIGTERM', 'SIGINT'] as const;
 
 /** The wire form of a shutdown request: a {@link Message} with no payload. */
-export const SHUTDOWN_MESSAGE = ['shutdown', {}] as const;
+export const SHUTDOWN_MESSAGE = [
+  MESSAGE_TYPES.shutdown,
+  {},
+] as const satisfies Message<Record<never, never>>;
 
 export const FORCEFUL_SHUTDOWN = ['SIGQUIT', 'SIGABRT'] as const;
 
 type GracefulShutdownSignal = (typeof GRACEFUL_SHUTDOWN)[number];
 
-/** Whether this signal asks for a drain rather than an immediate stop. */
-function isGracefulSignal(signal: NodeJS.Signals): boolean {
-  return (GRACEFUL_SHUTDOWN as readonly string[]).includes(signal);
+/**
+ * How to stop a child.
+ *
+ * `ask` is a request the child can drain in response to, delivered over its IPC
+ * channel. `terminate` ends the process where it stands. The distinction is a
+ * capability of the target, not a property of a signal name: a child with no
+ * channel — an external binary this process spawned — can only be terminated, so
+ * an `ask` addressed to one degrades to that.
+ */
+type StopRequest =
+  | {readonly kind: 'ask'}
+  | {readonly kind: 'terminate'; readonly signal: NodeJS.Signals};
+
+/** The request a signal from outside this process stands for. */
+function stopRequestFor(signal: NodeJS.Signals): StopRequest {
+  return (GRACEFUL_SHUTDOWN as readonly string[]).includes(signal)
+    ? {kind: 'ask'}
+    : // `SIGQUIT` and `SIGABRT` mean stop now, without draining, so terminating
+      // is the intent rather than a substitute for asking.
+      {kind: 'terminate', signal};
 }
 
 function isShutdownRequest(data: unknown): boolean {
@@ -179,16 +201,26 @@ export class ProcessManager {
     });
 
     // ... which will result in sending `SIGTERM` to the remaining workers.
-    proc.on('exit', code =>
-      this.#kill(
+    proc.on('exit', code => {
+      if (this.#stopping) {
+        // The drain already asked these workers and escalated past its deadline,
+        // so asking again on the way out would re-signal a worker that has
+        // already been terminated.
+        return;
+      }
+      this.#stop(
         this.#all,
         code === 0
-          ? 'SIGTERM' // graceful, drained shutdown
-          : code === INTENTIONAL_SHUTDOWN_ERROR_CODE
-            ? 'SIGQUIT' // intentional abort without drain
-            : 'SIGABRT', // unintentional shutdown, alertable error
-      ),
-    );
+          ? {kind: 'ask'} // graceful, drained shutdown
+          : {
+              kind: 'terminate',
+              signal:
+                code === INTENTIONAL_SHUTDOWN_ERROR_CODE
+                  ? 'SIGQUIT' // intentional abort without drain
+                  : 'SIGABRT', // unintentional shutdown, alertable error
+            },
+      );
+    });
 
     // For other (catchable) kill signals, exit with a non-zero error code
     // to send a `SIGQUIT` (intentional shutdown) or `SIGABRT` (unexpected
@@ -242,31 +274,48 @@ export class ProcessManager {
    * completing one. Past the deadline this says so and exits anyway.
    */
   #exitWhenWorkersHaveStopped(code: number) {
+    if (this.#stopping) {
+      // Already waiting. Re-entering would re-ask every worker, arm a second
+      // deadline and exit twice.
+      return undefined;
+    }
     if (this.#all.size === 0) {
       return this.#exit(code);
     }
     this.#stopping = true;
 
     const remaining = [...this.#all];
-    const pending = remaining.map(
-      worker => this.#closed.get(worker) ?? promiseVoid,
-    );
+    // Every tracked worker has a close promise; `addSubprocess` records one for
+    // each, and the 'close' handler removes it from both maps together.
+    const pending = remaining.map(worker => must(this.#closed.get(worker)));
     this.#lc.info?.(`stopping ${remaining.length} supporting worker(s)`);
-    this.#kill(this.#all, GRACEFUL_SHUTDOWN[0]);
+    this.#stop(this.#all, {kind: 'ask'});
 
-    const deadline = new Promise<'timeout'>(resolve =>
-      setTimeout(resolve, WORKER_STOP_TIMEOUT_MS, 'timeout').unref(),
-    );
+    // Referenced deliberately: if a wedged worker's channel is the only thing
+    // holding the loop open, an unreferenced timer would let the process exit on
+    // an empty loop with Node's code instead of this drain's.
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<'timeout'>(resolve => {
+      timer = setTimeout(resolve, WORKER_STOP_TIMEOUT_MS, 'timeout');
+    });
     void Promise.race([Promise.all(pending).then(() => 'stopped'), deadline])
       .then(outcome => {
         if (outcome === 'timeout') {
           this.#lc.warn?.(
-            `exiting with ${this.#all.size} worker(s) still running after ` +
+            `terminating ${this.#all.size} worker(s) still running after ` +
               `${WORKER_STOP_TIMEOUT_MS} ms`,
           );
+          // The ask went unanswered, so escalate to the one thing that ends a
+          // process on every platform. Without this the wait expires and this
+          // process exits leaving those workers running — still holding the
+          // replica, which is the outcome the wait exists to prevent.
+          this.#stop(this.#all, {kind: 'terminate', signal: 'SIGKILL'});
         }
       })
-      .finally(() => this.#exit(code));
+      .finally(() => {
+        clearTimeout(timer);
+        this.#exit(code);
+      });
   }
 
   #exit(code: number) {
@@ -283,10 +332,11 @@ export class ProcessManager {
     }
     this.#lc.info?.(`initiating drain (${signal})`);
     this.#drainStart = Date.now();
+    const request = stopRequestFor(signal);
     if (this.#userFacing.size) {
-      this.#kill(this.#userFacing, signal);
+      this.#stop(this.#userFacing, request);
     } else {
-      this.#kill(this.#all, signal);
+      this.#stop(this.#all, request);
     }
   }
 
@@ -438,29 +488,34 @@ export class ProcessManager {
     return undefined;
   }
 
-  #kill(workers: Iterable<Subprocess>, signal: NodeJS.Signals) {
+  /**
+   * Delivers `request` to each worker.
+   *
+   * An `ask` goes over the IPC channel, on every platform. A signal is not a
+   * portable way to request anything: Node delivers none to a process on Windows,
+   * so `kill('SIGTERM')` there terminates a worker where it stands — it never
+   * drains, never releases what it holds, and never propagates to workers of its
+   * own. Asking over the channel takes the same path everywhere, so no branch
+   * goes untested wherever CI runs. Signals remain the EXTERNAL contract, because
+   * that is what an operator and a container runtime send; they are just not how
+   * this process talks to its own children.
+   *
+   * A worker with no channel cannot be asked, so it is terminated instead. That
+   * is not a fallback for a fork: `send` is absent only on a child spawned
+   * without IPC, which here means an external binary (litestream) that has no
+   * drain to run.
+   */
+  #stop(workers: Iterable<Subprocess>, request: StopRequest) {
     for (const worker of workers) {
       try {
-        if (isGracefulSignal(signal)) {
-          // Asked, not signalled — on every platform, over the channel the fork
-          // already has.
-          //
-          // A signal is not a portable way to request anything: Node does not
-          // deliver them to processes on Windows, so `kill('SIGTERM')` there
-          // terminates a worker where it stands. It never drains, never releases
-          // what it holds, and never propagates to workers of its own. Branching on
-          // the platform would leave the portable path untested wherever CI runs,
-          // which is how a difference like that survives; one path is exercised
-          // everywhere.
-          //
-          // Signals remain the EXTERNAL contract, because that is what an operator
-          // and a container runtime send. They are just not how this process talks
-          // to its own children.
+        if (request.kind === 'ask' && worker.send && worker.connected) {
           worker.send([...SHUTDOWN_MESSAGE]);
         } else {
-          // `SIGQUIT` and `SIGABRT` mean stop now, without draining, so
-          // terminating is the intent rather than a substitute for asking.
-          worker.kill(signal);
+          worker.kill(
+            request.kind === 'terminate'
+              ? request.signal
+              : GRACEFUL_SHUTDOWN[0],
+          );
         }
       } catch (e) {
         this.#lc.error?.(e);
@@ -473,9 +528,9 @@ export class ProcessManager {
  * A signal that aborts when the manager asks this worker to shut down, armed
  * before the worker has any services to stop.
  *
- * This is the ONLY place a worker listens for the request; {@link runUntilKilled}
- * consumes the signal rather than listening itself. Arming has to happen before
- * startup, because a worker whose startup blocks would otherwise never reach a
+ * Armed once per worker, and {@link runUntilKilled} consumes the signal rather
+ * than listening itself. Arming has to happen before startup, because a worker
+ * whose startup blocks would otherwise never reach a
  * listener: a view-syncer restoring its replica waits for the replication-manager
  * to publish a restorable backup, which this repo documents as taking many
  * minutes. A request arriving in that window is held by the IPC channel and
@@ -509,19 +564,17 @@ export function shutdownRequested(parent: EventEmitter): AbortSignal {
 }
 
 /**
- * Runs the specified services, stopping them on `SIGTERM` or `SIGINT` with
- * an optional {@link SingletonService.drain drain()}, or stopping them
- * without draining for `SIGQUIT`.
+ * Runs the specified services, stopping them when the manager asks with an
+ * optional {@link SingletonService.drain drain()}, or stopping them without
+ * draining for `SIGQUIT` and `SIGABRT`.
  *
- * @param shutdown from {@link shutdownRequested}. A caller whose startup can block
- *     arms it before that work — today only the replicator, whose replica restore is
- *     unbounded; the rest arm it at this call, which is where the listener used to be
- *     installed. Taken rather than installed here because the two cannot be
- *     separated: Node delivers a queued IPC message to the first listener
- *     installed and to no other, so a worker that arms early to interrupt its own
- *     startup would consume the request, and a listener installed here would then
- *     never see it — the request would be recorded and never acted on. One arming
- *     point, consumed here, is the only arrangement where both hold.
+ * @param shutdown from {@link shutdownRequested}, taken rather than armed here.
+ *     A request can arrive before this call: a caller whose startup blocks — today
+ *     the replicator, whose replica restore is unbounded — has to arm the signal
+ *     ahead of that work to interrupt it, and arming twice would leave two
+ *     listeners disagreeing about which one acts. One arming point, whose signal
+ *     is consumed here, is what keeps the request answered exactly once whether it
+ *     arrives during startup or after it.
  * @returns a Promise that resolves/rejects when any of the services stops/throws.
  */
 
@@ -564,6 +617,10 @@ export async function runUntilKilled(
   // would be discarded by the `forEach` above, surface as an unhandled
   // rejection, and exit this worker 13, which makes the manager SIGABRT its
   // siblings undrained. A requested shutdown must not be louder than a crash.
+  //
+  // A caller that goes on to wait for something a running service would have
+  // produced has to race that wait against the same signal; returning here means
+  // nothing will ever produce it.
   if (shutdown.aborted) {
     lc.info?.('shutdown requested before services started; not starting them');
     return;
@@ -630,15 +687,21 @@ export async function exitAfter(
  */
 export class HeartbeatMonitor {
   readonly #stopInterval: number;
+  readonly #proc: EventEmitter;
 
   #lc: LogContext;
   #checkIntervalTimer: NodeJS.Timeout | undefined;
   #checkImmediateTimer: NodeJS.Immediate | undefined;
   #lastHeartbeat = 0;
 
-  constructor(lc: LogContext, stopInterval: number) {
+  constructor(
+    lc: LogContext,
+    stopInterval: number,
+    proc: EventEmitter = process,
+  ) {
     this.#lc = lc;
     this.#stopInterval = stopInterval;
+    this.#proc = proc;
   }
 
   onHeartbeat(reqHeaders: IncomingHttpHeaders) {
@@ -690,7 +753,13 @@ export class HeartbeatMonitor {
             timeSinceLastHeartbeat / 1000
           } seconds ago. draining.`,
         );
-        process.kill(process.pid, GRACEFUL_SHUTDOWN[0]);
+        // Emitted on this process rather than sent to it. `process.kill(
+        // process.pid, 'SIGTERM')` is not a way to ask this process for
+        // anything: libuv maps the terminating signals to `TerminateProcess` on
+        // Windows, so no handler runs and the drain this log line announces
+        // never happens — the process is simply gone, mid-request. Emitting
+        // reaches the manager's own listener on every platform.
+        this.#proc.emit(GRACEFUL_SHUTDOWN[0]);
       }
     });
   };

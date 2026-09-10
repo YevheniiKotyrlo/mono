@@ -15,7 +15,20 @@ test('every shim is recognised, and nothing else is', () => {
   for (const shim of SHIMS) {
     expect(isNodeShimCommand(shim)).toBe(true);
   }
-  for (const other of ['node', 'git', 'docker', 'tar', 'pnpm', 'npm.cmd']) {
+  // Including a prototype key: `in` answers for those, so a predicate written
+  // that way would narrow one to NodeShimCommand and index the map to a
+  // function.
+  for (const other of [
+    'node',
+    'git',
+    'docker',
+    'tar',
+    'pnpm',
+    'npm.cmd',
+    'constructor',
+    'toString',
+    '__proto__',
+  ]) {
     expect(isNodeShimCommand(other)).toBe(false);
   }
 });
@@ -28,6 +41,8 @@ test.each(SHIMS)('%s passes through untouched on posix', shim => {
   ).toEqual({command: shim, args: ['run', 'x']});
 });
 
+// The expected string is Windows-shaped on every host: the resolver takes its
+// path grammar from the platform argument, not from the one it runs on.
 test.each(SHIMS)('%s runs under node on win32', shim => {
   const resolved = resolveNodeShimCommand(
     shim,
@@ -66,7 +81,7 @@ test('a command outside the map is untouched on win32 too', () => {
 });
 
 test('resolution is deterministic and side-effect free', () => {
-  // Same inputs, same output, and the argument array is never mutated -- callers
+  // Same inputs, same output, and the argument array is never mutated — callers
   // pass their own and some reuse it across spawns.
   const args: readonly string[] = Object.freeze(['pack']);
   const first = resolveNodeShimCommand('npm', args, 'win32', present, NODE);

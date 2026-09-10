@@ -106,8 +106,10 @@ describe('shutdown', () => {
     startupRecordMs.mockReset();
     workerStartupRecordMs.mockReset();
 
-    // For testing process.exit()
-    process.env['SINGLE_PROCESS'] = '1';
+    // For testing process.exit(). Stubbed rather than assigned: `vi.unstubAllEnvs`
+    // in the teardown restores it, so a case that changes it cannot leave the
+    // variable altered for whatever runs next in this worker.
+    vi.stubEnv('SINGLE_PROCESS', '1');
 
     proc = new EventEmitter();
     processes = new ProcessManager(lc, proc);
@@ -124,6 +126,7 @@ describe('shutdown', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   test.each([
@@ -234,6 +237,84 @@ describe('shutdown', () => {
     }
   });
 
+  test('a child with no IPC channel is terminated rather than asked', async () => {
+    // litestream is `spawn`ed, not forked, so it has no channel: `send` is
+    // undefined there and calling it throws. Addressing the request by signal
+    // NAME rather than by what the target can receive meant the throw was logged
+    // and swallowed, and litestream was never stopped on any platform — left
+    // holding the replica it backs up.
+    const kill = vi.fn<(signal?: NodeJS.Signals) => void>();
+    const external = Object.assign(new EventEmitter(), {
+      kill,
+      pid: 4242,
+      // Exactly what Node reports for a child spawned without `ipc`.
+      connected: false,
+      send: undefined,
+    });
+    processes.addSubprocess(external, 'supporting', 'litestream');
+
+    const exited = resolver<number>();
+    proc.on('exit', code => exited.resolve(code));
+
+    proc.emit('message', [...SHUTDOWN_MESSAGE]);
+
+    await syncer1.draining.promise;
+    await syncer2.draining.promise;
+    syncer1.finishDrain.resolve();
+    syncer2.finishDrain.resolve();
+
+    await changeStreamer.draining.promise;
+    await replicator.draining.promise;
+    changeStreamer.finishDrain.resolve();
+    replicator.finishDrain.resolve();
+
+    // Terminated, because that is the only way to stop it — and while it is
+    // still being waited for, not on the way out.
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
+    external.emit('close', 0);
+    expect(await exited.promise).toBe(0);
+  });
+
+  test('a worker that ignores the request is terminated past the deadline', async () => {
+    // Warning and exiting leaves it running, still holding the replica — the
+    // outcome the bounded wait exists to prevent. Terminating is the one thing
+    // that ends a process on every platform.
+    vi.useFakeTimers();
+    try {
+      const kill = vi.fn<(signal?: NodeJS.Signals) => void>();
+      const wedged = Object.assign(new EventEmitter(), {
+        kill,
+        pid: 4243,
+        connected: false,
+        send: undefined,
+      });
+      processes.addSubprocess(wedged, 'supporting', 'wedged');
+
+      const exited = resolver<number>();
+      proc.on('exit', code => exited.resolve(code));
+
+      proc.emit('message', [...SHUTDOWN_MESSAGE]);
+
+      await syncer1.draining.promise;
+      await syncer2.draining.promise;
+      syncer1.finishDrain.resolve();
+      syncer2.finishDrain.resolve();
+
+      await changeStreamer.draining.promise;
+      await replicator.draining.promise;
+      changeStreamer.finishDrain.resolve();
+      replicator.finishDrain.resolve();
+
+      // It never emits 'close', so the wait runs out.
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(kill.mock.calls).toEqual([['SIGTERM'], ['SIGKILL']]);
+      expect(await exited.promise).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test('how it exits is decided when it is built, not when it exits', async () => {
     // Because the exit can now happen a tick after the drain rather than inside
     // it, and anything may have changed the environment by then. Re-reading the
@@ -244,7 +325,7 @@ describe('shutdown', () => {
     built.on('exit', code => exited.resolve(code));
     new ProcessManager(lc, built);
 
-    delete process.env['SINGLE_PROCESS'];
+    vi.stubEnv('SINGLE_PROCESS', undefined);
     built.emit('message', [...SHUTDOWN_MESSAGE]);
 
     // Reaches the emitter it was built with rather than the real process.

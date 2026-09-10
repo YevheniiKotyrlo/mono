@@ -54,7 +54,14 @@ const opened: {file: DbFile; db: Database}[] = [];
 
 afterEach(async () => {
   for (const {file, db} of opened.splice(0)) {
-    db.close();
+    // Isolated per entry: a throwing close would otherwise abandon every later
+    // handle and every later file. `DbFile.delete()` tolerates a double close for
+    // the same reason.
+    try {
+      db.close();
+    } catch (e) {
+      console.warn(`Unable to close ${file.path}`, e);
+    }
     deleteChangeLogDB(file.path);
     await file.delete();
   }

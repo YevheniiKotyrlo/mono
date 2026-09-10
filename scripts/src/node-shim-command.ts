@@ -1,5 +1,5 @@
 import {existsSync} from 'node:fs';
-import {dirname, join} from 'node:path';
+import * as path from 'node:path';
 
 /**
  * The commands Windows implements as a `.CMD` shim and Node ships beside itself.
@@ -21,7 +21,10 @@ export type ResolvedCommand = {
 };
 
 export function isNodeShimCommand(command: string): command is NodeShimCommand {
-  return command in NODE_SHIM_ENTRYPOINTS;
+  // `hasOwn` rather than `in`: `in` also answers for inherited keys, so
+  // `'constructor'` would narrow to NodeShimCommand and index the map to a
+  // function.
+  return Object.hasOwn(NODE_SHIM_ENTRYPOINTS, command);
 }
 
 /**
@@ -43,7 +46,9 @@ export function isNodeShimCommand(command: string): command is NodeShimCommand {
  * location nor this decision.
  *
  * Pure given its inputs: the platform, the existence probe and the Node binary
- * are all parameters, so both branches are reachable from either host.
+ * are all parameters — including the path grammar, which is taken from the
+ * platform argument rather than the host, so the Windows path this builds is the
+ * same string on either host and can be asserted from either.
  */
 export function resolveNodeShimCommand(
   command: string,
@@ -55,6 +60,7 @@ export function resolveNodeShimCommand(
   if (platform !== 'win32' || !isNodeShimCommand(command)) {
     return {command, args};
   }
+  const {dirname, join} = path.win32;
   const entrypoint = join(
     dirname(nodePath),
     'node_modules',

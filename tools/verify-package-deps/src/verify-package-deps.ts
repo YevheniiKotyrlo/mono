@@ -4,7 +4,7 @@ import {readdir, readFile, writeFile} from 'node:fs/promises';
 import {dirname, join, relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parse} from 'oxc-parser';
-import {packageOfRelativePath} from './package-of-path.ts';
+import {PACKAGE_ROOTS, packageOfRelativePath} from './package-of-path.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -197,12 +197,10 @@ type AnalyzeResult = {
 async function analyzePackageDependencies(): Promise<AnalyzeResult> {
   console.log('Finding TypeScript files...');
 
-  const [packagesFiles, appsFiles, toolsFiles] = await Promise.all([
-    findTypeScriptFiles(join(WORKSPACE_ROOT, 'packages')),
-    findTypeScriptFiles(join(WORKSPACE_ROOT, 'apps')),
-    findTypeScriptFiles(join(WORKSPACE_ROOT, 'tools')),
-  ]);
-  const allFiles = [...packagesFiles, ...appsFiles, ...toolsFiles];
+  const perRoot = await Promise.all(
+    PACKAGE_ROOTS.map(dir => findTypeScriptFiles(join(WORKSPACE_ROOT, dir))),
+  );
+  const allFiles = perRoot.flat();
 
   console.log(`Found ${allFiles.length} TypeScript files to analyze`);
 
@@ -219,9 +217,14 @@ async function analyzePackageDependencies(): Promise<AnalyzeResult> {
 
   // Build a map from package name to package path
   const packageNameToPath = new Map<string, string>();
-  for (const dir of ['packages', 'apps', 'tools']) {
+  for (const dir of PACKAGE_ROOTS) {
     const fullDir = join(WORKSPACE_ROOT, dir);
-    const entries = await readdir(fullDir, {withFileTypes: true});
+    // Missing roots are skipped, the way the file scan already skips them: a
+    // workspace need not have all three, and dying here would refuse a --root
+    // that the scan itself accepted.
+    const entries = await readdir(fullDir, {withFileTypes: true}).catch(
+      (): [] => [],
+    );
     for (const entry of entries) {
       if (entry.isDirectory()) {
         // A canonical `dir/name` identifier, not a filesystem path: it is

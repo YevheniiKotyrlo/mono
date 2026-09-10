@@ -102,9 +102,8 @@ export default async function runWorker(
     ...args: string[]
   ): Worker {
     const worker = childWorker(moduleUrl, env, ...args, ...internalFlags);
-    // `fileURLToPath`, not `.pathname`: a URL pathname is percent-encoded, so a
-    // worker path containing an encodable character would surface here as `%20`
-    // style text in the process label.
+    // `fileURLToPath`, not `.pathname`: a pathname is a URL path, not a
+    // filesystem one — percent-encoded, and `/C:/…` on Windows.
     const name =
       path.basename(fileURLToPath(moduleUrl)) + (id ? ` (${id})` : '');
     const w = processes.addWorker(worker, type, name);

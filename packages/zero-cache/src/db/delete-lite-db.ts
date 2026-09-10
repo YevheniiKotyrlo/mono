@@ -10,8 +10,15 @@ import {SQLITE_FILE_SUFFIXES} from '../../../shared/src/sqlite-file-suffixes.ts'
  * `maxRetries` is per call, so five sidecars multiply it, and a wait long enough
  * for the last file stops fitting inside the timeout of whatever is waiting. What
  * a caller wants to bound is how long until the database is gone.
+ *
+ * Sized so several of them fit inside one test hook. A teardown removes up to
+ * four databases in a loop against vitest's 10s hook timeout, so a per-database
+ * deadline generous enough to look safe is what turns one genuinely held file
+ * into a hook timeout — which reports nothing about which file, where a deadline
+ * that fits reports the path and what still holds it. Against a release measured
+ * to land on the second attempt, this is a 40-attempt margin.
  */
-export const ASYNC_REMOVE_DEADLINE_MS = 8_000;
+export const ASYNC_REMOVE_DEADLINE_MS = 2_000;
 const ASYNC_REMOVE_RETRY_DELAY_MS = 50;
 
 /**
@@ -23,7 +30,6 @@ const ASYNC_REMOVE_RETRY_DELAY_MS = 50;
  * - The blocking budget covers a handle THIS process just closed. Windows releases
  *   one a moment after the close, at the kernel's pace and without needing the
  *   event loop, so a short blocking wait is exactly the right instrument.
- *   Measured: removing it turned 20 pg suites red on Windows.
  * - The awaited loop below covers a handle ANOTHER process is dropping as it
  *   exits. That release IS event-loop work here, so blocking would starve it —
  *   which is why that path takes no budget from `rm` and owns its own.
@@ -40,8 +46,9 @@ const ASYNC_REMOVE_RETRY_DELAY_MS = 50;
  */
 const SYNC_RETRY_BUDGET = {maxRetries: 5, retryDelay: 20} as const;
 
-function removeOptions(platform: NodeJS.Platform, retries: boolean): RmOptions {
-  const retry = retries && platform === 'win32';
+/** What the blocking removal asks of `rm`: a budget on Windows, none elsewhere. */
+export function syncRemoveOptions(platform: NodeJS.Platform): RmOptions {
+  const retry = platform === 'win32';
   return {
     force: true,
     recursive: retry,
@@ -49,6 +56,19 @@ function removeOptions(platform: NodeJS.Platform, retries: boolean): RmOptions {
     retryDelay: retry ? SYNC_RETRY_BUDGET.retryDelay : 0,
   };
 }
+
+/**
+ * What the awaited removal asks of `rm`, on every platform: nothing.
+ *
+ * The loop below owns the waiting, because a budget inside `rm` blocks the event
+ * loop and the release being waited for is event-loop work.
+ */
+export const ASYNC_REMOVE_OPTIONS = {
+  force: true,
+  recursive: false,
+  maxRetries: 0,
+  retryDelay: 0,
+} as const satisfies RmOptions;
 
 /**
  * Throws unless `path` is a file or absent.
@@ -92,7 +112,7 @@ export function deleteLiteDB(
   const failures: unknown[] = [];
   for (const path of paths) {
     try {
-      remove(path, removeOptions(platform, true));
+      remove(path, syncRemoveOptions(platform));
     } catch (error) {
       failures.push(error);
     }
@@ -113,10 +133,11 @@ export function deleteLiteDB(
  * asynchronous one.
  *
  * So callers that can await should, and the ones that cannot keep the
- * synchronous version above — which is every production caller here, all of
- * which delete a replica at startup or restore, where no handle in this process
- * is outstanding. The tests are the opposite case: they have just killed the
- * processes that held the file.
+ * synchronous version above. Most of those delete a replica at startup or
+ * restore, where no handle in this process is outstanding; the exception is
+ * `handleCorruptedDb` in the write worker, which deletes a replica this process
+ * still has open — see the note there. The tests are the opposite case again:
+ * they have just killed the processes that held the file.
  */
 export async function deleteLiteDBAsync(
   dbFile: string,
@@ -135,6 +156,13 @@ export async function deleteLiteDBAsync(
   // case, which is how a wait long enough to work stops fitting inside the timeout
   // of whatever is waiting for it. What a caller wants to bound is how long until
   // the database is gone.
+  // Retried on Windows only. There a handle a departing process is dropping is
+  // released a moment after it goes, so a later attempt succeeds. Everywhere else
+  // unlink-while-open is legal, so a refusal is a real one: the retry set covers
+  // EPERM, ENOTEMPTY, EMFILE and ENFILE, all of which occur there legitimately and
+  // none of which a delay can fix — retrying would spend the whole deadline before
+  // reporting an error it already had.
+  const retry = platform === 'win32';
   const deadline = Date.now() + ASYNC_REMOVE_DEADLINE_MS;
   let remaining = paths;
   const failures: unknown[] = [];
@@ -144,7 +172,7 @@ export async function deleteLiteDBAsync(
     failures.length = 0;
     for (const path of remaining) {
       try {
-        await remove(path, removeOptions(platform, false));
+        await remove(path, ASYNC_REMOVE_OPTIONS);
       } catch (error) {
         // Only the paths still held are retried, so one that has already gone
         // cannot contribute a failure on a later pass.
@@ -153,7 +181,7 @@ export async function deleteLiteDBAsync(
       }
     }
     remaining = stillHeld;
-    if (remaining.length === 0 || Date.now() >= deadline) {
+    if (remaining.length === 0 || !retry || Date.now() >= deadline) {
       break;
     }
     await sleep(ASYNC_REMOVE_RETRY_DELAY_MS);

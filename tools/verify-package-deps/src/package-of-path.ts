@@ -1,5 +1,14 @@
-/** Workspace directories whose immediate children are packages. */
-const PACKAGE_ROOTS = new Set(['packages', 'apps', 'tools']);
+/**
+ * Workspace directories whose immediate children are packages.
+ *
+ * Exported because the scan and the attribution below have to agree on it. Stated
+ * twice, a directory added to one and not the other produces this file's own bug:
+ * files are found, none is attributed to a package, and the gate reports that
+ * every dependency is declared.
+ */
+export const PACKAGE_ROOTS = ['packages', 'apps', 'tools'] as const;
+
+const PACKAGE_ROOT_SET: ReadonlySet<string> = new Set(PACKAGE_ROOTS);
 
 /** Either path separator, so Windows and POSIX paths split the same way. */
 const SEPARATOR = /[\\/]/;
@@ -20,7 +29,7 @@ export function packageOfRelativePath(
   // a package name: such a key matches no real package, and an unmatched key
   // exempts the file rather than reporting it.
   const parts = relativePath.split(SEPARATOR).filter(Boolean);
-  if (parts.length >= 2 && PACKAGE_ROOTS.has(parts[0])) {
+  if (parts.length >= 2 && PACKAGE_ROOT_SET.has(parts[0])) {
     return `${parts[0]}/${parts[1]}`;
   }
   return undefined;

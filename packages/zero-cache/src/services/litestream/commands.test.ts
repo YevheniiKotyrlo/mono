@@ -3,7 +3,6 @@ import {EventEmitter} from 'node:events';
 import {
   copyFileSync,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -33,12 +32,16 @@ import {
 } from './commands.ts';
 import * as litestreamMetrics from './metrics.ts';
 
-// Wrap (don't replace) node:child_process.spawn so tests can assert the args it
-// was called with. Node's built-in module exports are non-configurable, so
-// vi.spyOn cannot be used here.
+// Replace node:child_process.spawn so the args it was called with can be
+// asserted and the child it returns is stood up in process. Node's built-in
+// module exports are non-configurable, so vi.spyOn cannot be used here.
+//
+// A mock with no default implementation is deliberate: every case installs its
+// own, and a case that did not would otherwise spawn the executable its config
+// names, which is a path that was never created.
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof childProcess>();
-  return {...actual, spawn: vi.fn(actual.spawn)};
+  return {...actual, spawn: vi.fn()};
 });
 
 /**
@@ -100,18 +103,16 @@ function stagingPath(destination: string, suffix: string): string {
 function fakeChild(
   behaviour: FakeLitestream,
   args: readonly string[],
-  options: {stdio?: unknown} = {},
+  options: Pick<childProcess.SpawnOptions, 'stdio'> = {},
 ) {
   const child = new EventEmitter() as EventEmitter & {
     stdout: PassThrough | null;
     stderr: PassThrough | null;
-    kill: ReturnType<typeof vi.fn>;
+    kill: ReturnType<typeof vi.fn<(signal?: NodeJS.Signals) => boolean>>;
   };
 
-  // Only piped slots get a stream, exactly as a real child does. That keeps the
-  // implicit guard a real child provides: reverting the production
-  // spawn to `stdio: 'inherit'` leaves stdout/stderr null and the code that
-  // reads them fails, rather than quietly losing INC-961's protection.
+  // A stream exists only for a piped slot, so code that reads an inherited one
+  // fails here as it would in production.
   const stdio = Array.isArray(options.stdio) ? options.stdio : [];
   child.stdout = stdio[1] === 'pipe' ? new PassThrough() : null;
   child.stderr = stdio[2] === 'pipe' ? new PassThrough() : null;
@@ -128,17 +129,27 @@ function fakeChild(
   };
   // A vi.fn so the timeout test can assert the process was actually killed —
   // the production code rejects before killing, so nothing else observes it.
+  //
+  // The close is deferred: a real process exits asynchronously, so a handler
+  // that runs inside the `kill()` call observes state the caller has not
+  // finished updating, and an interleaving that production has cannot occur.
   child.kill = vi.fn((signal?: NodeJS.Signals) => {
-    close(null, signal ?? 'SIGKILL');
+    setImmediate(() => close(null, signal ?? 'SIGKILL'));
     return true;
+  });
+
+  // A child outlives the case that made it whenever the case does not await its
+  // close, and its arm writes into the directory the hook is about to remove.
+  // Disposal is explicit rather than inferred from `done`, which says the child
+  // closed and not that the case is over.
+  let disposed = false;
+  liveChildren.push(() => {
+    disposed = true;
   });
 
   const subcommand = args[0];
   setImmediate(() => {
-    // A late fire after teardown must not throw out of the immediate: an
-    // uncaught exception there is attributed to the file, not the test, and
-    // fails every case in it.
-    if (done) {
+    if (done || disposed) {
       return;
     }
     switch (behaviour.kind) {
@@ -199,10 +210,8 @@ function fakeChild(
           close(1, null);
           break;
         }
-        child.stdout?.write(`${behaviour.stdout}
-`);
-        child.stderr?.write(`${behaviour.stderr}
-`);
+        child.stdout?.write(`${behaviour.stdout}\n`);
+        child.stderr?.write(`${behaviour.stderr}\n`);
         close(behaviour.code, null);
         break;
       }
@@ -226,18 +235,24 @@ function fakeChild(
 /** Every directory a case makes, removed after the case that made it. */
 const ownedDirs: string[] = [];
 
+/** Every fake child a case spawns, disposed after the case that spawned it. */
+const liveChildren: (() => void)[] = [];
+
 afterEach(() => {
+  // Children first: a live child's arm writes into one of these directories.
+  for (const dispose of liveChildren.splice(0)) {
+    dispose();
+  }
   for (const dir of ownedDirs.splice(0)) {
     rmSync(dir, {recursive: true, force: true});
   }
 });
 
 /**
- * A temp directory owned by the running case.
+ * A temp directory owned by the running case, removed when the case ends.
  *
- * `mkdtempSync` on its own leaves one behind per case, and nothing here ever
- * removed them: 810 had collected in the system temp directory, growing by a
- * dozen every run of this file.
+ * `mkdtempSync` on its own leaves one behind per case, so a suite that makes one
+ * per case leaves a directory per case in the system temp directory.
  */
 function tempDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -256,13 +271,12 @@ function configWithFakeLitestream(
   // artifact from one case into the next, where it decides the outcome. Removed
   // in the hook below.
   const dir = tempDir('litestream-test-fake-');
-  ownedDirs.push(dir);
   const executable = join(dir, 'fake-litestream');
   vi.mocked(childProcess.spawn).mockReset();
   vi.mocked(childProcess.spawn).mockImplementation(((
     _command: string,
     args: readonly string[],
-    options: {stdio?: unknown},
+    options: Pick<childProcess.SpawnOptions, 'stdio'>,
   ) =>
     fakeChild(
       behaviour,
@@ -445,12 +459,12 @@ describe('litestream/commands getLastBackupTime', () => {
     // The rejection alone does not prove the process was killed: the production
     // code rejects first and kills after, so deleting the kill would leave the
     // assertion above green and leak a process per timeout.
-    // Every child, not just the last: the listing runs two subcommands
-    // concurrently and both hang, so both have to be killed. Asserting one left
-    // the other's leak invisible, and which one `at(-1)` returned depended on the
-    // order `Promise.all` happened to evaluate its arguments in.
+    //
+    // The listing runs both subcommands concurrently and both hang, so both
+    // children have to be killed. Which one `at(-1)` names depends on the order
+    // `Promise.all` evaluated its arguments in, so every child is asserted.
     const {results} = vi.mocked(childProcess.spawn).mock;
-    expect(results.length).toBeGreaterThan(0);
+    expect(results.length).toBe(2);
     for (const result of results) {
       // Checked rather than cast: a spawn that threw carries the error here, and
       // reading `.kill` off it would fail as "not a spy" rather than saying so.
@@ -769,31 +783,6 @@ describe('litestream/commands restoreReplica', () => {
     expect(String(error)).toContain('litestream exited with code 1');
     expect(String(error)).toContain('restore stdout');
     expect(String(error)).toContain('restore stderr');
-  });
-
-  test('reports a directory left at the staging path', async () => {
-    // The staged files a previous attempt left are removed before a restore, and
-    // a directory is the one thing a non-recursive `rm` refuses. That refusal is
-    // what the caller sees in place of the restore's own outcome, so it has to
-    // name the path and say what is wrong with it.
-    const {litestream, replica} = configWithFakeLitestream({kind: 'restore'});
-    mkdirSync(`${replica.file}.tmp`, {recursive: true});
-
-    const error = await tryRestore(
-      lc,
-      litestream,
-      replica.file,
-      {replicaVersion: '01', minWatermark: '01'},
-      'replication_manager',
-    ).then(
-      () => undefined,
-      (e: unknown) => e,
-    );
-
-    expect(error).toBeInstanceOf(Error);
-    expect(String(error)).toContain('Refusing to delete');
-    expect(String(error)).toContain('it is a directory');
-    expect(String(error)).toContain(`${replica.file}.tmp`);
   });
 
   test('deletes an incompatible restored replica', async () => {

@@ -3581,7 +3581,9 @@ describe('Disconnect on hide', () => {
         let timeTillHiddenDisconnect = Math.floor(
           DEFAULT_PING_TIMEOUT_MS * 6.3,
         );
-        expect(timeTillHiddenDisconnect > DEFAULT_PING_TIMEOUT_MS * 2);
+        expect(timeTillHiddenDisconnect).greaterThan(
+          DEFAULT_PING_TIMEOUT_MS * 2,
+        );
         changeVisibilityState('hidden');
         while (timeTillHiddenDisconnect > DEFAULT_PING_TIMEOUT_MS * 2) {
           await vi.advanceTimersByTimeAsync(DEFAULT_PING_TIMEOUT_MS);

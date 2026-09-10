@@ -78,8 +78,11 @@ describe('view-syncer/snapshotter', () => {
   });
 
   afterEach(async () => {
-    s.destroy();
-    await dbFile.delete();
+    try {
+      s.destroy();
+    } finally {
+      await dbFile.delete();
+    }
   });
 
   test('initial snapshot', () => {

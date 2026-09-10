@@ -1842,7 +1842,7 @@ test('online', async () => {
     consoleDebugStub.mock.calls.some(args =>
       args.join('\n').includes('Push threw'),
     ),
-  );
+  ).toBe(true);
   expect(log).toEqual([false]);
 
   consoleDebugStub.mockClear();
@@ -1853,10 +1853,10 @@ test('online', async () => {
   await tickAFewTimes(vi, 20);
 
   expect(
-    !consoleDebugStub.mock.calls.some(args =>
+    consoleDebugStub.mock.calls.some(args =>
       args.join('\n').includes('Push threw'),
     ),
-  );
+  ).toBe(false);
   expect(rep.online).toBe(true);
   expect(log).toEqual([false, true]);
 });

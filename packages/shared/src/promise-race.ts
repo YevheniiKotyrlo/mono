@@ -1,4 +1,5 @@
 import {resolver} from '@rocicorp/resolver';
+import {promiseVoid} from './resolved-promises.ts';
 
 type PromiseRaceResult<T extends Record<string, PromiseLike<unknown>>> = {
   [K in Extract<keyof T, string>]: {
@@ -56,6 +57,23 @@ export async function promiseRace<
  * {@link AbortController} and race the former against the signal of the
  * latter.
  */
+/**
+ * Resolves when `signal` aborts, immediately if it already has.
+ *
+ * The sibling of {@link promiseOrAbort} for the case where the abort is an
+ * expected outcome rather than a failure: racing against this ends the wait
+ * without a rejection to catch, so a real error from the other side of the race
+ * is not swallowed along with it.
+ */
+export function whenAborted(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return promiseVoid;
+  }
+  const {promise, resolve} = resolver<void>();
+  signal.addEventListener('abort', () => resolve(), {once: true});
+  return promise;
+}
+
 export async function promiseOrAbort<T>(
   shortLived: Promise<T>,
   ...longLived: AbortSignal[]
