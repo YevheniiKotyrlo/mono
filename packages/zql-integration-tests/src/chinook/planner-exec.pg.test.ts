@@ -556,6 +556,10 @@ describe('Chinook planner execution cost validation', () => {
       // runs for every case regardless. A threshold picked to pass would assert
       // nothing, and one picked honestly would need its own measurement.
       validations: [],
+      // An empty array rather than absent: the indexed pass runs only when this
+      // is present, and an index is what changes which plan wins — so omitting it
+      // would leave the widest plan space in this suite checked on one DB.
+      extraIndexValidations: [],
     },
 
     {

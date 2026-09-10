@@ -5,6 +5,7 @@ import {
   initializeIndexedDatabase,
   executeAllPlanAttempts,
   validateCorrelation,
+  validatePlansAgree,
   validateWithinOptimal,
   validateWithinBaseline,
   printTestSummary,
@@ -338,6 +339,15 @@ describe('Pagila planner execution cost validation', () => {
 
       // Verify we got multiple planning attempts
       expect(results.length).toBeGreaterThan(0);
+
+      // Unconditional, and ahead of the cost validations: those measure how well
+      // the estimates track reality, which a plan returning the wrong rows can do
+      // perfectly well — it scans less and it is faster. Every plan is a way of
+      // computing the same answer, so the answers agreeing is the premise the
+      // rest of this test rests on. The cost cap above narrows this to the
+      // attempts that ran; attempt 0 is always among them.
+      const agreement = validatePlansAgree(results);
+      expect(agreement.passed, agreement.details).toBe(true);
 
       // Initialize summary entry
       const summary: TestSummary = {

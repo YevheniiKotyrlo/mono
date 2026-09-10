@@ -1,6 +1,7 @@
 // oxlint-disable no-console
 import {testLogConfig} from '../../../otel/src/test-log-config.ts';
 import {createSilentLogContext} from '../../../shared/src/logging-test-utils.ts';
+import {must} from '../../../shared/src/must.ts';
 import {computeZqlSpecs} from '../../../zero-cache/src/db/lite-tables.ts';
 import type {LiteAndZqlSpec} from '../../../zero-cache/src/db/specs.ts';
 import {hydrate} from '../../../zero-cache/src/services/view-syncer/pipeline-driver.ts';
@@ -17,6 +18,7 @@ import {
   Debug,
   runtimeDebugFlags,
 } from '../../../zql/src/builder/debug-delegate.ts';
+import type {Node} from '../../../zql/src/ivm/data.ts';
 import {
   applyPlansToAST,
   buildPlanGraph,
@@ -99,14 +101,19 @@ function sumRowCounts(
  * scans less and it is faster, which is what a cheaper plan is supposed to look
  * like. The only way to catch it is to compare what came back.
  *
- * Attempt 0 is the unplanned baseline, so it is what the others are compared
- * against rather than each other: that names the plan that disagrees AND says
- * which side is wrong.
+ * Attempt 0 is the query as written, with no flips applied, so it is what the
+ * others are compared against rather than each other — that names which plan
+ * disagrees. It is not an independent oracle: it is the same IVM machinery, so if
+ * the unflipped path is the broken one this reports the others as wrong. Settling
+ * that needs the Postgres comparison in `comparePg.ts`.
  */
 export function validatePlansAgree(
   results: PlanAttemptResult[],
 ): ValidationResult {
-  const baseline = results.find(r => r.attemptNumber === 0) ?? results[0];
+  const baseline = must(
+    results.find(r => r.attemptNumber === 0),
+    'Baseline plan (attempt 0) not found',
+  );
   const disagreeing = results.filter(
     r =>
       r !== baseline &&
@@ -611,10 +618,7 @@ export async function createPlannerInfrastructure(config: {
       // Apply plans to AST to get variant with flip flags set
       const astWithFlips = applyPlansToAST(ast, plans);
 
-      // Enable row count tracking
-      runtimeDebugFlags.trackRowCountsVended = true;
       const debug = new Debug();
-      selectedDelegate.debug = debug;
 
       try {
         // Build pipeline
@@ -624,10 +628,37 @@ export async function createPlannerInfrastructure(config: {
           `query-${planEvent.attemptNumber}`,
         );
 
+        // The plan's answer: the ROOT rows, taken from the pipeline's own
+        // top-level nodes. Filtering the hydration stream by table name is not
+        // the same set — it recurses into every relationship, so an EXISTS
+        // subquery on the root table lands in the same bucket, and the two plans
+        // legitimately stream different numbers of those (the non-flipped path
+        // caps a subquery at EXISTS_LIMIT; a flipped join attaches the whole
+        // child set). Sorted because the ordering is only decided where the query
+        // asks for one, and the answer is the set either way.
+        //
+        // Before tracking is armed, so this pass does not enter the row counts the
+        // cost validations read. Relationships are left unread here for the same
+        // reason; the hydration below is what walks them.
+        const rootPrimaryKey = must(
+          clientSchemaFrom(schema).clientSchema.tables[astWithFlips.table],
+          `no client schema for root table ${astWithFlips.table}`,
+        ).primaryKey;
+        const resultKeys = [...pipeline.fetch({})]
+          .filter((node): node is Node => node !== 'yield')
+          .map(node =>
+            JSON.stringify(
+              rootPrimaryKey.map((column: string) => node.row[column]),
+            ),
+          )
+          .toSorted();
+
+        // Enable row count tracking
+        runtimeDebugFlags.trackRowCountsVended = true;
+        selectedDelegate.debug = debug;
+
         // Execute query
-        const rootTable = astWithFlips.table;
-        const resultKeys: string[] = [];
-        for (const rowChange of hydrate(
+        for (const _rowChange of hydrate(
           pipeline,
           hashOfAST(astWithFlips),
           clientSchemaFrom(schema).clientSchema,
@@ -635,11 +666,8 @@ export async function createPlannerInfrastructure(config: {
             includeBackfillingColumns: false,
           }),
         )) {
-          if (rowChange !== 'yield' && rowChange.table === rootTable) {
-            resultKeys.push(JSON.stringify(rowChange.rowKey));
-          }
+          // Consume rows to execute the query
         }
-        resultKeys.sort();
 
         // Collect actual row counts
         const nvisitCounts = debug.getNVisitCounts();

@@ -2,6 +2,7 @@ import {
   createPlannerInfrastructure,
   validateCorrelation,
   validateWithinOptimal,
+  validatePlansAgree,
   validateWithinBaseline,
   printTestSummary,
   type PlanAttemptResult,
@@ -69,6 +70,7 @@ export const indexedTableSpecs = infra.indexedTableSpecs;
 export {
   validateCorrelation,
   validateWithinOptimal,
+  validatePlansAgree,
   validateWithinBaseline,
   printTestSummary,
   type PlanAttemptResult,
