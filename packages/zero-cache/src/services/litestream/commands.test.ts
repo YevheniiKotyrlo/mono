@@ -223,14 +223,27 @@ function fakeChild(
  * Points the config at a `litestream` path that is never executed, and makes
  * `spawn` return a fake child driven by `behaviour`.
  */
-/** Every fake fixture directory, removed after the case that made it. */
-const fakeRoots: string[] = [];
+/** Every directory a case makes, removed after the case that made it. */
+const ownedDirs: string[] = [];
 
 afterEach(() => {
-  for (const root of fakeRoots.splice(0)) {
-    rmSync(root, {recursive: true, force: true});
+  for (const dir of ownedDirs.splice(0)) {
+    rmSync(dir, {recursive: true, force: true});
   }
 });
+
+/**
+ * A temp directory owned by the running case.
+ *
+ * `mkdtempSync` on its own leaves one behind per case, and nothing here ever
+ * removed them: 810 had collected in the system temp directory, growing by a
+ * dozen every run of this file.
+ */
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  ownedDirs.push(dir);
+  return dir;
+}
 
 function configWithFakeLitestream(
   behaviour: FakeLitestream,
@@ -242,8 +255,8 @@ function configWithFakeLitestream(
   // staging behaviours above write into it: a shared path would carry a staged
   // artifact from one case into the next, where it decides the outcome. Removed
   // in the hook below.
-  const dir = mkdtempSync(join(tmpdir(), 'litestream-test-fake-'));
-  fakeRoots.push(dir);
+  const dir = tempDir('litestream-test-fake-');
+  ownedDirs.push(dir);
   const executable = join(dir, 'fake-litestream');
   vi.mocked(childProcess.spawn).mockReset();
   vi.mocked(childProcess.spawn).mockImplementation(((
@@ -456,7 +469,7 @@ describe('litestream/commands restoreReplica', () => {
   });
 
   test('restores and validates a compatible replica', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const dir = tempDir('litestream-restore-test-');
     const source = join(dir, 'source.db');
     const replica = join(dir, 'replica.db');
     createRestorableReplica(source, '01');
@@ -490,7 +503,7 @@ describe('litestream/commands restoreReplica', () => {
   });
 
   test('deletes a change log left beside a restored replica', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const dir = tempDir('litestream-restore-test-');
     const source = join(dir, 'source.db');
     const replica = join(dir, 'replica.db');
     createRestorableReplica(source, '01');
@@ -524,7 +537,7 @@ describe('litestream/commands restoreReplica', () => {
   // against it. Deleting it would cost every reconnecting subscriber a
   // `too-old` on every deploy.
   test('keeps the change log when the restore reuses an existing replica', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const dir = tempDir('litestream-restore-test-');
     const replica = join(dir, 'replica.db');
     createRestorableReplica(replica, '01');
     const log = changeLogFileName(replica);
@@ -543,7 +556,7 @@ describe('litestream/commands restoreReplica', () => {
   });
 
   test('does not record restored bytes when reusing an existing replica', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const dir = tempDir('litestream-restore-test-');
     const replica = join(dir, 'replica.db');
     createRestorableReplica(replica, '01');
     const restoredDbBytesAdd = vi.fn();
@@ -569,7 +582,7 @@ describe('litestream/commands restoreReplica', () => {
   });
 
   test('deletes a stale temporary SQLite family before restore', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const dir = tempDir('litestream-restore-test-');
     const source = join(dir, 'source.db');
     const replica = join(dir, 'replica.db');
     const temporaryReplica = `${replica}.tmp`;
@@ -609,7 +622,7 @@ describe('litestream/commands restoreReplica', () => {
   });
 
   test('deletes a temporary SQLite family left by a failed restore', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const dir = tempDir('litestream-restore-test-');
     const replica = join(dir, 'replica.db');
     const temporaryReplica = `${replica}.tmp`;
     const stagedWAL = `${temporaryReplica}-deadbeef-wal`;
@@ -644,7 +657,7 @@ describe('litestream/commands restoreReplica', () => {
   });
 
   test('temporary restore cleanup preserves the real replica family', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const dir = tempDir('litestream-restore-test-');
     const replica = join(dir, 'replica.db');
     const temporaryReplica = `${replica}.tmp`;
     writeSQLiteFamily(replica, 'real replica');
@@ -676,7 +689,7 @@ describe('litestream/commands restoreReplica', () => {
   test('logs restore directory contents before and after temporary cleanup', async () => {
     const sink = new TestLogSink();
     const loggingLC = new LogContext('debug', undefined, sink);
-    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const dir = tempDir('litestream-restore-test-');
     const source = join(dir, 'source.db');
     const replica = join(dir, 'replica.db');
     const temporaryReplica = `${replica}.tmp`;
@@ -784,7 +797,7 @@ describe('litestream/commands restoreReplica', () => {
   });
 
   test('deletes an incompatible restored replica', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const dir = tempDir('litestream-restore-test-');
     const source = join(dir, 'source.db');
     const replica = join(dir, 'replica.db');
     createRestorableReplica(source, '01');
@@ -837,7 +850,7 @@ describe('litestream/commands restoreReplica', () => {
   test('spawns `litestream restore` with piped stdio (not inherited)', async () => {
     const spawnMock = vi.mocked(childProcess.spawn);
     spawnMock.mockClear();
-    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const dir = tempDir('litestream-restore-test-');
     const source = join(dir, 'source.db');
     const replica = join(dir, 'replica.db');
     createRestorableReplica(source, '01');
@@ -876,7 +889,7 @@ describe('litestream/commands restoreReplica', () => {
   ): Promise<string | undefined> {
     const spawnMock = vi.mocked(childProcess.spawn);
     spawnMock.mockClear();
-    const dir = mkdtempSync(join(tmpdir(), 'litestream-restore-test-'));
+    const dir = tempDir('litestream-restore-test-');
     const source = join(dir, 'source.db');
     const replica = join(dir, 'replica.db');
     createRestorableReplica(source, '01');
@@ -917,10 +930,7 @@ describe('litestream/commands restoreReplica', () => {
   // from the upstream slot, and shipping it would give back the S3 and
   // follower-download savings the separate file exists to win.
   test('the rendered litestream config never backs up the change-log database', () => {
-    const replica = join(
-      mkdtempSync(join(tmpdir(), 'litestream-config-test-')),
-      'replica.db',
-    );
+    const replica = join(tempDir('litestream-config-test-'), 'replica.db');
     const {litestream} = configWithFakeLitestream(
       {kind: 'exit', code: 0},
       replica,
@@ -947,10 +957,7 @@ describe('litestream/commands restoreReplica', () => {
 
   // Same invariant as above, for the v5 config we now render.
   test('the rendered v5 litestream config never backs up the change-log database', () => {
-    const replica = join(
-      mkdtempSync(join(tmpdir(), 'litestream-config-test-')),
-      'replica.db',
-    );
+    const replica = join(tempDir('litestream-config-test-'), 'replica.db');
     const {litestream} = configWithFakeLitestream(
       {kind: 'exit', code: 0},
       replica,
