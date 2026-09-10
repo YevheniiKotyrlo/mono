@@ -4669,18 +4669,24 @@ describe('change-streamer/service', () => {
     // there yet, and on a loaded machine the answer is no and the probe below
     // succeeds where it is meant to be refused. `NOWAIT` makes the wait cheap:
     // each attempt either takes the lock or fails immediately.
-    await vi.waitFor(async () => {
-      let result;
+    //
+    // The retry RETURNS the refusal instead of snapshotting it: an inline
+    // snapshot is keyed to its source location, so a location that sees the
+    // unlocked row on one attempt and the refusal on the next fails with
+    // "different snapshots cannot be called at the same location" whatever the
+    // timeout. A retried assertion has to be a predicate.
+    const refusal = await vi.waitFor(async () => {
       try {
-        result = await sql`
+        await sql`
           SELECT owner FROM "zoro_3/cdc"."replicationState" FOR UPDATE NOWAIT`;
       } catch (e) {
-        result = e;
+        return e;
       }
-      expect(result).toMatchInlineSnapshot(
-        `[PostgresError: could not obtain lock on row in relation "replicationState"]`,
-      );
+      throw new Error('the streamer has not taken the row lock yet');
     });
+    expect(refusal).toMatchInlineSnapshot(
+      `[PostgresError: could not obtain lock on row in relation "replicationState"]`,
+    );
     // The commit should release the lock.
     changes.push(['commit', {tag: 'commit'}, {watermark: '0d'}]);
 

@@ -4964,7 +4964,11 @@ test('We should send a deleteClient when a Zero instance is closed', async () =>
   vi.useRealTimers();
 
   await vi.waitFor(() => {
-    expect(mockSocket1.messages).toMatchInlineSnapshot(`[]`);
+    // A predicate, not a snapshot: inside a retry an inline snapshot is keyed to
+    // one source location, so the first attempt to see a message here would fail
+    // as "different snapshots cannot be called at the same location" rather than
+    // reporting the message it found.
+    expect(mockSocket1.messages).toEqual([]);
     expect(mockSocket2.messages.map(s => JSON.parse(s))).toEqual([
       ['deleteClients', {clientIDs: [z1.clientID]}],
     ]);
