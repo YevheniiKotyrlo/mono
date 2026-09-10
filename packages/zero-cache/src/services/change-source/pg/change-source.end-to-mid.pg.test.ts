@@ -32,7 +32,7 @@ const APP_ID = 'orez';
  * - Applying the changes to the replica with a MessageProcessor
  * - Verifying the resulting SQLite schema and/or data on the replica.
  */
-describe('change-source/pg/end-to-mid-test', {timeout: 30000}, () => {
+describe('change-source/pg/end-to-mid-test', () => {
   let lc: LogContext;
   let upstream: PostgresDB;
   let replicaDbFile: DbFile;
@@ -96,12 +96,12 @@ describe('change-source/pg/end-to-mid-test', {timeout: 30000}, () => {
     changes = stream.changes;
     downstream = drainToQueue(changes);
     replicator = createChangeProcessor(replica);
-  }, 30000);
+  });
 
   afterAll(async () => {
     changes?.cancel();
     await testDBs.drop(upstream);
-    replicaDbFile.delete();
+    await replicaDbFile.delete();
   });
 
   function drainToQueue(

@@ -23,9 +23,17 @@ export const MESSAGE_TYPES = {
   subscribe: 'subscribe',
   notify: 'notify',
   ready: 'ready',
-  backupWatermarkUpdate: 'backupWatermakUpdate',
+  backupWatermarkRequest: 'backupWatermarkRequest',
+  backupWatermarkResponse: 'backupWatermarkResponse',
   profile: 'profile',
   profileResponse: 'profileResponse',
+  // A request to shut down gracefully, for callers that cannot send a signal.
+  // Windows has no SIGTERM: Node does not deliver it to a process, and
+  // `child.kill('SIGTERM')` there terminates the child outright — so a parent
+  // killed that way never drains and never propagates to its own workers, which
+  // are left running. This carries the same intent over the channel the parent
+  // already has.
+  shutdown: 'shutdown',
 } as const;
 
 export type ProfileRequest = {

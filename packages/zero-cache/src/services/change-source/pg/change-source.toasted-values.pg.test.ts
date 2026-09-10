@@ -23,7 +23,19 @@ const SHARD_NUM = 1;
 // The purpose of this test is to empirically verify the behavior of PG
 // with respect to TOASTED values and publications. By default it is
 // skipped to avoid unnecessary load on the CI runner.
-describe.skip('toasted values', {timeout: 30000, retry: 3}, () => {
+//
+// Behind a flag rather than `describe.skip`, matching the other heavy opt-in lane
+// in this repo (`CHINOOK_SCALE`). Same default — off — but a characterisation
+// test that can only be run by editing the file is one nobody runs, and the
+// edit has to be undone before committing, which is its own way to lose work.
+const RUN = !!process.env.TOASTED_VALUES;
+
+// No suite-wide timeout: this is the heaviest lane in the project, so the last
+// thing it should do is grant itself LESS time than its siblings. The project's
+// budget already doubles in CI; a literal here would have capped it at the local
+// value on both. `retry` stays — TOASTED storage decisions are the thing under
+// characterisation, and Postgres makes some of them by size heuristics.
+describe.skipIf(!RUN)('toasted values', {retry: 3}, () => {
   let lc: LogContext;
   let upstream: PostgresDB;
   let upstreamURI: string;
@@ -52,9 +64,9 @@ describe.skip('toasted values', {timeout: 30000, retry: 3}, () => {
     return async () => {
       streams.forEach(s => s.changes.cancel());
       await testDBs.drop(upstream);
-      replicaDbFile.delete();
+      await replicaDbFile.delete();
     };
-  }, 30000);
+  });
 
   function drainToQueue(
     sub: Source<ChangeStreamMessage>,

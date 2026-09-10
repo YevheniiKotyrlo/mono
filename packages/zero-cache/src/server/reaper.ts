@@ -2,7 +2,11 @@ import {consoleLogSink, LogContext} from '@rocicorp/logger';
 import {must} from '../../../shared/src/must.ts';
 import {getNormalizedZeroConfig} from '../config/zero-config.ts';
 import {initEventSink} from '../observability/events.ts';
-import {exitAfter, runUntilKilled} from '../services/life-cycle.ts';
+import {
+  exitAfter,
+  runUntilKilled,
+  shutdownRequested,
+} from '../services/life-cycle.ts';
 import {ActiveUsersGauge} from '../services/view-syncer/active-users-gauge.ts';
 import {CVRPurger} from '../services/view-syncer/cvr-purger.ts';
 import {initViewSyncerSchema} from '../services/view-syncer/schema/init.ts';
@@ -47,6 +51,7 @@ export default async function runWorker(
   return runUntilKilled(
     lc,
     parent,
+    shutdownRequested(parent),
     new CVRPurger(lc, cvrDB, shard, {
       inactivityThresholdMs:
         cvr.garbageCollectionInactivityThresholdHours * MS_PER_HOUR,

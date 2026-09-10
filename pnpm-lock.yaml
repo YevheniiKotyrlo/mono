@@ -1231,6 +1231,9 @@ importers:
       otel:
         specifier: workspace:*
         version: link:../otel
+      oxc-parser:
+        specifier: ^0.129.0
+        version: 0.129.0
       oxfmt:
         specifier: ^0.65.0
         version: 0.65.0
