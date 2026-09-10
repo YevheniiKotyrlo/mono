@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -76,13 +77,12 @@ type FakeLitestream =
       code: number;
     }
   /**
-   * A restore that fails with a DIRECTORY at a staging path, emitting output.
-   * A directory is the one staged artifact a non-recursive `rm` refuses, so this
-   * reaches the error path rather than the cleanup path.
+   * A restore that fails having written to stdout and stderr. Nothing is staged,
+   * so the failure the caller sees is the exit code itself rather than whatever
+   * the cleanup made of the leftovers.
    */
   | {
-      kind: 'restore-staging-directory';
-      suffix: string;
+      kind: 'restore-fails';
       stdout: string;
       stderr: string;
       code: number;
@@ -194,14 +194,11 @@ function fakeChild(
         close(behaviour.code, null);
         break;
       }
-      case 'restore-staging-directory': {
+      case 'restore-fails': {
         if (subcommand !== 'restore') {
           close(1, null);
           break;
         }
-        mkdirSync(stagingPath(must(args.at(-1)), behaviour.suffix), {
-          recursive: true,
-        });
         child.stdout?.write(`${behaviour.stdout}
 `);
         child.stderr?.write(`${behaviour.stderr}
@@ -226,15 +223,27 @@ function fakeChild(
  * Points the config at a `litestream` path that is never executed, and makes
  * `spawn` return a fake child driven by `behaviour`.
  */
+/** Every fake fixture directory, removed after the case that made it. */
+const fakeRoots: string[] = [];
+
+afterEach(() => {
+  for (const root of fakeRoots.splice(0)) {
+    rmSync(root, {recursive: true, force: true});
+  }
+});
+
 function configWithFakeLitestream(
   behaviour: FakeLitestream,
   replicaFile?: string,
   litestreamOverrides?: Record<string, unknown>,
 ): NormalizedZeroConfig {
-  // Paths only — nothing here is created or executed. The child is faked, so the
-  // executable is never resolved and a replica file is never opened; a real temp
-  // directory would just be created and left behind on every call.
-  const dir = join(tmpdir(), 'litestream-test-fake');
+  // The executable is never resolved and no replica is opened — the child is
+  // faked. The directory is real and unique per call all the same, because the
+  // staging behaviours above write into it: a shared path would carry a staged
+  // artifact from one case into the next, where it decides the outcome. Removed
+  // in the hook below.
+  const dir = mkdtempSync(join(tmpdir(), 'litestream-test-fake-'));
+  fakeRoots.push(dir);
   const executable = join(dir, 'fake-litestream');
   vi.mocked(childProcess.spawn).mockReset();
   vi.mocked(childProcess.spawn).mockImplementation(((
@@ -726,8 +735,7 @@ describe('litestream/commands restoreReplica', () => {
 
   test('includes captured output when restore fails', async () => {
     const {litestream, replica} = configWithFakeLitestream({
-      kind: 'restore-staging-directory',
-      suffix: '',
+      kind: 'restore-fails',
       stdout: 'restore stdout',
       stderr: 'restore stderr',
       code: 1,
@@ -748,6 +756,31 @@ describe('litestream/commands restoreReplica', () => {
     expect(String(error)).toContain('litestream exited with code 1');
     expect(String(error)).toContain('restore stdout');
     expect(String(error)).toContain('restore stderr');
+  });
+
+  test('reports a directory left at the staging path', async () => {
+    // The staged files a previous attempt left are removed before a restore, and
+    // a directory is the one thing a non-recursive `rm` refuses. That refusal is
+    // what the caller sees in place of the restore's own outcome, so it has to
+    // name the path and say what is wrong with it.
+    const {litestream, replica} = configWithFakeLitestream({kind: 'restore'});
+    mkdirSync(`${replica.file}.tmp`, {recursive: true});
+
+    const error = await tryRestore(
+      lc,
+      litestream,
+      replica.file,
+      {replicaVersion: '01', minWatermark: '01'},
+      'replication_manager',
+    ).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain('Refusing to delete');
+    expect(String(error)).toContain('it is a directory');
+    expect(String(error)).toContain(`${replica.file}.tmp`);
   });
 
   test('deletes an incompatible restored replica', async () => {
