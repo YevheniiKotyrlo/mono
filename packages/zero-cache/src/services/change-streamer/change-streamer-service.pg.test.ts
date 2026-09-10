@@ -3906,18 +3906,26 @@ describe('change-streamer/service', () => {
     // Polls the real change db (rather than a mock) since the pg change-log
     // side of the ack gating is driven by the actual Storer flushing to it.
     async function waitForChangeLog(watermark: string) {
-      // The runner's wait, not a hand-rolled one: a loop with its own ceiling
-      // states a budget nothing reviews, and this one was a tenth of what the
-      // project grants — so a loaded machine turned a slow flush into a failure
-      // naming the watermark rather than the load.
-      await vi.waitFor(async () => {
-        const rows = await sql`
-          SELECT 1 FROM "zoro_3/cdc"."changeLog" WHERE watermark = ${watermark}`;
-        expect(
-          rows.length,
-          `changeLog never reached watermark ${watermark}`,
-        ).toBeGreaterThan(0);
-      });
+      // The runner's wait, with its budget STATED rather than inherited. The
+      // loop this replaced was bounded by ITERATIONS -- 100 x (query + 10ms) --
+      // so its real budget grew with query latency, which is how it survived a
+      // loaded machine. `vi.waitFor` bounds WALL CLOCK and defaults to 1s, so
+      // taking that default would shrink the budget under exactly the load the
+      // wait exists for.
+      await vi.waitFor(
+        async () => {
+          const rows = await sql`
+            SELECT 1 FROM "zoro_3/cdc"."changeLog" WHERE watermark = ${watermark}`;
+          expect(
+            rows.length,
+            `changeLog never reached watermark ${watermark}`,
+          ).toBeGreaterThan(0);
+        },
+        // Generous against the flush itself, which is milliseconds when the
+        // machine is idle, and well inside the project's own case budget: the
+        // number is here to outlast load, not to measure it.
+        {timeout: 10_000},
+      );
     }
 
     const NO_ACK = Symbol('no-ack');
