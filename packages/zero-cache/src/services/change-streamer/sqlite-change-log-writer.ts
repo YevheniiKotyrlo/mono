@@ -452,12 +452,25 @@ export class SQLiteChangeLogWriter {
       e,
     );
     this.close();
+    // Before the delete, not after. `onDisabled` closes the catchup reader, which
+    // holds its own handle on this same file — and Windows refuses to unlink a file
+    // that is still open. Deleting first therefore fails, and the writer logs the
+    // refusal it caused. POSIX unlinks a file with open handles, which is why the
+    // order looks arbitrary there.
+    //
+    // Guarded, because moving it ahead of the delete would otherwise let a throwing
+    // callback skip the delete entirely and escape into the write path this is
+    // failing softly for. Both steps run, whatever either does.
+    try {
+      this.#opts.onDisabled?.();
+    } catch (disableError) {
+      this.#lc.error?.(`error disabling catchup for ${file}`, disableError);
+    }
     try {
       deleteChangeLogDB(this.#opts.replicaFile);
     } catch (deleteError) {
       this.#lc.error?.(`unable to delete ${file}`, deleteError);
     }
-    this.#opts.onDisabled?.();
   }
 }
 
