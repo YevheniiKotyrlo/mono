@@ -247,7 +247,14 @@ export class VfsWatermarkPoller {
         {local: this.#localWatermark, remote: this.#remoteWatermark},
       );
     }
-    this.#remotePoller?.kill('SIGTERM');
+    // A spawn that never started reports through 'error' and leaves the handle
+    // without a pid. Signalling one is not the no-op it is on POSIX, where the
+    // ESRCH is swallowed and `kill` just returns false: on Windows it throws
+    // EINVAL, out of a cleanup path that has no reason to fail. The pid is what
+    // separates a process to stop from a handle that never had one.
+    if (this.#remotePoller?.pid !== undefined) {
+      this.#remotePoller.kill('SIGTERM');
+    }
     this.#remotePoller = undefined;
     clearTimeout(this.#remotePollerBackoffTimer);
     this.#remotePollerBackoffTimer = undefined;

@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {PassThrough} from 'node:stream';
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
+import {must} from '../../../../shared/src/must.ts';
 import {Database} from '../../../../zqlite/src/db.ts';
 import {StatementRunner} from '../../db/statements.ts';
 import type {Source} from '../../types/streams.ts';
@@ -339,6 +340,38 @@ describe('change-streamer/vfs-watermark-poller', () => {
     poller.checkLocalWatermark();
     expect(child2.killed).toBe(true);
   });
+
+  // BEGIN pid-guard
+  test('stopping a spawn that never started does not signal it', () => {
+    setUp();
+    // A spawn that fails reports through 'error' and leaves the handle with no
+    // pid. Signalling one is not the no-op it is on POSIX, where the ESRCH is
+    // swallowed and `kill` returns false: on Windows it throws EINVAL, out of a
+    // cleanup path that has no reason to fail. So the throw is what this fake
+    // does, and the assertion is that it is never reached.
+    const kill = vi.fn<(signal?: NodeJS.Signals) => boolean>(() => {
+      throw Object.assign(new Error('kill EINVAL'), {code: 'EINVAL'});
+    });
+    const neverStarted = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      pid: undefined,
+      killed: false,
+      kill,
+    }) as unknown as childProcess.ChildProcess;
+    spawnMock.mockImplementationOnce(() => neverStarted);
+
+    makePoller(BLOCK, {remotePollIntervalMs: 250});
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    neverStarted.emit('error', new Error('spawn ENOENT'));
+
+    // Cleanup is what reaches the signal: 'error' leaves the handle tracked, so
+    // only 'close' clears it, and cancelling while it is still tracked is the
+    // path a spawn failure really takes.
+    must(source).cancel();
+
+    expect(kill).not.toHaveBeenCalled();
+  });
+  // END pid-guard
 
   test('an unexpected exit while still behind schedules a respawn', async () => {
     setUp();
