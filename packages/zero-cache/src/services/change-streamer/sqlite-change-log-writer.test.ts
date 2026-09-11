@@ -57,6 +57,9 @@ function setup(
   name: string,
   resumeWatermark = '02',
   shadowValidationPercent = 100,
+  // Called from within `onDisabled`, so a case can observe the state the callback
+  // runs in rather than only the state it leaves behind.
+  whenDisabled?: (file: DbFile) => void,
 ) {
   const sink = new TestLogSink();
   const lc = new LogContext('debug', undefined, sink);
@@ -69,7 +72,10 @@ function setup(
     replicaFile: file.path,
     identity: IDENTITY,
     onCommit: watermark => commits.push(watermark),
-    onDisabled: () => disabled++,
+    onDisabled: () => {
+      disabled++;
+      whenDisabled?.(file);
+    },
     onRebuilt: () => rebuilt++,
     now: () => 1_700_000_000_000,
     shadowValidationPercent,
@@ -181,6 +187,59 @@ describe('change-streamer/sqlite-change-log-writer', () => {
   // §3.7: nothing in the log is not either already durable in the replica's
   // backup or re-derivable from the slot, so a write failure must cost catchup
   // reach rather than the shard's replication.
+  test('a throwing disable callback still leaves the file deleted', () => {
+    // `onDisabled` closes the catchup reader, and it runs before the delete so the
+    // reader's handle is gone first. That ordering must not make the delete
+    // conditional on the callback succeeding: this method exists to fail SOFTLY, so
+    // a throw from either step cannot skip the other or escape into the write path.
+    using fixture = setup('change-log-writer-disable-throws', '02', 100, () => {
+      throw new Error('closing catchup failed');
+    });
+    {
+      using other = openChangeLogDB(fixture.lc, fixture.file.path, {
+        readonly: false,
+      });
+      other.exec(`DROP TABLE "${CHANGE_LOG_STREAM_TABLE}"`);
+    }
+
+    expect(() => transaction(fixture.writer, '04')).not.toThrow();
+    expect(existsSync(changeLogFileName(fixture.file.path))).toBe(false);
+    expect(fixture.errors().join('\n')).toContain('error disabling catchup');
+    // And replication still continues, which is the whole point of failing soft.
+    expect(fixture.writer.enabled).toBe(false);
+    expect(() => transaction(fixture.writer, '06')).not.toThrow();
+  });
+
+  test('the disable callback runs before the file is deleted', () => {
+    // `onDisabled` closes the catchup reader, which holds its own handle on this
+    // file. Deleting first therefore asks the platform to unlink an open file:
+    // POSIX allows that, so the wrong order is invisible here, and Windows refuses
+    // it, so the file survives and the writer only logs the refusal. Asserting the
+    // ORDER rather than the outcome is what makes this catchable on either one.
+    let existedWhenDisabled: boolean | undefined;
+    using fixture = setup(
+      'change-log-writer-disable-order',
+      '02',
+      100,
+      file => {
+        existedWhenDisabled = existsSync(changeLogFileName(file.path));
+      },
+    );
+    {
+      using other = openChangeLogDB(fixture.lc, fixture.file.path, {
+        readonly: false,
+      });
+      other.exec(`DROP TABLE "${CHANGE_LOG_STREAM_TABLE}"`);
+    }
+
+    transaction(fixture.writer, '04');
+
+    expect(fixture.disabledCount()).toBe(1);
+    expect(existedWhenDisabled).toBe(true);
+    // And gone by the time the writer is done with it.
+    expect(existsSync(changeLogFileName(fixture.file.path))).toBe(false);
+  });
+
   test('a write error disables the writer, deletes the file, and keeps going', () => {
     using fixture = setup('change-log-writer-fail-soft');
     // Pulls the table out from under the writer's prepared statements, which is

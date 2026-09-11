@@ -2264,8 +2264,21 @@ describe('change-streamer/service', () => {
    * reader is left serving an unlinked inode while every new open sees nothing.
    */
   test('a mid-stream writer failure fails soft without stopping replication', async () => {
-    const readerClose = vi.spyOn(SQLiteChangeLogReader.prototype, 'close');
     const logFile = new DbFile('sqlite-change-log-fail-soft');
+    // Whether the log still existed each time the reader closed. That is
+    // the ORDER the fail-soft path turns on, and asserting the close and
+    // the deletion separately does not pin it: unlinking an open file is
+    // legal on POSIX, so a close that came second passes there and is
+    // refused on Windows -- where the file survives, and the next start
+    // reuses the log this path just reported deleting.
+    const logPresentAtClose: boolean[] = [];
+    const closeReader = SQLiteChangeLogReader.prototype.close;
+    const readerClose = vi
+      .spyOn(SQLiteChangeLogReader.prototype, 'close')
+      .mockImplementation(function (this: SQLiteChangeLogReader) {
+        logPresentAtClose.push(existsSync(changeLogFileName(logFile.path)));
+        closeReader.call(this);
+      });
     await restartWithInlineChangeLogWriter(logFile, {
       sqliteCatchup: {
         barrierPollIntervalMs: 10,
@@ -2324,9 +2337,12 @@ describe('change-streamer/service', () => {
         expect(await nextChange(sub)).toMatchObject({tag: 'commit'});
       }
 
-      // The writer disabled itself, deleted the file, and closed the reader.
+      // The writer disabled itself, deleted the file, and closed the
+      // reader -- in that order: the log was still there when the reader
+      // closed, so no handle outlived the unlink.
       expect(existsSync(changeLogFileName(logFile.path))).toBe(false);
       expect(readerClose).toHaveBeenCalled();
+      expect(logPresentAtClose).toEqual([true]);
       expect(
         logSink.messages
           .filter(([level]) => level === 'error')
