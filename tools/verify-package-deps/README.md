@@ -22,7 +22,18 @@ pnpm run verify
 
 # Check and automatically fix issues
 pnpm run verify:fix
+
+# Run this tool's own tests
+pnpm run test
 ```
+
+### Scanning somewhere else
+
+`--root <dir>` (or `--root=<dir>`) points the scan at another workspace, which is
+how the smoke tests run the real gate against a fixture containing a known
+violation. The directory must contain a `pnpm-workspace.yaml`, and an empty value
+is rejected rather than defaulted — otherwise the scan would silently resolve
+against the current working directory, and under `--fix` rewrite manifests there.
 
 ## What it does
 
@@ -34,6 +45,11 @@ This tool:
 4. Checks for version mismatches between actual and declared versions
 5. Identifies unused workspace dependencies
 6. Can automatically fix issues with the `--fix` flag
+
+It fails when any package root yields no TypeScript files. This tool signals success by
+finding nothing wrong, so an empty scan is indistinguishable from a clean
+workspace — a moved directory or a renamed source root would otherwise read as a
+pass.
 
 ## Ignoring circular dependencies
 
