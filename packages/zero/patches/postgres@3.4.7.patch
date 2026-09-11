@@ -1,5 +1,5 @@
 diff --git a/cf/src/connection.js b/cf/src/connection.js
-index 203af80..c560ff8 100644
+index 203af80d072552c32d5f748b8245c0052e2998bc..c560ff8699690b20ca8a5b8370686612e8717116 100644
 --- a/cf/src/connection.js
 +++ b/cf/src/connection.js
 @@ -106,6 +106,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
@@ -79,7 +79,7 @@ index 203af80..c560ff8 100644
  
    function NoticeResponse(x) {
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
-index 589d363..d1f603c 100644
+index 589d36382ca943c90679dbe22aaff06d252f6532..d1f603c7bcd1000d8b4baf4bc5485dbd7b2de433 100644
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
 @@ -104,6 +104,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
@@ -159,7 +159,7 @@ index 589d363..d1f603c 100644
  
    function NoticeResponse(x) {
 diff --git a/src/connection.js b/src/connection.js
-index c3f554a..e58d186 100644
+index c3f554aada71a79dc3c3cb489b722e9cf53961f3..e58d1862f30ea39f56d3d09aa5312ff14591b8bf 100644
 --- a/src/connection.js
 +++ b/src/connection.js
 @@ -104,6 +104,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
