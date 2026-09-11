@@ -1,5 +1,5 @@
 import type {LogContext} from '@rocicorp/logger';
-import {beforeEach, describe, expect} from 'vitest';
+import {beforeEach, describe, expect, vi} from 'vitest';
 import {createSilentLogContext} from '../../../../../shared/src/logging-test-utils.ts';
 import {must} from '../../../../../shared/src/must.ts';
 import {getConnectionURI, type PgTest, test} from '../../../test/db.ts';
@@ -99,10 +99,24 @@ describe('backfill-stream', () => {
     };
 
     return async () => {
-      expect(
-        await upstream /*sql*/ `
-          SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE 'backfill_test_slot_%'`,
-      ).toEqual([]);
+      // Waited for, not sampled. The stream's slot is TEMPORARY, so nothing here
+      // drops it — Postgres reaps it when the replication session ends, on the
+      // server's own schedule after the client closes. Reading the catalogue
+      // once therefore asks whether the server has got there yet, and the answer
+      // depends on machine load rather than on whether the stream leaked a slot.
+      //
+      // Distinct from the decommission suites, which assert absence straight
+      // after `pg_drop_replication_slot`: an explicit drop has already completed
+      // when it returns, so a single read is exact there.
+      //
+      // Waiting keeps a real leak legible: a slot that never goes away is still
+      // reported, by name, once the wait runs out.
+      await vi.waitFor(async () => {
+        expect(
+          await upstream /*sql*/ `
+            SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE 'backfill_test_slot_%'`,
+        ).toEqual([]);
+      });
 
       await testDBs.drop(upstream);
     };

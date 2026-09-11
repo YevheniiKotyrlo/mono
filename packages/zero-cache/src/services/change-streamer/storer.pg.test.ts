@@ -1,7 +1,7 @@
 import {PG_LOCK_NOT_AVAILABLE} from '@drdgvhbh/postgres-error-codes';
 import {resolver} from '@rocicorp/resolver';
 import postgres from 'postgres';
-import {afterEach, beforeEach, describe, expect} from 'vitest';
+import {afterEach, beforeEach, describe, expect, vi} from 'vitest';
 import {BigIntJSON} from '../../../../shared/src/bigint-json.ts';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
 import {Queue} from '../../../../shared/src/queue.ts';
@@ -858,21 +858,15 @@ describe('change-streamer/storer', () => {
       storer.store('07', ['begin', messages.begin(), {commitWatermark: '08'}]);
       storer.store('07', ['data', messages.insert('issues', {id: 'foo'})]);
 
-      // Wait for the storer to process 'begin' and start the SERIALIZABLE tx.
-      // The pipelined SELECT of replicationState should have executed by now.
-      await sleep(100);
-
-      // Simulate an ownership change attempt. This should fail.
-      let result;
-      try {
-        result =
-          await db`SELECT owner FROM "xero_5/cdc"."replicationState" FOR UPDATE NOWAIT`;
-      } catch (e) {
-        result = e;
-      }
-      expect(result).toMatchInlineSnapshot(
-        `[PostgresError: could not obtain lock on row in relation "replicationState"]`,
-      );
+      // The storer takes the row lock inside its own transaction, on its own
+      // schedule, so this waits for the refusal rather than sampling for it.
+      await vi.waitFor(async () => {
+        await expect(
+          db`SELECT owner FROM "xero_5/cdc"."replicationState" FOR UPDATE NOWAIT`,
+        ).rejects.toThrow(
+          'could not obtain lock on row in relation "replicationState"',
+        );
+      });
 
       // Now send commit.
       storer.store('08', ['commit', messages.commit(), {watermark: '08'}]);
@@ -1594,15 +1588,15 @@ describe('change-streamer/storer', () => {
       storer.store('09', ['begin', messages.begin(), {commitWatermark: '0a'}]);
       storer.store('0a', ['commit', messages.commit(), {watermark: '0a'}]);
 
-      // Wait for the storer to commit that transaction.
-      for (let i = 0; i < 10; i++) {
-        const result =
-          await db`SELECT * FROM "xero_5/cdc"."changeLog" WHERE watermark = '0a'`;
-        if (result.length) {
-          break;
-        }
-        await sleep(10);
-      }
+      // Wait for the storer to commit that transaction. A loop that falls
+      // through when the row never arrives runs the assertions below against an
+      // unsynced log and reports whichever of them notices first, which names
+      // neither this wait nor the commit it was waiting on.
+      await vi.waitFor(async () => {
+        expect(
+          await db`SELECT * FROM "xero_5/cdc"."changeLog" WHERE watermark = '0a'`,
+        ).not.toHaveLength(0);
+      });
 
       // Messages should catchup from after '03' and include '06'
       // from the pending transaction. '07' and '08' should not be included

@@ -3882,15 +3882,26 @@ describe('change-streamer/service', () => {
     // Polls the real change db (rather than a mock) since the pg change-log
     // side of the ack gating is driven by the actual Storer flushing to it.
     async function waitForChangeLog(watermark: string) {
-      for (let i = 0; i < 100; i++) {
-        const rows = await sql`
-          SELECT 1 FROM "zoro_3/cdc"."changeLog" WHERE watermark = ${watermark}`;
-        if (rows.length) {
-          return;
-        }
-        await sleep(10);
-      }
-      throw new Error(`changeLog never reached watermark ${watermark}`);
+      // The runner's wait, with its budget STATED rather than inherited. The
+      // loop this replaced was bounded by ITERATIONS -- 100 x (query + 10ms) --
+      // so its real budget grew with query latency, which is how it survived a
+      // loaded machine. `vi.waitFor` bounds WALL CLOCK and defaults to 1s, so
+      // taking that default would shrink the budget under exactly the load the
+      // wait exists for.
+      await vi.waitFor(
+        async () => {
+          const rows = await sql`
+            SELECT 1 FROM "zoro_3/cdc"."changeLog" WHERE watermark = ${watermark}`;
+          expect(
+            rows.length,
+            `changeLog never reached watermark ${watermark}`,
+          ).toBeGreaterThan(0);
+        },
+        // Generous against the flush itself, which is milliseconds when the
+        // machine is idle, and well inside the project's own case budget: the
+        // number is here to outlast load, not to measure it.
+        {timeout: 10_000},
+      );
     }
 
     const NO_ACK = Symbol('no-ack');
@@ -4737,18 +4748,27 @@ describe('change-streamer/service', () => {
     changes.push(['begin', {tag: 'begin'}, {commitWatermark: '0d'}]);
     changes.push(['data', messages.insert('foo', {id: 'hello'})]);
 
-    // Let the next transaction begin, acquiring the lock.
-    await sleep(500);
-
-    // Verify that the lock is held.
-    let result;
-    try {
-      result = await sql`
-        SELECT owner FROM "zoro_3/cdc"."replicationState" FOR UPDATE NOWAIT`;
-    } catch (e) {
-      result = e;
-    }
-    expect(result).toMatchInlineSnapshot(
+    // Waited for, not slept through. The lock is taken by the streamer's own
+    // transaction, on its schedule — so a fixed delay asks whether it has got
+    // there yet, and on a loaded machine the answer is no and the probe below
+    // succeeds where it is meant to be refused. `NOWAIT` makes the wait cheap:
+    // each attempt either takes the lock or fails immediately.
+    //
+    // The retry RETURNS the refusal instead of snapshotting it: an inline
+    // snapshot is keyed to its source location, so a location that sees the
+    // unlocked row on one attempt and the refusal on the next fails with
+    // "different snapshots cannot be called at the same location" whatever the
+    // timeout. A retried assertion has to be a predicate.
+    const refusal = await vi.waitFor(async () => {
+      try {
+        await sql`
+          SELECT owner FROM "zoro_3/cdc"."replicationState" FOR UPDATE NOWAIT`;
+      } catch (e) {
+        return e;
+      }
+      throw new Error('the streamer has not taken the row lock yet');
+    });
+    expect(refusal).toMatchInlineSnapshot(
       `[PostgresError: could not obtain lock on row in relation "replicationState"]`,
     );
     // The commit should release the lock.
