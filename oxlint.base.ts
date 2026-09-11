@@ -187,6 +187,14 @@ export const baseConfig = {
         include: ['packages/zero-cache/src/'],
       },
     ],
+
+    // A portability defect nothing else in this repo catches: a command that
+    // resolves to a `.CMD` shim cannot be spawned by bare name on Windows.
+    //
+    // `tool` in ignorePatterns matches at any depth, so the rule does not reach
+    // `packages/*/tool/**` or `packages/*/src/tool/**`; an override cannot narrow
+    // an ignore, so widening its reach means removing that pattern.
+    'zero/no-bare-shim-spawn': 'error',
   },
   overrides: [
     {

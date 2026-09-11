@@ -1954,6 +1954,9 @@ importers:
       oxfmt:
         specifier: ^0.65.0
         version: 0.65.0
+      scripts:
+        specifier: workspace:*
+        version: link:../../scripts
 
   tools/sqlite-io-yield-simulator:
     dependencies:
@@ -16936,7 +16939,7 @@ snapshots:
   '@jridgewell/trace-mapping@0.3.31':
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
-      '@jridgewell/sourcemap-codec': 1.6.0
+      '@jridgewell/sourcemap-codec': 1.5.5
 
   '@js-sdsl/ordered-map@4.4.2': {}
 
@@ -18735,7 +18738,7 @@ snapshots:
     dependencies:
       '@types/estree': 1.0.9
       estree-walker: 2.0.2
-      picomatch: 4.0.7
+      picomatch: 4.0.4
 
   '@rushstack/node-core-library@5.18.0(@types/node@22.19.19)':
     dependencies:
@@ -26321,7 +26324,7 @@ snapshots:
       lines-and-columns: 1.2.4
       mz: 2.7.0
       pirates: 4.0.7
-      tinyglobby: 0.2.17
+      tinyglobby: 0.2.16
       ts-interface-checker: 0.1.13
 
   supports-color@5.5.0:
