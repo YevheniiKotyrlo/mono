@@ -602,7 +602,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -652,7 +652,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -696,7 +696,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -742,7 +742,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -806,7 +806,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -857,7 +857,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -949,7 +949,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1056,7 +1056,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1133,7 +1133,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1197,7 +1197,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1352,7 +1352,7 @@ describe('change-streamer/service', () => {
       await streamerDone;
       replica.close();
       deleteChangeLogDB(replicaFile.path);
-      replicaFile.delete();
+      await replicaFile.delete();
     }
   });
 
@@ -1446,7 +1446,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1549,7 +1549,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1628,7 +1628,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1741,7 +1741,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -1826,7 +1826,7 @@ describe('change-streamer/service', () => {
         await streamer.stop();
         await streamerDone;
         deleteChangeLogDB(logFile.path);
-        logFile.delete();
+        await logFile.delete();
       },
     };
   }
@@ -2174,7 +2174,7 @@ describe('change-streamer/service', () => {
       catchupChangeLog.close();
       catchupReplica.close();
       deleteChangeLogDB(catchupReplicaFile.path);
-      catchupReplicaFile.delete();
+      await catchupReplicaFile.delete();
     }
   });
 
@@ -2253,7 +2253,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -2360,7 +2360,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       await streamerDone;
       deleteChangeLogDB(logFile.path);
-      logFile.delete();
+      await logFile.delete();
     }
   });
 
@@ -2500,7 +2500,7 @@ describe('change-streamer/service', () => {
       catchupChangeLog.close();
       catchupReplica.close();
       deleteChangeLogDB(catchupReplicaFile.path);
-      catchupReplicaFile.delete();
+      await catchupReplicaFile.delete();
     }
   });
 
@@ -2582,7 +2582,7 @@ describe('change-streamer/service', () => {
       catchupChangeLog?.close();
       catchupReplica.close();
       deleteChangeLogDB(catchupReplicaFile.path);
-      catchupReplicaFile.delete();
+      await catchupReplicaFile.delete();
     }
   });
 
@@ -2669,7 +2669,7 @@ describe('change-streamer/service', () => {
       catchupChangeLog.close();
       catchupReplica.close();
       deleteChangeLogDB(catchupReplicaFile.path);
-      catchupReplicaFile.delete();
+      await catchupReplicaFile.delete();
     }
   });
 
@@ -2729,7 +2729,7 @@ describe('change-streamer/service', () => {
       await streamer.stop();
       catchupReplica.close();
       deleteChangeLogDB(catchupReplicaFile.path);
-      catchupReplicaFile.delete();
+      await catchupReplicaFile.delete();
     }
   });
 

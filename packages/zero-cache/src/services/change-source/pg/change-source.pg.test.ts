@@ -98,7 +98,7 @@ describe('change-source/pg', {timeout: 30000, retry: 3}, () => {
       streams.forEach(s => s.changes.cancel());
       await source?.stop();
       await testDBs.drop(upstream);
-      replicaDbFile.delete();
+      await replicaDbFile.delete();
     };
   }, 30000);
 
@@ -1225,8 +1225,8 @@ describe('change-source/pg', {timeout: 30000, retry: 3}, () => {
 
     changes2.cancel();
     changes3.cancel();
-    replicaFile2.delete();
-    replicaFile3.delete();
+    await replicaFile2.delete();
+    await replicaFile3.delete();
   });
 
   test('AutoReset on changed publications', async () => {

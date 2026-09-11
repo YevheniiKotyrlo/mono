@@ -34,11 +34,11 @@ const IDENTITY: ChangeLogIdentity = {
 
 const files: DbFile[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   let file: DbFile | undefined;
   while ((file = files.pop())) {
     deleteChangeLogDB(file.path);
-    file.delete();
+    await file.delete();
   }
 });
 

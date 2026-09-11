@@ -102,7 +102,7 @@ describe('replicator/incremental-sync', () => {
     await worker?.stop();
     mainDb?.close();
     deleteChangeLogDB(dbFile.path);
-    dbFile?.delete();
+    await dbFile?.delete();
   });
 
   test('a commit is durable before it is acked', async () => {

@@ -54,10 +54,10 @@ const NO_CUTOFF = Number.MAX_SAFE_INTEGER;
 
 const files: DbFile[] = [];
 
-afterEach(() => {
+afterEach(async () => {
   for (const file of files.splice(0)) {
     deleteChangeLogDB(file.path);
-    file.delete();
+    await file.delete();
   }
 });
 
