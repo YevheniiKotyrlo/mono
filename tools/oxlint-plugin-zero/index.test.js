@@ -182,12 +182,9 @@ describe('isFileUrlPathnameAccess', () => {
     ).toBe(true);
   });
 
-  // The reach of this rule is one expression: it reads the `new URL(...)` that
-  // the `.pathname` is taken from, and does no dataflow. These cases record that
-  // boundary rather than leaving it to be discovered — each is a real Windows
-  // bug that this rule does not catch, and the reason it is acceptable is that
-  // the inline form is the one that appears in practice (all three sites fixed
-  // on this branch were inline).
+  // Reach is one expression: the `new URL(...)` the `.pathname` is read from.
+  // With no dataflow, a URL bound to a variable first, a template-literal
+  // specifier, and a `pathToFileURL` result all fall outside it.
   describe('out of reach — no dataflow', () => {
     test('a URL held in a variable first', () => {
       const node = {

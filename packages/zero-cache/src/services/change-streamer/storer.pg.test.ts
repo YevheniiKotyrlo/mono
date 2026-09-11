@@ -1,7 +1,7 @@
 import {PG_LOCK_NOT_AVAILABLE} from '@drdgvhbh/postgres-error-codes';
 import {resolver} from '@rocicorp/resolver';
 import postgres from 'postgres';
-import {afterEach, beforeEach, describe, expect} from 'vitest';
+import {afterEach, beforeEach, describe, expect, vi} from 'vitest';
 import {BigIntJSON} from '../../../../shared/src/bigint-json.ts';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
 import {Queue} from '../../../../shared/src/queue.ts';
@@ -1594,15 +1594,15 @@ describe('change-streamer/storer', () => {
       storer.store('09', ['begin', messages.begin(), {commitWatermark: '0a'}]);
       storer.store('0a', ['commit', messages.commit(), {watermark: '0a'}]);
 
-      // Wait for the storer to commit that transaction.
-      for (let i = 0; i < 10; i++) {
-        const result =
-          await db`SELECT * FROM "xero_5/cdc"."changeLog" WHERE watermark = '0a'`;
-        if (result.length) {
-          break;
-        }
-        await sleep(10);
-      }
+      // Wait for the storer to commit that transaction. A loop that falls
+      // through when the row never arrives runs the assertions below against an
+      // unsynced log and reports whichever of them notices first, which names
+      // neither this wait nor the commit it was waiting on.
+      await vi.waitFor(async () => {
+        expect(
+          await db`SELECT * FROM "xero_5/cdc"."changeLog" WHERE watermark = '0a'`,
+        ).not.toHaveLength(0);
+      });
 
       // Messages should catchup from after '03' and include '06'
       // from the pending transaction. '07' and '08' should not be included

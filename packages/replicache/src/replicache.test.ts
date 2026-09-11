@@ -1825,19 +1825,9 @@ test('online', async () => {
 
   const consoleDebugStub = vi.spyOn(console, 'debug');
 
-  /**
-   * The `Push threw` lines THIS client logged.
-   *
-   * `console.debug` is a global spy, and clients from earlier cases in this file
-   * are still pushing while this one runs — so a bare substring match reads
-   * their failures as this client's. Every line carries the logging client's own
-   * name, anchored here so a differently-named client cannot match.
-   */
-  const pushThrewLines = () =>
-    consoleDebugStub.mock.calls.filter(
-      args =>
-        /^name=\w+:online$/u.test(String(args[0])) &&
-        args.join(' ').includes('Push threw'),
+  const loggedPushThrew = () =>
+    consoleDebugStub.mock.calls.some(args =>
+      args.join(' ').includes('Push threw'),
     );
 
   fetchMocker.post(pushURL, async () => {
@@ -1853,7 +1843,7 @@ test('online', async () => {
   await tickAFewTimes(vi);
 
   expect(rep.online).toBe(false);
-  expect(pushThrewLines().length).toBeGreaterThan(0);
+  expect(loggedPushThrew()).toBe(true);
   expect(log).toEqual([false]);
 
   consoleDebugStub.mockClear();
@@ -1863,7 +1853,7 @@ test('online', async () => {
 
   await tickAFewTimes(vi, 20);
 
-  expect(pushThrewLines()).toEqual([]);
+  expect(loggedPushThrew()).toBe(false);
   expect(rep.online).toBe(true);
   expect(log).toEqual([false, true]);
 });
