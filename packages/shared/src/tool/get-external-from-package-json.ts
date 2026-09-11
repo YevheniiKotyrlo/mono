@@ -38,8 +38,11 @@ function getRecursiveExternals(
   includePeerDeps: boolean,
 ): Promise<string[]> {
   if (name === 'shared') {
+    // A filesystem path, because that is what `packageUp` resolves from. The
+    // `file:` branch above converts one for callers that pass a URL; passing
+    // `.pathname` here would pass neither, since it is a URL path.
     return getExternalFromPackageJSON(
-      new URL(import.meta.url).pathname,
+      fileURLToPath(import.meta.url),
       includePeerDeps,
     );
   }
