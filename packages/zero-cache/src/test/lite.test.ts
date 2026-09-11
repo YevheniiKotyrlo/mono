@@ -119,8 +119,9 @@ test('delete reports a file the OS still holds rather than failing the test', as
     held.mockRestore();
     warn.mockRestore();
   }
-  // The connection it handed out is closed either way, so nothing is left open.
-  expect(() => db.close()).not.toThrow();
+  // Closed, asserted the way the siblings assert it: `close()` on an
+  // already-closed handle does not throw either, so it cannot tell the two apart.
+  expect(() => db.prepare('SELECT 1')).toThrow(/not open/iu);
 });
 
 test('delete is idempotent and does not re-close stale connections', async () => {

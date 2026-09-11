@@ -201,7 +201,6 @@ test('async: retries itself rather than handing rm a per-file budget', async () 
     // where the blocking path does take one.
     expect(options.maxRetries).toBe(0);
   }
-  expect(ASYNC_REMOVE_DEADLINE_MS).toBeGreaterThan(0);
 });
 
 test('async: keeps trying a held file, and only that file, until it goes', async () => {

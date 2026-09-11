@@ -564,15 +564,10 @@ test('a budget this cannot evaluate is reported, not skipped', () => {
   // everywhere at any value, so a later `const TIMEOUT_MS = 5_000` in some other
   // file would inherit the exemption — the same illegibility-as-exemption this
   // refuses, one level up. Each entry is a RAISE or a documented detector.
-  const SANCTIONED = new Set([
-    // The crafted COPY detector's per-case budget, reached through the options
-    // object it is built into: a conditional expression, so there is no constant
-    // to resolve. Documented at its call site and in this file's header, and it
-    // is the shape that hides a budget from a reader descending only into an
-    // inline object — which is why it is reported and granted rather than
-    // skipped.
-    'packages/zero-cache/src/services/change-source/pg/initial-sync.pg.test.ts :: options',
-  ]);
+  // Empty, and armed: the assertions below still fail an unreadable declaration
+  // and a grant that stops suppressing one, so the first entry has to be argued
+  // for rather than inherited.
+  const SANCTIONED = new Set<string>([]);
 
   const unreadable: string[] = [];
   const suppressed = new Set<string>();

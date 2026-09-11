@@ -293,6 +293,30 @@ const WATERMARK_REGEX = /[0-9a-z]{4,}/;
 // of them cross ten seconds when the project's 21 files run in parallel — the pg
 // projects fork per file and run `availableParallelism() - 1` at once. A tight
 // timeout is a detector for the one case that uses it as one; see `timeoutMs`.
+/**
+ * Fails `operation` after `ms`, naming what did not finish.
+ *
+ * For an operation whose failure mode is that it never completes: the deadline
+ * is a DETECTOR, so it belongs on the operation, where the message can say what
+ * hung. Put on the test instead it reports "Test timed out", and it bounds
+ * everything else the case does under parallel load as well.
+ */
+async function withDeadline<T>(
+  operation: Promise<T>,
+  ms: number,
+  what: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} (${ms} ms)`)), ms);
+  });
+  try {
+    return await Promise.race([operation, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 describe('change-source/pg/initial-sync', () => {
   type Case = {
     name: string;
@@ -312,7 +336,7 @@ describe('change-source/pg/initial-sync', () => {
      * unresponsive Postgres, so it reports as a timeout by design and a short
      * deadline is what makes that quick instead of a wait.
      */
-    timeoutMs?: number;
+    deadlineMs?: number;
   };
 
   const cases: Case[] = [
@@ -2477,7 +2501,7 @@ describe('change-source/pg/initial-sync', () => {
       name: 'multiple copy commands per copy worker',
       // Detector, not a limit: the defect below stops the client reading, so the
       // sync never finishes and this is how long to wait before saying so.
-      timeoutMs: 10_000,
+      deadlineMs: 10_000,
       setupUpstreamQuery: Array.from({length: 10}, (_, i) =>
         [
           // The end-to-end repro for the COPY backpressure defect that
@@ -2662,11 +2686,7 @@ describe('change-source/pg/initial-sync', () => {
   });
 
   for (const c of cases) {
-    // Spread rather than `{timeout: c.timeoutMs}`: under exactOptionalPropertyTypes
-    // an explicit `undefined` is not the same as an absent option, and absent is
-    // what makes the case inherit the project's timeout.
-    const options = c.timeoutMs === undefined ? {} : {timeout: c.timeoutMs};
-    test(c.name, options, async ({skip}) => {
+    test(c.name, async ({skip}) => {
       if (pgVersion < (c.minPgVersion ?? 0)) {
         skip();
       }
@@ -2682,7 +2702,7 @@ describe('change-source/pg/initial-sync', () => {
         const replica = new Database(lc, ':memory:');
         initLiteDB(replica, c.setupReplicaQuery);
 
-        await initialSync(
+        const sync = initialSync(
           lc,
           {
             appID: APP_ID,
@@ -2694,6 +2714,13 @@ describe('change-source/pg/initial-sync', () => {
           {tableCopyWorkers: 3, replicationSlotFailover: true},
           TEST_CONTEXT,
         );
+        await (c.deadlineMs === undefined
+          ? sync
+          : withDeadline(
+              sync,
+              c.deadlineMs,
+              `${c.name}: initial sync never finished`,
+            ));
 
         const config = await upstream.unsafe(
           `SELECT * FROM "${APP_ID}_${SHARD_NUM}"."shardConfig"`,

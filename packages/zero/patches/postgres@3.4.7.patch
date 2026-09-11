@@ -1,5 +1,5 @@
 diff --git a/cf/src/connection.js b/cf/src/connection.js
-index 203af80d072552c32d5f748b8245c0052e2998bc..c560ff8699690b20ca8a5b8370686612e8717116 100644
+index 203af80d072552c32d5f748b8245c0052e2998bc..1e704dfd7352bf68128fbe8b86406b76311d2314 100644
 --- a/cf/src/connection.js
 +++ b/cf/src/connection.js
 @@ -106,6 +106,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
@@ -20,15 +20,16 @@ index 203af80d072552c32d5f748b8245c0052e2998bc..c560ff8699690b20ca8a5b8370686612
      if (q.cancelled)
        return
  
-@@ -382,6 +386,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -381,7 +385,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
  
    function errored(err) {
-     stream && (stream.destroy(err), stream = null)
-+    resumeAfterCopy()
+-    stream && (stream.destroy(err), stream = null)
++    stream && (stream.destroy(err), endCopyStream())
      query && queryError(query, err)
      initial && (queryError(initial, err), initial = null)
    }
-@@ -418,6 +423,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -418,6 +422,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        error(Errors.connection('CONNECTION_DESTROYED', options))
  
      clearImmediate(nextWriteTimer)
@@ -36,7 +37,7 @@ index 203af80d072552c32d5f748b8245c0052e2998bc..c560ff8699690b20ca8a5b8370686612
      if (socket) {
        socket.removeListener('data', data)
        socket.removeListener('connect', connected)
-@@ -431,6 +437,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -431,6 +436,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      remaining = 0
      incomings = null
      clearImmediate(nextWriteTimer)
@@ -45,7 +46,25 @@ index 203af80d072552c32d5f748b8245c0052e2998bc..c560ff8699690b20ca8a5b8370686612
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -886,12 +894,31 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -846,7 +853,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       destroy(error, callback) {
+         callback(error)
+         socket.write(b().f().str(error + b.N).end())
+-        stream = null
++        endCopyStream()
+       },
+       final(callback) {
+         socket.write(b().c().end())
+@@ -875,7 +882,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       destroy(error, callback) {
+         callback(error)
+         socket.write(b().f().str(error + b.N).end())
+-        stream = null
++        endCopyStream()
+       },
+       final(callback) {
+         socket.write(b().c().end())
+@@ -886,12 +893,39 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function CopyData(x) {
@@ -55,6 +74,14 @@ index 203af80d072552c32d5f748b8245c0052e2998bc..c560ff8699690b20ca8a5b8370686612
  
    function CopyDone() {
      stream && stream.push(null)
++    endCopyStream()
++  }
++
++  // Every way a copy ends routes through here. A stream cleared without resuming
++  // leaves the socket paused for the life of the connection, and there are four
++  // exits: EOF, an error, and the destroy override on each of the writable and
++  // duplex copies.
++  function endCopyStream() {
      stream = null
 +    resumeAfterCopy()
 +  }
@@ -79,7 +106,7 @@ index 203af80d072552c32d5f748b8245c0052e2998bc..c560ff8699690b20ca8a5b8370686612
  
    function NoticeResponse(x) {
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
-index 589d36382ca943c90679dbe22aaff06d252f6532..d1f603c7bcd1000d8b4baf4bc5485dbd7b2de433 100644
+index 589d36382ca943c90679dbe22aaff06d252f6532..fbc0246a8a6146ff43bc85c718e46f1f1d13b34a 100644
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
 @@ -104,6 +104,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
@@ -100,15 +127,16 @@ index 589d36382ca943c90679dbe22aaff06d252f6532..d1f603c7bcd1000d8b4baf4bc5485dbd
      if (q.cancelled)
        return
  
-@@ -380,6 +384,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -379,7 +383,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
  
    function errored(err) {
-     stream && (stream.destroy(err), stream = null)
-+    resumeAfterCopy()
+-    stream && (stream.destroy(err), stream = null)
++    stream && (stream.destroy(err), endCopyStream())
      query && queryError(query, err)
      initial && (queryError(initial, err), initial = null)
    }
-@@ -416,6 +421,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -416,6 +420,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        error(Errors.connection('CONNECTION_DESTROYED', options))
  
      clearImmediate(nextWriteTimer)
@@ -116,7 +144,7 @@ index 589d36382ca943c90679dbe22aaff06d252f6532..d1f603c7bcd1000d8b4baf4bc5485dbd
      if (socket) {
        socket.removeListener('data', data)
        socket.removeListener('connect', connected)
-@@ -429,6 +435,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -429,6 +434,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      remaining = 0
      incomings = null
      clearImmediate(nextWriteTimer)
@@ -125,7 +153,25 @@ index 589d36382ca943c90679dbe22aaff06d252f6532..d1f603c7bcd1000d8b4baf4bc5485dbd
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -884,12 +892,31 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -844,7 +851,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       destroy(error, callback) {
+         callback(error)
+         socket.write(b().f().str(error + b.N).end())
+-        stream = null
++        endCopyStream()
+       },
+       final(callback) {
+         socket.write(b().c().end())
+@@ -873,7 +880,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       destroy(error, callback) {
+         callback(error)
+         socket.write(b().f().str(error + b.N).end())
+-        stream = null
++        endCopyStream()
+       },
+       final(callback) {
+         socket.write(b().c().end())
+@@ -884,12 +891,39 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function CopyData(x) {
@@ -135,6 +181,14 @@ index 589d36382ca943c90679dbe22aaff06d252f6532..d1f603c7bcd1000d8b4baf4bc5485dbd
  
    function CopyDone() {
      stream && stream.push(null)
++    endCopyStream()
++  }
++
++  // Every way a copy ends routes through here. A stream cleared without resuming
++  // leaves the socket paused for the life of the connection, and there are four
++  // exits: EOF, an error, and the destroy override on each of the writable and
++  // duplex copies.
++  function endCopyStream() {
      stream = null
 +    resumeAfterCopy()
 +  }
@@ -159,7 +213,7 @@ index 589d36382ca943c90679dbe22aaff06d252f6532..d1f603c7bcd1000d8b4baf4bc5485dbd
  
    function NoticeResponse(x) {
 diff --git a/src/connection.js b/src/connection.js
-index c3f554aada71a79dc3c3cb489b722e9cf53961f3..e58d1862f30ea39f56d3d09aa5312ff14591b8bf 100644
+index c3f554aada71a79dc3c3cb489b722e9cf53961f3..bfc1c913f273ccaf4e6ec661c7646d34cb3616f1 100644
 --- a/src/connection.js
 +++ b/src/connection.js
 @@ -104,6 +104,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
@@ -180,15 +234,16 @@ index c3f554aada71a79dc3c3cb489b722e9cf53961f3..e58d1862f30ea39f56d3d09aa5312ff1
      if (q.cancelled)
        return
  
-@@ -380,6 +384,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -379,7 +383,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+   }
  
    function errored(err) {
-     stream && (stream.destroy(err), stream = null)
-+    resumeAfterCopy()
+-    stream && (stream.destroy(err), stream = null)
++    stream && (stream.destroy(err), endCopyStream())
      query && queryError(query, err)
      initial && (queryError(initial, err), initial = null)
    }
-@@ -416,6 +421,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -416,6 +420,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
        error(Errors.connection('CONNECTION_DESTROYED', options))
  
      clearImmediate(nextWriteTimer)
@@ -196,7 +251,7 @@ index c3f554aada71a79dc3c3cb489b722e9cf53961f3..e58d1862f30ea39f56d3d09aa5312ff1
      if (socket) {
        socket.removeListener('data', data)
        socket.removeListener('connect', connected)
-@@ -429,6 +435,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -429,6 +434,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
      remaining = 0
      incomings = null
      clearImmediate(nextWriteTimer)
@@ -205,7 +260,25 @@ index c3f554aada71a79dc3c3cb489b722e9cf53961f3..e58d1862f30ea39f56d3d09aa5312ff1
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -884,12 +892,31 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+@@ -844,7 +851,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       destroy(error, callback) {
+         callback(error)
+         socket.write(b().f().str(error + b.N).end())
+-        stream = null
++        endCopyStream()
+       },
+       final(callback) {
+         socket.write(b().c().end())
+@@ -873,7 +880,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+       destroy(error, callback) {
+         callback(error)
+         socket.write(b().f().str(error + b.N).end())
+-        stream = null
++        endCopyStream()
+       },
+       final(callback) {
+         socket.write(b().c().end())
+@@ -884,12 +891,39 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
    }
  
    function CopyData(x) {
@@ -215,6 +288,14 @@ index c3f554aada71a79dc3c3cb489b722e9cf53961f3..e58d1862f30ea39f56d3d09aa5312ff1
  
    function CopyDone() {
      stream && stream.push(null)
++    endCopyStream()
++  }
++
++  // Every way a copy ends routes through here. A stream cleared without resuming
++  // leaves the socket paused for the life of the connection, and there are four
++  // exits: EOF, an error, and the destroy override on each of the writable and
++  // duplex copies.
++  function endCopyStream() {
      stream = null
 +    resumeAfterCopy()
 +  }

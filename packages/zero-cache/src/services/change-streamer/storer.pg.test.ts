@@ -858,21 +858,15 @@ describe('change-streamer/storer', () => {
       storer.store('07', ['begin', messages.begin(), {commitWatermark: '08'}]);
       storer.store('07', ['data', messages.insert('issues', {id: 'foo'})]);
 
-      // Wait for the storer to process 'begin' and start the SERIALIZABLE tx.
-      // The pipelined SELECT of replicationState should have executed by now.
-      await sleep(100);
-
-      // Simulate an ownership change attempt. This should fail.
-      let result;
-      try {
-        result =
-          await db`SELECT owner FROM "xero_5/cdc"."replicationState" FOR UPDATE NOWAIT`;
-      } catch (e) {
-        result = e;
-      }
-      expect(result).toMatchInlineSnapshot(
-        `[PostgresError: could not obtain lock on row in relation "replicationState"]`,
-      );
+      // The storer takes the row lock inside its own transaction, on its own
+      // schedule, so this waits for the refusal rather than sampling for it.
+      await vi.waitFor(async () => {
+        await expect(
+          db`SELECT owner FROM "xero_5/cdc"."replicationState" FOR UPDATE NOWAIT`,
+        ).rejects.toThrow(
+          'could not obtain lock on row in relation "replicationState"',
+        );
+      });
 
       // Now send commit.
       storer.store('08', ['commit', messages.commit(), {watermark: '08'}]);

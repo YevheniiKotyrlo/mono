@@ -3,7 +3,7 @@ import {spawn} from 'node:child_process';
 import {existsSync, readFileSync} from 'node:fs';
 import {chmod, copyFile, mkdir, readdir, readFile, rm} from 'node:fs/promises';
 import {builtinModules, createRequire} from 'node:module';
-import {basename, dirname, resolve} from 'node:path';
+import {basename, dirname, isAbsolute, relative, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parse} from 'oxc-parser';
 import {type InlineConfig, build as viteBuild} from 'vite';
@@ -381,8 +381,13 @@ function resolveTscEntrypoint(): string {
   // `resolve` discards the base for an absolute second argument, so a manifest
   // could otherwise name any file on disk and this would spawn it. npm normalizes
   // `bin` to stay inside the package; nothing here had.
+  // Compared as path SEGMENTS. A string prefix passes for `…/zero-sibling`
+  // against `…/zero`, which is the escape this exists to refuse; `isAbsolute`
+  // covers the Windows other-drive case, where `relative` returns an absolute
+  // path rather than a `..` prefix.
+  const inside = relative(packageDir, entrypoint);
   assert(
-    entrypoint.startsWith(packageDir),
+    inside.length > 0 && !inside.startsWith('..') && !isAbsolute(inside),
     `tsc bin in ${manifestPath} points outside its package: ${relativeEntrypoint}`,
   );
   return entrypoint;
