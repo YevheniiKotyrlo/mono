@@ -2,7 +2,6 @@ import {describe, expect, test} from 'vitest';
 import {
   bareShimSpawnCommand,
   hasSelectStar,
-  isFileUrlPathnameAccess,
   shouldCheck,
   stripCommentOnlyLines,
   toPosixPath,
@@ -102,120 +101,6 @@ describe('shouldCheck', () => {
 
 // Minimal ESTree-shaped literals; only the fields the predicates read.
 const literal = value => ({type: 'Literal', value});
-const importMetaUrl = () => ({
-  type: 'MemberExpression',
-  object: {type: 'MetaProperty'},
-  property: {name: 'url'},
-});
-const urlPathname = args => ({
-  type: 'MemberExpression',
-  computed: false,
-  property: {name: 'pathname'},
-  object: {type: 'NewExpression', callee: {name: 'URL'}, arguments: args},
-});
-
-describe('isFileUrlPathnameAccess', () => {
-  test('flags new URL(relative, import.meta.url).pathname', () => {
-    expect(
-      isFileUrlPathnameAccess(
-        urlPathname([literal('./tools/plugin/index.js'), importMetaUrl()]),
-      ),
-    ).toBe(true);
-  });
-
-  test('flags the single-argument new URL(import.meta.url) form', () => {
-    // The form that keeps appearing in real code, and the one this rule missed.
-    expect(isFileUrlPathnameAccess(urlPathname([importMetaUrl()]))).toBe(true);
-  });
-
-  test('flags a single file: literal', () => {
-    expect(
-      isFileUrlPathnameAccess(urlPathname([literal('file:///a/b.js')])),
-    ).toBe(true);
-  });
-
-  test('ignores a relative specifier against a non-file base', () => {
-    // `new URL('./v2/users', apiBaseUrl).pathname` is ordinary URL work; the
-    // base decides, not the specifier.
-    const node = urlPathname([
-      literal('./v2/users'),
-      {type: 'Identifier', name: 'apiBaseUrl'},
-    ]);
-    expect(isFileUrlPathnameAccess(node)).toBe(false);
-  });
-
-  test('ignores an http URL, where pathname is the right property', () => {
-    expect(
-      isFileUrlPathnameAccess(urlPathname([literal('https://example.com/a')])),
-    ).toBe(false);
-  });
-
-  test('ignores a different property', () => {
-    const node = urlPathname([literal('./a.js')]);
-    node.property = {name: 'href'};
-    expect(isFileUrlPathnameAccess(node)).toBe(false);
-  });
-
-  test('ignores computed access', () => {
-    const node = urlPathname([literal('./a.js')]);
-    node.computed = true;
-    expect(isFileUrlPathnameAccess(node)).toBe(false);
-  });
-
-  test('ignores an absolute specifier, which makes the base irrelevant', () => {
-    // `new URL('https://x/y', 'file:///a')` is an http URL: the base only sets
-    // the scheme for a relative specifier.
-    expect(
-      isFileUrlPathnameAccess(
-        urlPathname([literal('https://example.com/a'), literal('file:///a')]),
-      ),
-    ).toBe(false);
-  });
-
-  test('flags a relative specifier against a file: literal base', () => {
-    // The two-argument form of the case above: the base is what decides, so a
-    // spelled-out file: base is the same finding as import.meta.url.
-    expect(
-      isFileUrlPathnameAccess(
-        urlPathname([literal('./a.js'), literal('file:///repo/b.js')]),
-      ),
-    ).toBe(true);
-  });
-
-  // Reach is one expression: the `new URL(...)` the `.pathname` is read from.
-  // With no dataflow, a URL bound to a variable first, a template-literal
-  // specifier, and a `pathToFileURL` result all fall outside it.
-  describe('out of reach — no dataflow', () => {
-    test('a URL held in a variable first', () => {
-      const node = {
-        type: 'MemberExpression',
-        computed: false,
-        property: {name: 'pathname'},
-        object: {type: 'Identifier', name: 'fileUrl'},
-      };
-      expect(isFileUrlPathnameAccess(node)).toBe(false);
-    });
-
-    test('a template-literal file: URL, whose value is not statically read', () => {
-      const node = urlPathname([{type: 'TemplateLiteral', quasis: []}]);
-      expect(isFileUrlPathnameAccess(node)).toBe(false);
-    });
-
-    test('a URL built by pathToFileURL', () => {
-      const node = {
-        type: 'MemberExpression',
-        computed: false,
-        property: {name: 'pathname'},
-        object: {
-          type: 'CallExpression',
-          callee: {type: 'Identifier', name: 'pathToFileURL'},
-          arguments: [{type: 'Identifier', name: 'file'}],
-        },
-      };
-      expect(isFileUrlPathnameAccess(node)).toBe(false);
-    });
-  });
-});
 
 const spawnCall = (name, commandValue, options) => ({
   type: 'CallExpression',

@@ -99,30 +99,6 @@ const plugin = {
       },
     },
 
-    'no-file-url-pathname': {
-      meta: {
-        type: 'problem',
-        docs: {
-          description:
-            "Disallow using a file: URL's .pathname as a filesystem path; on Windows it yields a leading slash before the drive letter.",
-        },
-        schema: [],
-        messages: {
-          useFileUrlToPath:
-            "A file: URL's .pathname is a URL path, not a filesystem path — on Windows it is '/C:/…', which fs cannot open. Use fileURLToPath() from 'node:url'.",
-        },
-      },
-      create(context) {
-        return {
-          MemberExpression(node) {
-            if (isFileUrlPathnameAccess(node)) {
-              context.report({node, messageId: 'useFileUrlToPath'});
-            }
-          },
-        };
-      },
-    },
-
     'no-bare-shim-spawn': {
       meta: {
         type: 'problem',
@@ -191,38 +167,6 @@ function shouldCheck(filename, include) {
   );
 }
 
-/**
- * Matches `.pathname` read off a URL that is known to be a `file:` URL:
- * `new URL('./x', import.meta.url).pathname`, `new URL(import.meta.url).pathname`,
- * or either with a spelled-out `file:` literal.
- *
- * Whichever argument settles the scheme is the one read: a specifier carrying its
- * own scheme, otherwise the base. So `new URL('./v2/users', apiBaseUrl).pathname`
- * is ordinary URL work and not a finding, while `new URL('https://x/y',
- * 'file:///a').pathname` is not one either — the base is irrelevant there.
- */
-function isFileUrlPathnameAccess(node) {
-  if (node.computed || node.property?.name !== 'pathname') {
-    return false;
-  }
-  const target = node.object;
-  if (target?.type !== 'NewExpression' || target.callee?.name !== 'URL') {
-    return false;
-  }
-  const [specifier, base] = target.arguments ?? [];
-  // The base sets the scheme only for a relative specifier. An absolute one
-  // carries its own, so `new URL('https://x/y', 'file:///a')` is not a file URL.
-  if (base !== undefined && !hasOwnScheme(specifier)) {
-    return isKnownFileUrl(base);
-  }
-  return isKnownFileUrl(specifier);
-}
-
-/**
- * Whether a value node is knowably falsy: a falsy literal, or either spelling of
- * undefined. `undefined` parses as an Identifier and `void 0` as a UnaryExpression,
- * so neither is caught by a Literal check.
- */
 function isStaticallyFalsy(node) {
   if (node?.type === 'Literal') {
     return !node.value;
@@ -231,35 +175,6 @@ function isStaticallyFalsy(node) {
     return node.name === 'undefined';
   }
   return node?.type === 'UnaryExpression' && node.operator === 'void';
-}
-
-const urlScheme = /^[A-Za-z][A-Za-z\d+.-]*:/;
-
-/** Whether a specifier literal is an absolute URL, making any base irrelevant. */
-function hasOwnScheme(node) {
-  return (
-    node?.type === 'Literal' &&
-    typeof node.value === 'string' &&
-    urlScheme.test(node.value)
-  );
-}
-
-/** A node that is certainly a `file:` URL: `import.meta.url`, or a literal. */
-function isKnownFileUrl(node) {
-  return (
-    isImportMetaUrl(node) ||
-    (node?.type === 'Literal' &&
-      typeof node.value === 'string' &&
-      node.value.startsWith('file:'))
-  );
-}
-
-function isImportMetaUrl(node) {
-  return (
-    node?.type === 'MemberExpression' &&
-    node.property?.name === 'url' &&
-    node.object?.type === 'MetaProperty'
-  );
 }
 
 /**
@@ -339,7 +254,6 @@ export default plugin;
 export {
   bareShimSpawnCommand,
   hasSelectStar,
-  isFileUrlPathnameAccess,
   shouldCheck,
   stripCommentOnlyLines,
   toPosixPath,

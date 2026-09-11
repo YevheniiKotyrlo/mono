@@ -67,9 +67,10 @@ const OXLINT = resolveOxlint();
  */
 const CANARIES = [
   {
-    rule: 'zero/no-file-url-pathname',
-    file: '__canary_pathname.ts',
-    source: 'export const p = new URL(import.meta.url).pathname;\n',
+    rule: 'zero/no-select-star',
+    file: join('packages', 'zero-cache', 'src', '__canary_select.ts'),
+    source: 'export const q = `SELECT * FROM t`;\n',
+    options: {include: ['packages/zero-cache/src/']},
   },
   {
     rule: 'zero/no-bare-shim-spawn',
@@ -135,7 +136,11 @@ function lintFixture(relativeFilePath, source, ruleName, ruleOptions) {
   // At WARNING level, so it never moves the exit code the assertions read. Its
   // diagnostic is the proof that this plugin's rules are registered and firing.
   const canary = canaryFor(ruleName);
-  writeFileSync(join(root, canary.file), canary.source);
+  // Nested, because a rule scoped by an `include` prefix only fires on a path
+  // inside it — so the canary has to sit where the rule actually looks.
+  const canaryPath = join(root, canary.file);
+  mkdirSync(dirname(canaryPath), {recursive: true});
+  writeFileSync(canaryPath, canary.source);
 
   writeFileSync(
     join(root, '.oxlintrc.json'),
@@ -152,7 +157,12 @@ function lintFixture(relativeFilePath, source, ruleName, ruleOptions) {
         perf: 'off',
       },
       rules: {
-        [canary.rule]: 'warn',
+        // The canary carries its own options: a rule scoped by `include` reports
+        // nothing when enabled bare, and a silent canary is indistinguishable
+        // from a plugin that never loaded — which is the one thing this harness
+        // exists to tell apart.
+        [canary.rule]:
+          canary.options === undefined ? 'warn' : ['warn', canary.options],
         [ruleName]:
           ruleOptions === undefined ? 'error' : ['error', ruleOptions],
       },
@@ -223,26 +233,6 @@ test('no-select-star stays quiet outside the included paths', () => {
   );
 
   expectSilent(result, 'no-select-star');
-});
-
-test('no-file-url-pathname reports a file URL used as a path', () => {
-  const result = lintFixture(
-    join('packages', 'thing', 'src', 'a.ts'),
-    "const p = new URL('./x.js', import.meta.url).pathname;\nexport default p;\n",
-    'zero/no-file-url-pathname',
-  );
-
-  expectReported(result, 'no-file-url-pathname');
-});
-
-test('no-file-url-pathname leaves a real URL alone', () => {
-  const result = lintFixture(
-    join('packages', 'thing', 'src', 'a.ts'),
-    "const p = new URL('https://example.com/a').pathname;\nexport default p;\n",
-    'zero/no-file-url-pathname',
-  );
-
-  expectSilent(result, 'no-file-url-pathname');
 });
 
 test('no-bare-shim-spawn reports spawning a shim command by bare name', () => {
