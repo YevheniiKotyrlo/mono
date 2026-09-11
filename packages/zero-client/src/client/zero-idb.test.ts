@@ -165,9 +165,45 @@ test('logged-out client uses a private storage sentinel for idb naming', async (
     kvStore: 'mem',
   });
 
-  expect(zero.idbName).toEqual(
-    `rep:zero-${LOGGED_OUT_STORAGE_USER_ID}-o92aeop6ci3f:7:53.32bj126fs2e3f`,
+  // The sentinel standing where a user id would is what this case is about, so
+  // the config hash beside it is re-derived from the inputs this case owns rather
+  // than wildcarded — the sibling case above derives it the same way. The two
+  // version segments stay loose, because they move for reasons that have nothing
+  // to do with logged-out naming; loose means "of this shape", not "unasserted",
+  // so the pattern is anchored at both ends and every segment has to be there.
+  const configHash = h64(
+    JSON.stringify({storageKey, mutateUrl: '', queryUrl: ''}),
+  ).toString(36);
+  const escape = (literal: string) =>
+    literal.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  expect(zero.idbName).toMatch(
+    new RegExp(
+      `^rep:zero-${escape(LOGGED_OUT_STORAGE_USER_ID)}-${escape(configHash)}` +
+        `:\\d+:\\d+\\.[0-9a-z]+$`,
+      'u',
+    ),
   );
 
   await zero.close();
+});
+
+test('signed-in client uses its user id rather than the sentinel', async () => {
+  // Without this, the assertion above would hold no matter who was signed in.
+  // Its own ids, because a name matching the logged-out case's would share a
+  // module-level MemStore — and that store's lock — with it.
+  const signedIn = new Zero({
+    userID: 'signed-in-user',
+    storageKey: 'signed-in-storage',
+    schema,
+    kvStore: 'mem',
+  });
+  try {
+    expect(signedIn.idbName).not.toContain(LOGGED_OUT_STORAGE_USER_ID);
+    // Anchored and in position, which a substring check is not. Base36 output
+    // contains neither `_` nor `-`, so neither name can be manufactured by the
+    // hash.
+    expect(signedIn.idbName).toMatch(/^rep:zero-signed-in-user-[a-z0-9]+:/u);
+  } finally {
+    await signedIn.close();
+  }
 });
