@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {PassThrough} from 'node:stream';
 import {afterEach, beforeEach, describe, expect, test, vi} from 'vitest';
 import {createSilentLogContext} from '../../../../shared/src/logging-test-utils.ts';
+import {must} from '../../../../shared/src/must.ts';
 import {Database} from '../../../../zqlite/src/db.ts';
 import {StatementRunner} from '../../db/statements.ts';
 import type {Source} from '../../types/streams.ts';
@@ -359,13 +360,14 @@ describe('change-streamer/vfs-watermark-poller', () => {
     }) as unknown as childProcess.ChildProcess;
     spawnMock.mockImplementationOnce(() => neverStarted);
 
-    const poller = makePoller(BLOCK, {remotePollIntervalMs: 250});
+    makePoller(BLOCK, {remotePollIntervalMs: 250});
     expect(spawnMock).toHaveBeenCalledTimes(1);
     neverStarted.emit('error', new Error('spawn ENOENT'));
 
-    // Catching up disables the remote poller, which is where the signal goes.
-    setLocalWatermark('00', 1);
-    poller.checkLocalWatermark();
+    // Cleanup is what reaches the signal: 'error' leaves the handle tracked, so
+    // only 'close' clears it, and cancelling while it is still tracked is the
+    // path a spawn failure really takes.
+    must(source).cancel();
 
     expect(kill).not.toHaveBeenCalled();
   });
