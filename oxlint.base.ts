@@ -191,9 +191,9 @@ export const baseConfig = {
     // every platform, so a checkout under a path holding a space or a non-ASCII
     // character — `~/Library/Mobile Documents/…` being the common macOS one —
     // yields a string `fs` cannot open there too. Only the extra `/C:/` drive
-    // prefix is Windows-specific. The shim defect is Windows-only, and there the
-    // rule keeps the class from being reintroduced rather than guarding a live
-    // defect elsewhere.
+    // prefix is Windows-specific. The shim defect IS Windows-only, and both rules
+    // land together with the call sites they flag: `npm pack` in the release
+    // script and the tool launches in rn-bench.
     //
     // `tool` in ignorePatterns matches at any depth, so neither rule reaches
     // `packages/*/tool/**` or `packages/*/src/tool/**`; an override cannot narrow

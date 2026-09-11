@@ -1,7 +1,7 @@
 import type {execFileSync} from 'node:child_process';
 import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {dirname, join} from 'node:path';
+import {join} from 'node:path';
 import {afterEach, expect, test} from 'vitest';
 import {
   assertStableZeroVersion,
@@ -10,7 +10,6 @@ import {
   createExec,
   npmZeroVersionExists,
   readReleaseMode,
-  resolveNodeShimCommand,
   writeGithubOutput,
   writeZeroPackageVersion,
   zeroTag,
@@ -179,52 +178,15 @@ function missingNpmVersionError() {
   return error;
 }
 
-// resolveNodeShimCommand: platform is injected rather than read from the host,
-// so the Windows behaviour is covered on a POSIX CI runner too. Without that
-// the npm-on-Windows defect is untestable anywhere it does not already occur.
-test('resolveNodeShimCommand leaves npm alone on posix', () => {
-  const resolved = resolveNodeShimCommand('npm', ['pack'], 'linux', () => true);
-  expect(resolved).toEqual({command: 'npm', args: ['pack']});
-});
-
-test('resolveNodeShimCommand runs npm under node on win32', () => {
-  const probed: string[] = [];
-  const resolved = resolveNodeShimCommand(
-    'npm',
-    ['pack', '--json'],
-    'win32',
-    path => {
-      probed.push(path);
-      return true;
-    },
-  );
-  expect(resolved.command).toBe(process.execPath);
-  expect(resolved.args.slice(1)).toEqual(['pack', '--json']);
-  // The full expected path, not a suffix match: the location is the whole point,
-  // and a suffix match would accept npm-cli.js resolved from anywhere.
-  const expectedCli = join(
-    dirname(process.execPath),
-    'node_modules',
-    'npm',
-    'bin',
-    'npm-cli.js',
-  );
-  expect(resolved.args[0]).toBe(expectedCli);
-  expect(probed).toEqual([expectedCli]);
-});
-
-test('resolveNodeShimCommand throws when npm is not beside node on win32', () => {
-  // Never fall back to the bare name: that is the invocation this exists to
-  // avoid, and its ENOENT names neither npm nor this decision.
-  expect(() =>
-    resolveNodeShimCommand('npm', ['pack'], 'win32', () => false),
-  ).toThrow(/npm-cli\.js/);
-});
+// The node path is injected along with the platform, so these assert the same
+// literal on every runner. `node-shim-command.test.ts` covers the resolver
+// itself, including the throw; what is left here is the chokepoint.
+const NODE = 'C:\\Program Files\\nodejs\\node.exe';
+const NPM_CLI = 'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js';
 
 test('the exec chokepoint routes through resolveNodeShimCommand', () => {
   // The command has to be one whose resolution actually differs, or the
-  // assertion holds whether the routing happened or not — which is why the
-  // platform is injected rather than read from the host.
+  // assertion holds whether the routing happened or not.
   const calls: {command: string; args: readonly string[]}[] = [];
   const exec = createExec({
     execFile: ((command: string, args: readonly string[]) => {
@@ -233,20 +195,12 @@ test('the exec chokepoint routes through resolveNodeShimCommand', () => {
     }) as unknown as typeof execFileSync,
     platform: 'win32',
     fileExists: () => true,
+    nodePath: NODE,
   });
 
   exec('npm', ['pack', '--json'], {});
 
-  const expectedCli = join(
-    dirname(process.execPath),
-    'node_modules',
-    'npm',
-    'bin',
-    'npm-cli.js',
-  );
-  expect(calls).toEqual([
-    {command: process.execPath, args: [expectedCli, 'pack', '--json']},
-  ]);
+  expect(calls).toEqual([{command: NODE, args: [NPM_CLI, 'pack', '--json']}]);
 });
 
 test('the exec chokepoint leaves a real executable alone', () => {
@@ -257,20 +211,9 @@ test('the exec chokepoint leaves a real executable alone', () => {
       return '';
     }) as unknown as typeof execFileSync,
     platform: 'win32',
+    nodePath: NODE,
   });
 
   exec('git', ['status'], {});
   expect(calls).toEqual([{command: 'git', args: ['status']}]);
 });
-
-test.each(['docker', 'git', 'tar'] as const)(
-  'resolveNodeShimCommand leaves %s untouched on win32 — it is a real executable',
-  command => {
-    expect(
-      resolveNodeShimCommand(command, ['--version'], 'win32', () => true),
-    ).toEqual({
-      command,
-      args: ['--version'],
-    });
-  },
-);

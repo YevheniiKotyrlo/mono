@@ -1,11 +1,6 @@
 import {execFileSync} from 'node:child_process';
 import {appendFileSync, existsSync, readFileSync, writeFileSync} from 'node:fs';
-import {
-  resolveNodeShimCommand,
-  type ResolvedCommand,
-} from './node-shim-command.ts';
-
-export {resolveNodeShimCommand, type ResolvedCommand};
+import {resolveNodeShimCommand} from './node-shim-command.ts';
 
 export const zeroPackageName = '@rocicorp/zero';
 export const zeroPackageJsonPath = 'packages/zero/package.json';
@@ -39,20 +34,23 @@ export type ReleaseBranch = 'main' | MaintenanceZeroBranch;
 /**
  * The one place that knows how to actually run a command.
  *
- * The three seams exist so a test can watch what was spawned. Observing the
- * routing needs all of them: with only `execFile` injected, the sole command
- * whose resolution differs is npm on Windows, so the assertion would have to
- * depend on the host it runs on — and passing through a command that needs no
- * rewriting looks identical whether the routing happened or not.
+ * Every input the resolution depends on is a seam: the platform, whether the
+ * entrypoint exists, where node lives, and what finally gets spawned. A test
+ * that supplies all four asserts the same string on every host; one that leaves
+ * `nodePath` to the runner has to compose the expected path itself, and composing
+ * it with the host's separators is what made these cases fail everywhere but
+ * Windows.
  */
 export function createExec({
   execFile = execFileSync,
   platform = process.platform,
   fileExists = existsSync,
+  nodePath = process.execPath,
 }: {
   execFile?: typeof execFileSync;
   platform?: NodeJS.Platform;
   fileExists?: (path: string) => boolean;
+  nodePath?: string;
 } = {}): Exec {
   return (command, args, options) => {
     const resolved = resolveNodeShimCommand(
@@ -60,6 +58,7 @@ export function createExec({
       args,
       platform,
       fileExists,
+      nodePath,
     );
     return String(
       execFile(resolved.command, resolved.args, {

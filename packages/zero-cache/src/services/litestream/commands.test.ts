@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  mkdirSync,
   writeFileSync,
 } from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -80,15 +81,19 @@ type FakeLitestream =
       code: number;
     }
   /**
-   * A restore that fails having written to stdout and stderr. Nothing is staged,
-   * so the failure the caller sees is the exit code itself rather than whatever
-   * the cleanup made of the leftovers.
+   * A restore that fails leaving a DIRECTORY at each staging path.
+   *
+   * The cleanup unlinks those paths without `recursive`, so it cannot remove a
+   * directory and throws — which is the cleanup-error-precedence case: the
+   * restore error is what the operator needs, and it has to survive a cleanup
+   * that failed on the way out.
    */
   | {
       kind: 'restore-fails';
       stdout: string;
       stderr: string;
       code: number;
+      stagedDirectorySuffixes: readonly string[];
     };
 
 /** Where litestream stages a restore before moving it into place. */
@@ -209,6 +214,10 @@ function fakeChild(
         if (subcommand !== 'restore') {
           close(1, null);
           break;
+        }
+        const destination = must(args.at(-1));
+        for (const suffix of behaviour.stagedDirectorySuffixes) {
+          mkdirSync(stagingPath(destination, suffix), {recursive: true});
         }
         child.stdout?.write(`${behaviour.stdout}\n`);
         child.stderr?.write(`${behaviour.stderr}\n`);
@@ -761,15 +770,20 @@ describe('litestream/commands restoreReplica', () => {
   });
 
   test('includes captured output when restore fails', async () => {
+    const sink = new TestLogSink();
+    const restoreLc = new LogContext('debug', undefined, sink);
     const {litestream, replica} = configWithFakeLitestream({
       kind: 'restore-fails',
       stdout: 'restore stdout',
       stderr: 'restore stderr',
       code: 1,
+      // A directory, which the cleanup cannot unlink: this case is also the one
+      // that proves a failing cleanup does not replace the error below.
+      stagedDirectorySuffixes: [''],
     });
 
     const error = await tryRestore(
-      lc,
+      restoreLc,
       litestream,
       replica.file,
       {replicaVersion: '01', minWatermark: '01'},
@@ -783,6 +797,20 @@ describe('litestream/commands restoreReplica', () => {
     expect(String(error)).toContain('litestream exited with code 1');
     expect(String(error)).toContain('restore stdout');
     expect(String(error)).toContain('restore stderr');
+    // The cleanup did fail, and said so rather than taking the error's place.
+    expect(
+      sink.messages.some(
+        ([level, , args]) =>
+          level === 'warn' &&
+          args.some(
+            a =>
+              typeof a === 'string' &&
+              a.includes(
+                'Unable to clean up Litestream restore temporary files',
+              ),
+          ),
+      ),
+    ).toBe(true);
   });
 
   test('deletes an incompatible restored replica', async () => {
