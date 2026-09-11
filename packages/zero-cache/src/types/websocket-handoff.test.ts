@@ -1,9 +1,11 @@
+import {once} from 'node:events';
 import {Server} from 'node:http';
+import type {AddressInfo} from 'node:net';
 import {resolver} from '@rocicorp/resolver';
 import {afterAll, afterEach, beforeAll, describe, expect, test} from 'vitest';
 import {WebSocket, WebSocketServer, type RawData} from 'ws';
 import {createSilentLogContext} from '../../../shared/src/logging-test-utils.ts';
-import {randInt} from '../../../shared/src/rand.ts';
+import {must} from '../../../shared/src/must.ts';
 import {inProcChannel} from './processes.ts';
 import {
   installWebSocketHandoff,
@@ -16,10 +18,14 @@ describe('types/websocket-handoff', () => {
   let wss: WebSocketServer;
   const lc = createSilentLogContext();
 
-  beforeAll(() => {
-    port = randInt(10000, 20000);
+  beforeAll(async () => {
+    // Bound rather than chosen, and awaited: a picked port collides with
+    // whatever already holds it, and `listen` is asynchronous, so reading the
+    // address before it resolves reads none.
     server = new Server();
-    server.listen(port);
+    server.listen(0);
+    await once(server, 'listening');
+    port = must(server.address() as AddressInfo | null).port;
     wss = new WebSocketServer({
       noServer: true,
       perMessageDeflate: true,

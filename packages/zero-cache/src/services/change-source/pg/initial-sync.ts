@@ -1,5 +1,5 @@
 import {mkdtemp, rm} from 'node:fs/promises';
-import {platform, tmpdir} from 'node:os';
+import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Writable, type Readable} from 'node:stream';
 import {pipeline} from 'node:stream/promises';
@@ -186,16 +186,8 @@ export async function initialSync(
       // Now that tables have been validated, kick off the copiers.
       const {tables, indexes} = published;
       const numTables = tables.length;
-      if (platform() === 'win32' && tableCopyWorkers < numTables) {
-        lc.warn?.(
-          `Increasing the number of copy workers from ${tableCopyWorkers} to ` +
-            `${numTables} to work around a Node/Postgres connection bug`,
-        );
-      }
-      const numWorkers =
-        platform() === 'win32'
-          ? numTables
-          : Math.min(tableCopyWorkers, numTables);
+      // Idle workers do nothing, so never ask for more than there are tables.
+      const numWorkers = Math.min(tableCopyWorkers, numTables);
 
       const copyPool = await connectPgClient(
         lc,
@@ -564,10 +556,9 @@ async function startTableCopyWorkers(
   if (parseInt(process.versions.node) < 22) {
     lc.warn?.(
       `\n\n\n` +
-        `Older versions of Node have a bug that results in an unresponsive\n` +
-        `Postgres connection after running certain combinations of COPY commands.\n` +
-        `If initial sync hangs, run zero-cache with Node v22+. This has the additional\n` +
-        `benefit of being consistent with the Node version run in the production container image.` +
+        `Node versions before 22 are not tested against this build. Run zero-cache\n` +
+        `with Node v22+, which is also the version the production container image\n` +
+        `runs.` +
         `\n\n\n`,
     );
   }
