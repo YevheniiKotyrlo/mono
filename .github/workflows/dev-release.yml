@@ -3,19 +3,20 @@ name: Dev Release Zero
 on:
   workflow_dispatch:
     inputs:
-      ref:
-        description: 'Git ref to release (branch name, PR ref, or commit SHA)'
+      branch:
+        description: 'Git branch to release'
         required: true
+        default: 'main'
         type: string
-      image_tag:
-        description: 'Docker image tag (optional; defaults to 0.0.0-pr-<sanitized-branch> or 0.0.0-dev-<sha8>)'
+      commit_sha:
+        description: 'Commit SHA (optional; defaults to HEAD of branch)'
         required: false
         type: string
 
 permissions: {}
 
 concurrency:
-  group: zero-dev-release-${{ inputs.ref }}
+  group: zero-dev-release-${{ inputs.branch }}-${{ inputs.commit_sha || 'head' }}
   cancel-in-progress: false
 
 jobs:
@@ -44,8 +45,8 @@ jobs:
       - name: Plan dev release
         id: plan
         env:
-          IMAGE_TAG_INPUT: ${{ inputs.image_tag }}
-          TARGET_REF: ${{ inputs.ref }}
+          BRANCH_INPUT: ${{ inputs.branch }}
+          COMMIT_SHA_INPUT: ${{ inputs.commit_sha }}
           WORKFLOW_REF_NAME: ${{ github.ref_name }}
         run: node scripts/src/dev-release-plan.ts
 
@@ -56,18 +57,23 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout target commit
+      - name: Checkout source repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.plan.outputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Fetch main branch
+        run: git fetch origin +refs/heads/main:refs/remotes/origin/main
+
       - name: Verify Signed Commit Authors
-        uses: rocicorp/.github/.github/actions/verify-signed-commit-authors@c49caa1498b8cf402992126969f2d7c8adc9ca4b # main
+        uses: rocicorp/.github/.github/actions/verify-signed-commit-authors@b0bc55c1abf942d3c04a4fbe911f7882a90526b0 # main
         with:
           enforce: 'true'
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          head-sha: ${{ needs.plan.outputs.source_sha }}
+          base-ref: origin/main
 
   archive-cloudzero-source:
     name: Archive source for Cloud Zero (staging)
