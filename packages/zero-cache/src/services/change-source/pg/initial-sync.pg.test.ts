@@ -3185,24 +3185,9 @@ describe('change-source/pg/initial-sync', () => {
             a.includes(' workers to copy '),
         ),
       );
-      const message = workersLog?.[2].find(
-        (a): a is string => typeof a === 'string' && a.startsWith('Started '),
-      );
-      const tables = Number(/copy (\d+) tables$/.exec(message ?? '')?.[1]);
-      expect(tables).toBeGreaterThan(1);
-
-      // Shadow sync asks for one copy worker and gets one, except on Windows,
-      // where each table gets its own to work around a Node/Postgres bug.
-      //
-      // Stated independently rather than derived from production's own helper:
-      // this message is built by that helper with these arguments, so computing
-      // the expectation from it would reproduce any bug on both sides of the
-      // comparison. What this asserts is that shadow sync reaches the rule at
-      // all; the rule's own arms belong to a unit test that can inject a
-      // platform, since only one arm is reachable on any given runner.
-      const expectedWorkers = process.platform === 'win32' ? tables : 1;
-      expect(message).toBe(
-        `Started ${expectedWorkers} workers to copy ${tables} tables`,
+      // Shadow sync asks for one copy worker and gets one, on every platform.
+      expect(workersLog?.[2][0]).toMatch(
+        /^Started 1 workers to copy [2-9]\d* tables$/,
       );
     });
 
