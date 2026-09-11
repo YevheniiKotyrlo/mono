@@ -287,7 +287,37 @@ const REPLICATED_ZERO_MUTATIONS_SPEC: LiteTableSpec = {
 
 const WATERMARK_REGEX = /[0-9a-z]{4,}/;
 
-describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
+// No suite-wide timeout: the project sets one, and capping the whole file below it
+// made healthy cases fail under load rather than fail honestly. Measured on a
+// 32-core Windows checkout, every case here runs in under a second alone, and three
+// of them cross ten seconds when the project's 21 files run in parallel — the pg
+// projects fork per file and run `availableParallelism() - 1` at once. A tight
+// timeout is a detector for the one case that uses it as one; see `timeoutMs`.
+/**
+ * Fails `operation` after `ms`, naming what did not finish.
+ *
+ * For an operation whose failure mode is that it never completes: the deadline
+ * is a DETECTOR, so it belongs on the operation, where the message can say what
+ * hung. Put on the test instead it reports "Test timed out", and it bounds
+ * everything else the case does under parallel load as well.
+ */
+async function withDeadline<T>(
+  operation: Promise<T>,
+  ms: number,
+  what: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} (${ms} ms)`)), ms);
+  });
+  try {
+    return await Promise.race([operation, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+describe('change-source/pg/initial-sync', () => {
   type Case = {
     name: string;
     setupUpstreamQuery?: string;
@@ -300,6 +330,13 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
     replicatedData: Record<string, object[]>;
     resultingPublications: string[];
     minPgVersion?: number;
+    /**
+     * A deadline this case uses to DETECT something, rather than a limit on how
+     * long it may take. Only the crafted COPY case has one: its failure mode is an
+     * unresponsive Postgres, so it reports as a timeout by design and a short
+     * deadline is what makes that quick instead of a wait.
+     */
+    deadlineMs?: number;
   };
 
   const cases: Case[] = [
@@ -2462,18 +2499,31 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
     },
     {
       name: 'multiple copy commands per copy worker',
+      // Detector, not a limit: the defect below stops the client reading, so the
+      // sync never finishes and this is how long to wait before saying so.
+      deadlineMs: 10_000,
       setupUpstreamQuery: Array.from({length: 10}, (_, i) =>
         [
-          // This is a carefully crafted test that hits a bug in Postgres in which
-          // the database stops responding to commands after a certain type/sequence
-          // of COPY streams.
+          // The end-to-end repro for the COPY backpressure defect that
+          // `packages/zero/patches/postgres@3.4.7.patch` fixes. Postgres is not
+          // the unresponsive side: the CLIENT stops reading. `CopyData` pauses
+          // the socket when the readable's buffer fills and relies on that
+          // readable's `read()` to resume it, which a finished copy never calls
+          // again — so a pause outstanding when the copy ends is permanent, and
+          // the next statement on that connection (here the post-COPY commands)
+          // is never answered.
           //
-          // The following conditions appear to be necessary to trigger the bug:
-          // - Sufficient table data streamed from the COPY (hence the 400 rows and `b` column)
-          // - A randomly ordered primary key column (the `a` column)
-          // - More tables than copy workers, to exercise post-COPY commands (hence the 10 tables).
+          // What the shape below arranges is a pause that is still outstanding at
+          // the end of a copy:
+          // - enough streamed data to fill the readable's buffer (400 rows and the
+          //   wide `b` column)
+          // - a randomly ordered primary key (`a`), so the rows do not compress
+          //   into fewer socket writes
+          // - more tables than copy workers, so each worker runs a statement after
+          //   its copy rather than ending with it (hence 10 tables)
           //
-          // A failure manifests as a "Test timed out" error as Postgres becomes unresponsive.
+          // A failure manifests as a "Test timed out" error, with the backend
+          // sitting in `idle in transaction` on `ClientRead`.
           `CREATE TABLE t${i} (a TEXT PRIMARY KEY, b TEXT, val INT);`,
           ...Array.from(
             {length: 400},
@@ -2652,7 +2702,7 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
         const replica = new Database(lc, ':memory:');
         initLiteDB(replica, c.setupReplicaQuery);
 
-        await initialSync(
+        const sync = initialSync(
           lc,
           {
             appID: APP_ID,
@@ -2664,6 +2714,13 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
           {tableCopyWorkers: 3, replicationSlotFailover: true},
           TEST_CONTEXT,
         );
+        await (c.deadlineMs === undefined
+          ? sync
+          : withDeadline(
+              sync,
+              c.deadlineMs,
+              `${c.name}: initial sync never finished`,
+            ));
 
         const config = await upstream.unsafe(
           `SELECT * FROM "${APP_ID}_${SHARD_NUM}"."shardConfig"`,
@@ -3155,6 +3212,7 @@ describe('change-source/pg/initial-sync', {timeout: 10000}, () => {
             a.includes(' workers to copy '),
         ),
       );
+      // Shadow sync asks for one copy worker and gets one, on every platform.
       expect(workersLog?.[2][0]).toMatch(
         /^Started 1 workers to copy [2-9]\d* tables$/,
       );

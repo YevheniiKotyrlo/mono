@@ -17,7 +17,15 @@ import {fromBigInt} from '../lsn.ts';
 import {PgoutputParser} from './pgoutput-parser.ts';
 import type {Message} from './pgoutput.types.ts';
 
-const DEFAULT_RETRIES_IF_REPLICATION_SLOT_ACTIVE = 5;
+/**
+ * How long to wait for Postgres to release a replication slot.
+ *
+ * Releasing one is not transactional, so this waits on the server's schedule
+ * rather than on a number of tries: six attempts 10ms apart is a 50ms budget for
+ * something that takes as long as it takes, and on a loaded machine that
+ * surfaces as `exceeded max attempts` rather than as a slow release.
+ */
+const DEFAULT_SLOT_RELEASE_TIMEOUT_MS = 10_000;
 
 export type StreamMessage = [
   lsn: bigint,
@@ -62,7 +70,7 @@ export async function subscribe(
   slot: string,
   publications: string[],
   lsn: bigint,
-  retriesIfReplicationSlotActive = DEFAULT_RETRIES_IF_REPLICATION_SLOT_ACTIVE,
+  slotReleaseTimeoutMs = DEFAULT_SLOT_RELEASE_TIMEOUT_MS,
   applicationName = 'zero-replicator',
   inboundTimeoutOverrideMs?: number | undefined,
 ): Promise<{
@@ -106,7 +114,7 @@ export async function subscribe(
     slot,
     publications,
     lsn,
-    retriesIfReplicationSlotActive + 1,
+    slotReleaseTimeoutMs,
   );
 
   let lastAckTime = Date.now();
@@ -326,9 +334,10 @@ async function startReplicationStream(
   slot: string,
   publications: string[],
   lsn: bigint,
-  maxAttempts: number,
+  timeoutMs: number,
 ) {
-  for (let i = 0; i < maxAttempts; i++) {
+  const deadline = Date.now() + timeoutMs;
+  for (let attempt = 1, backoffMs = 10; ; attempt++) {
     try {
       const stream = session
         .unsafe(
@@ -347,8 +356,17 @@ async function startReplicationStream(
           // The freeing up of the replication slot is not transactional;
           // sometimes it takes time for Postgres to consider the slot
           // inactive.
-          lc.warn?.(`attempt ${i + 1}: ${String(e)}`, e);
-          await sleep(10);
+          if (Date.now() >= deadline) {
+            throw new Error(
+              `replication slot ${slot} was still active after ${timeoutMs} ms`,
+              {cause: e},
+            );
+          }
+          lc.warn?.(`attempt ${attempt}: ${String(e)}`, e);
+          await sleep(backoffMs);
+          // Backs off rather than spinning: the wait is for another session to
+          // finish, and probing it every 10ms neither helps nor measures it.
+          backoffMs = Math.min(backoffMs * 2, 500);
           continue;
         }
         // error: This slot has been invalidated because it exceeded the maximum reserved size.
@@ -364,9 +382,6 @@ async function startReplicationStream(
       throw e;
     }
   }
-  throw new Error(
-    `exceeded max attempts (${maxAttempts}) to start the Postgres stream`,
-  );
 }
 
 /**

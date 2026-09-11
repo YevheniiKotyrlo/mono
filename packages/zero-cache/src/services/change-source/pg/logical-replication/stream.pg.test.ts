@@ -1,9 +1,8 @@
 import type {LogContext} from '@rocicorp/logger';
-import {afterEach, beforeEach, describe, expect, test} from 'vitest';
+import {vi, afterEach, beforeEach, describe, expect, test} from 'vitest';
 import {createSilentLogContext} from '../../../../../../shared/src/logging-test-utils.ts';
 import {must} from '../../../../../../shared/src/must.ts';
 import {Queue} from '../../../../../../shared/src/queue.ts';
-import {sleep} from '../../../../../../shared/src/sleep.ts';
 import {dropReplicationSlots, testDBs} from '../../../../test/db.ts';
 import type {PostgresDB} from '../../../../types/pg.ts';
 import type {Source} from '../../../../types/streams.ts';
@@ -11,7 +10,7 @@ import {fromBigInt, toBigInt, type LSN} from '../lsn.ts';
 import type {MessageCommit} from './pgoutput.types.ts';
 import {subscribe, type StreamMessage} from './stream.ts';
 
-describe('pg/logic-replication', {timeout: 30000}, () => {
+describe('pg/logic-replication', () => {
   let lc: LogContext;
   let db: PostgresDB;
 
@@ -91,23 +90,19 @@ describe('pg/logic-replication', {timeout: 30000}, () => {
   async function expectConfirmedFlushLSN(lsn: LSN | null) {
     const expected = fromBigInt(toBigInt(lsn ?? '0/0'));
 
-    // Since there's no reliable mechanism to wait for the ack to have
-    // been processed by postgres, add retries with sleeps in between.
-    const MAX_ATTEMPTS = 10;
-
-    for (let i = 0; i < MAX_ATTEMPTS; i++) {
-      const [{confirmed}] = await db<{confirmed: string}[]>`
+    // There is no reliable signal for postgres having processed the ack, so this
+    // waits for the flush to be visible rather than for a fixed number of polls.
+    // A poll budget is the same dependence on wall-clock time as a sleep, spelled
+    // longer: it runs out on a busy machine and asserts whatever it last read.
+    await vi.waitFor(
+      async () => {
+        const [{confirmed}] = await db<{confirmed: string}[]>`
         SELECT confirmed_flush_lsn as confirmed FROM pg_replication_slots
           WHERE slot_name = ${SLOT}`;
-      if (confirmed === expected) {
-        return;
-      }
-      if (i < MAX_ATTEMPTS - 1) {
-        await sleep(100);
-      } else {
         expect(confirmed).toBe(expected);
-      }
-    }
+      },
+      {interval: 100, timeout: 10_000},
+    );
   }
 
   test('logical replication messages', async () => {
@@ -301,20 +296,7 @@ describe('pg/logic-replication', {timeout: 30000}, () => {
     }
   });
 
-  // This fails with:
-  //
-  // FAIL   zero-cache/pg-17  src/services/change-source/pg/logical-replication/stream.pg.test.ts > pg/logic-replication > session resumption from confirmed flushes
-  // Error: exceeded max attempts (6) to start the Postgres stream
-  //  ❯ startReplicationStream src/services/change-source/pg/logical-replication/stream.ts:164:9
-  //     162|     }
-  //     163|   }
-  //     164|   throw new Error(
-  //        |         ^
-  //     165|     `exceeded max attempts (${maxAttempts}) to start the Postgres stre…
-  //     166|   );
-  //  ❯ subscribe src/services/change-source/pg/logical-replication/stream.ts:63:32
-  //  ❯ src/services/change-source/pg/logical-replication/stream.pg.test.ts:385:18
-  test.skip('session resumption from confirmed flushes', async () => {
+  test('session resumption from confirmed flushes', async () => {
     // Interleave commits from three different transactions.
     const queue1 = new Queue<true>();
     const queue2 = new Queue<true>();

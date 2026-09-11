@@ -92,6 +92,7 @@
     "mockttp": "^4.2.1",
     "nock": "^14.0.4",
     "otel": "workspace:*",
+    "oxc-parser": "^0.129.0",
     "oxfmt": "^0.65.0",
     "shared": "workspace:*",
     "testcontainers": "^10.28.0",

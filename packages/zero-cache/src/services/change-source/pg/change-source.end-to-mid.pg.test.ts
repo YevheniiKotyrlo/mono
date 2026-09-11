@@ -32,7 +32,7 @@ const APP_ID = 'orez';
  * - Applying the changes to the replica with a MessageProcessor
  * - Verifying the resulting SQLite schema and/or data on the replica.
  */
-describe('change-source/pg/end-to-mid-test', {timeout: 30000}, () => {
+describe('change-source/pg/end-to-mid-test', () => {
   let lc: LogContext;
   let upstream: PostgresDB;
   let replicaDbFile: DbFile;
@@ -96,7 +96,7 @@ describe('change-source/pg/end-to-mid-test', {timeout: 30000}, () => {
     changes = stream.changes;
     downstream = drainToQueue(changes);
     replicator = createChangeProcessor(replica);
-  }, 30000);
+  });
 
   afterAll(async () => {
     changes?.cancel();
@@ -2242,7 +2242,7 @@ describe('change-source/pg/end-to-mid-test', {timeout: 30000}, () => {
       }
       const indexes = new Map(listIndexes(replica).map(idx => [idx.name, idx]));
       for (const index of expectedIndexes) {
-        expect(indexes.has(index.name));
+        expect(indexes.has(index.name)).toBe(true);
         // Check the stringified indexes to verify field ordering.
         expect(JSON.stringify(indexes.get(index.name), null, 2)).toBe(
           JSON.stringify(index, null, 2),
