@@ -26,6 +26,13 @@ export const MESSAGE_TYPES = {
   backupWatermarkUpdate: 'backupWatermakUpdate',
   profile: 'profile',
   profileResponse: 'profileResponse',
+  // A request to shut down gracefully, for callers that cannot send a signal.
+  // Windows has no SIGTERM: Node does not deliver it to a process, and
+  // `child.kill('SIGTERM')` there terminates the child outright — so a parent
+  // killed that way never drains and never propagates to its own workers, which
+  // are left running. This carries the same intent over the channel the parent
+  // already has.
+  shutdown: 'shutdown',
 } as const;
 
 export type ProfileRequest = {
@@ -115,8 +122,30 @@ export interface Sender {
   kill(signal?: NodeJS.Signals): void;
 }
 
-export interface Subprocess extends Sender, EventEmitter {
+/**
+ * A child process this one supervises.
+ *
+ * `send` is optional because an IPC channel is: `fork` opens one, and a bare
+ * `spawn` of an external binary does not — there `send` is `undefined` and
+ * `connected` is `false`, so calling it throws a TypeError. Declaring it as
+ * always present would let a request to shut down be addressed to a child that
+ * cannot receive one, which the type should refuse rather than the runtime.
+ */
+export interface Subprocess extends EventEmitter {
   pid?: number | undefined;
+
+  kill(signal?: NodeJS.Signals): void;
+
+  /**
+   * Explicitly `| undefined`: this is what a channel-less child REPORTS, not
+   * merely a key it omits. `child_process.spawn` returns a handle whose `send`
+   * reads `undefined` and whose `connected` reads `false`, so a fake that models
+   * one has to be able to say that rather than leave the property out.
+   */
+  send?: Sender['send'] | undefined;
+
+  /** Whether an IPC channel is open, and therefore whether `send` exists. */
+  readonly connected?: boolean | undefined;
 }
 
 export interface Receiver extends EventEmitter {
@@ -141,7 +170,21 @@ export interface Receiver extends EventEmitter {
   ): this;
 }
 
-export interface Worker extends Subprocess, Receiver {}
+export interface Worker extends Subprocess, Receiver {
+  /**
+   * Always present, unlike {@link Subprocess.send}: a `Worker` is a fork, so it
+   * has an IPC channel by construction.
+   */
+  send: Sender['send'];
+
+  /**
+   * Required, unlike {@link Subprocess.connected}, and for the same reason
+   * `send` is: a fake that models a fork has to state whether its channel is
+   * open. Left optional, an in-process fake reads `undefined` here and silently
+   * takes the kill path that the ask exists to replace.
+   */
+  readonly connected: boolean;
+}
 
 /**
  * Adds the {@link Receiver.onMessageType()} and {@link Receiver.onceMessageType()}
@@ -173,7 +216,8 @@ function wrap<P extends EventEmitter>(proc: P): P & Receiver {
   }) as P & Receiver;
 }
 
-type Proc = Pick<ChildProcess, 'send' | 'kill' | 'pid'> & EventEmitter;
+type Proc = Pick<ChildProcess, 'send' | 'kill' | 'pid' | 'connected'> &
+  EventEmitter;
 
 /**
  * The parentWorker for forked processes, or `null` if the process was not forked.
@@ -314,10 +358,20 @@ export function inProcChannel(): [Worker, Worker] {
 
   return [
     wrap(
-      Object.assign(worker1, {send: sendTo(worker2), kill: kill(worker2), pid}),
+      Object.assign(worker1, {
+        send: sendTo(worker2),
+        kill: kill(worker2),
+        pid,
+        connected: true,
+      }),
     ),
     wrap(
-      Object.assign(worker2, {send: sendTo(worker1), kill: kill(worker1), pid}),
+      Object.assign(worker2, {
+        send: sendTo(worker1),
+        kill: kill(worker1),
+        pid,
+        connected: true,
+      }),
     ),
   ];
 }
@@ -358,5 +412,5 @@ export function broadcastWorker(workers: Worker[]): Worker {
     }
   };
 
-  return wrap(Object.assign(emitter, {send, kill, pid}));
+  return wrap(Object.assign(emitter, {send, kill, pid, connected: true}));
 }

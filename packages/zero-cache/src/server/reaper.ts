@@ -2,7 +2,11 @@ import {consoleLogSink, LogContext} from '@rocicorp/logger';
 import {must} from '../../../shared/src/must.ts';
 import {getNormalizedZeroConfig} from '../config/zero-config.ts';
 import {initEventSink} from '../observability/events.ts';
-import {exitAfter, runUntilKilled} from '../services/life-cycle.ts';
+import {
+  exitAfter,
+  runUntilKilled,
+  shutdownRequested,
+} from '../services/life-cycle.ts';
 import {ActiveUsersGauge} from '../services/view-syncer/active-users-gauge.ts';
 import {CVRPurger} from '../services/view-syncer/cvr-purger.ts';
 import {initViewSyncerSchema} from '../services/view-syncer/schema/init.ts';
@@ -28,6 +32,12 @@ export default async function runWorker(
   env: NodeJS.ProcessEnv,
   ...argv: string[]
 ): Promise<void> {
+  // Armed before anything that can block. A 'message' event reaches the
+  // listeners that exist at that instant and is not replayed for one added
+  // later, so a signal armed after an awaited startup discards any request that
+  // arrived during it.
+  const shutdown = shutdownRequested(parent);
+
   installProfileHandler(parent, 'reaper');
   const config = getNormalizedZeroConfig({env, argv});
 
@@ -47,6 +57,7 @@ export default async function runWorker(
   return runUntilKilled(
     lc,
     parent,
+    shutdown,
     new CVRPurger(lc, cvrDB, shard, {
       inactivityThresholdMs:
         cvr.garbageCollectionInactivityThresholdHours * MS_PER_HOUR,

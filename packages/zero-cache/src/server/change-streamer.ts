@@ -24,6 +24,7 @@ import {
   exitAfter,
   ProcessManager,
   runUntilKilled,
+  shutdownRequested,
 } from '../services/life-cycle.ts';
 import {startReplicaBackupProcess} from '../services/litestream/commands.ts';
 import {
@@ -59,6 +60,12 @@ export default async function runWorker(
   env: NodeJS.ProcessEnv,
   ...argv: string[]
 ): Promise<void> {
+  // Armed before anything that can block. A 'message' event reaches the
+  // listeners that exist at that instant and is not replayed for one added
+  // later, so a signal armed after an awaited startup discards any request that
+  // arrived during it.
+  const shutdown = shutdownRequested(parent);
+
   installProfileHandler(parent, 'change-streamer');
   const config = getNormalizedZeroConfig({env, argv});
   const {
@@ -416,7 +423,13 @@ export default async function runWorker(
   //       transitioned to RMv2, since changeStreamer startup will no longer
   //       disrupt an existing task.
   try {
-    await runUntilKilled(lc, parent, changeStreamerWebServer, backupMonitor);
+    await runUntilKilled(
+      lc,
+      parent,
+      shutdown,
+      changeStreamerWebServer,
+      backupMonitor,
+    );
   } catch (err) {
     processes.logErrorAndExit(err, 'change-streamer');
   } finally {

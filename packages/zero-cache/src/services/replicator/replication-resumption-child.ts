@@ -12,7 +12,7 @@ import type {
   SizedDownstream,
   SubscriberContext,
 } from '../change-streamer/change-streamer.ts';
-import {exitAfter, runUntilKilled} from '../life-cycle.ts';
+import {exitAfter, runUntilKilled, shutdownRequested} from '../life-cycle.ts';
 import type {CommitResult} from './change-processor.ts';
 import {ReplicatorService} from './replicator.ts';
 import {
@@ -236,6 +236,12 @@ export default async function runWorker(
   dbPath: string,
   failpointArg?: string,
 ): Promise<void> {
+  // Armed before anything that can block. A 'message' event reaches the
+  // listeners that exist at that instant and is not replayed for one added
+  // later, so a signal armed after an awaited startup discards any request that
+  // arrived during it.
+  const shutdown = shutdownRequested(parent);
+
   const failpoint = parseFailpoint(failpointArg);
   await setupReplica(lc, 'serving', {file: dbPath});
 
@@ -259,7 +265,7 @@ export default async function runWorker(
     null,
   );
 
-  const running = runUntilKilled(lc, parent, replicator);
+  const running = runUntilKilled(lc, parent, shutdown, replicator);
 
   for await (const _ of replicator.subscribe()) {
     send(parent, ['replication-resumption:ready', {pid}]);

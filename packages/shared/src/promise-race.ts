@@ -44,6 +44,32 @@ export async function promiseRace<
 }
 
 /**
+ * Awaits `promise`, giving up if `signal` aborts first.
+ *
+ * The sibling of {@link promiseOrAbort} for an abort that is an expected
+ * outcome rather than a failure: it resolves to `undefined` instead of
+ * rejecting, so a real error from `promise` is not swallowed along with the
+ * abort. It owns the race so that it can also own the listener, which it
+ * removes however the race ends.
+ */
+export async function raceAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T | undefined> {
+  if (signal.aborted) {
+    return undefined;
+  }
+  const {promise: aborted, resolve} = resolver<undefined>();
+  const handler = () => resolve(undefined);
+  signal.addEventListener('abort', handler, {once: true});
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    signal.removeEventListener('abort', handler);
+  }
+}
+
+/**
  * A memory-safe way to race a short-lived `Promise` with one or more
  * long-leved `AbortSignal`s. This works around the unsafe practice
  * of racing a short-lived promise (e.g. in a loop) with a long-lived one,

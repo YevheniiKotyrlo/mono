@@ -6,7 +6,11 @@ import {colorConsole} from '../../../../shared/src/logging.ts';
 import {PROTOCOL_VERSION} from '../../../../zero-protocol/src/protocol-version.ts';
 import {normalizeZeroConfig} from '../../config/normalize.ts';
 import {getServerVersion, getZeroConfig} from '../../config/zero-config.ts';
-import {ProcessManager, runUntilKilled} from '../../services/life-cycle.ts';
+import {
+  ProcessManager,
+  runUntilKilled,
+  shutdownRequested,
+} from '../../services/life-cycle.ts';
 import {childWorker, type Worker} from '../../types/processes.ts';
 import {createLogContext} from '../logging.ts';
 import {MAIN_URL} from '../worker-urls.ts';
@@ -40,6 +44,12 @@ export async function runWorker(
   parent: Worker | null,
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
+  // Armed before anything that can block. A 'message' event reaches the
+  // listeners that exist at that instant and is not replayed for one added
+  // later, so a signal armed after an awaited startup discards any request that
+  // arrived during it.
+  const shutdown = shutdownRequested(parent ?? process);
+
   // Note: Deprecation warnings are only emitted at this top-level parse;
   //       they are suppressed when parsed in subprocesses.
   const cfg = getZeroConfig({env, emitDeprecationWarnings: true});
@@ -90,6 +100,7 @@ export async function runWorker(
     await runUntilKilled(
       lc,
       parent ?? process,
+      shutdown,
       new ZeroDispatcher(
         config,
         lc,

@@ -2,7 +2,11 @@ import {consoleLogSink, LogContext} from '@rocicorp/logger';
 import {must} from '../../../shared/src/must.ts';
 import {getNormalizedZeroConfig} from '../config/zero-config.ts';
 import {initEventSink} from '../observability/events.ts';
-import {exitAfter, runUntilKilled} from '../services/life-cycle.ts';
+import {
+  exitAfter,
+  runUntilKilled,
+  shutdownRequested,
+} from '../services/life-cycle.ts';
 import {
   parentWorker,
   singleProcessMode,
@@ -21,6 +25,12 @@ function runWorker(
   env: NodeJS.ProcessEnv,
   ...args: string[]
 ): Promise<void> {
+  // Armed before anything that can block. A 'message' event reaches the
+  // listeners that exist at that instant and is not replayed for one added
+  // later, so a signal armed after an awaited startup discards any request that
+  // arrived during it.
+  const shutdown = shutdownRequested(parent);
+
   installProfileHandler(parent, 'mutator');
   const config = getNormalizedZeroConfig({env, argv: args.slice(1)});
   startOtelAuto(createLogContext(config, 'mutator', 0, false), 'mutator', 0);
@@ -28,7 +38,7 @@ function runWorker(
   initEventSink(lc, config);
 
   // TODO: create `PusherFactory`
-  return runUntilKilled(lc, parent, new Mutator());
+  return runUntilKilled(lc, parent, shutdown, new Mutator());
 }
 
 if (!singleProcessMode()) {

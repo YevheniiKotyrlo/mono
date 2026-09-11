@@ -44,6 +44,7 @@ vi.mock('../services/life-cycle.ts', async importOriginal => {
     runUntilKilled: (
       _lc: object,
       _parent: object,
+      _shutdown: AbortSignal,
       ...services: SingletonService[]
     ) => services.map(svc => svc.run()),
   };

@@ -1,7 +1,7 @@
 import {resolver} from '@rocicorp/resolver';
-import {describe, expect, expectTypeOf, test} from 'vitest';
+import {describe, expect, expectTypeOf, test, vi} from 'vitest';
 import {assert} from './asserts.ts';
-import {promiseOrAbort, promiseRace} from './promise-race.ts';
+import {promiseOrAbort, promiseRace, raceAbort} from './promise-race.ts';
 import {sleep} from './sleep.ts';
 
 /**
@@ -275,5 +275,51 @@ describe('promiseOrAbort', () => {
     const reason = new Error('final abort');
     controller.abort(reason);
     await expect(raced).rejects.toBe(reason);
+  });
+});
+
+describe('raceAbort', () => {
+  test('resolves with the promise when it wins', async () => {
+    const ac = new AbortController();
+    expect(await raceAbort(Promise.resolve('done'), ac.signal)).toBe('done');
+  });
+
+  test('resolves undefined when the signal wins, without rejecting', async () => {
+    const ac = new AbortController();
+    const race = raceAbort(new Promise<string>(() => {}), ac.signal);
+    ac.abort(new Error('this reason must not surface'));
+    expect(await race).toBe(undefined);
+  });
+
+  test('resolves undefined immediately for an already-aborted signal', async () => {
+    const ac = new AbortController();
+    ac.abort();
+    expect(await raceAbort(new Promise<string>(() => {}), ac.signal)).toBe(
+      undefined,
+    );
+  });
+
+  test('lets the promise reject rather than swallowing it', async () => {
+    const ac = new AbortController();
+    await expect(
+      raceAbort(Promise.reject(new Error('real failure')), ac.signal),
+    ).rejects.toThrow('real failure');
+  });
+
+  // The reason this helper owns the race: a signal outlives the wait, so a
+  // listener left behind by each completed call is the accumulation the
+  // `promiseOrAbort` block warns about.
+  test('removes its listener however the race ends', async () => {
+    const ac = new AbortController();
+    const added = vi.spyOn(ac.signal, 'addEventListener');
+    const removed = vi.spyOn(ac.signal, 'removeEventListener');
+
+    await raceAbort(Promise.resolve(1), ac.signal);
+    await raceAbort(Promise.reject(new Error('x')), ac.signal).catch(() => {});
+    const race = raceAbort(new Promise<number>(() => {}), ac.signal);
+    ac.abort();
+    await race;
+
+    expect(removed).toHaveBeenCalledTimes(added.mock.calls.length);
   });
 });
