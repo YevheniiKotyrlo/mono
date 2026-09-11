@@ -46,7 +46,7 @@ This tool:
 5. Identifies unused workspace dependencies
 6. Can automatically fix issues with the `--fix` flag
 
-It fails when it finds no TypeScript files at all. This tool signals success by
+It fails when any package root yields no TypeScript files. This tool signals success by
 finding nothing wrong, so an empty scan is indistinguishable from a clean
 workspace — a moved directory or a renamed source root would otherwise read as a
 pass.

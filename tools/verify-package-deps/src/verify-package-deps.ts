@@ -197,6 +197,20 @@ type AnalyzeResult = {
 async function analyzePackageDependencies(): Promise<AnalyzeResult> {
   console.log('Finding TypeScript files...');
 
+  // Checked before scanning, because the scan cannot tell an absent root from an
+  // empty one: both yield no files, and only one of them is a defect. A renamed
+  // root leaves the others full, so the total-file check below never sees it.
+  const missing = PACKAGE_ROOTS.filter(
+    dir => !existsSync(join(WORKSPACE_ROOT, dir)),
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `Package root(s) missing under ${WORKSPACE_ROOT}: ${missing.join(', ')}. ` +
+        `Nothing there would be verified, so a passing result would be ` +
+        `meaningless.`,
+    );
+  }
+
   const perRoot = await Promise.all(
     PACKAGE_ROOTS.map(dir => findTypeScriptFiles(join(WORKSPACE_ROOT, dir))),
   );
@@ -206,8 +220,8 @@ async function analyzePackageDependencies(): Promise<AnalyzeResult> {
 
   // Nothing to check is a failure, not a pass. This gate reports success by
   // saying nothing was wrong, so every way of ending up with no input — a moved
-  // tool directory, a renamed source root, an unreadable subtree — otherwise
-  // reads as a clean workspace. That is the shape the separator bug took.
+  // tool directory, a renamed source root — otherwise reads as a clean
+  // workspace. That is the shape the separator bug took.
   if (allFiles.length === 0) {
     throw new Error(
       `No TypeScript files found under ${WORKSPACE_ROOT}. Nothing was verified, ` +
@@ -219,12 +233,7 @@ async function analyzePackageDependencies(): Promise<AnalyzeResult> {
   const packageNameToPath = new Map<string, string>();
   for (const dir of PACKAGE_ROOTS) {
     const fullDir = join(WORKSPACE_ROOT, dir);
-    // Missing roots are skipped, the way the file scan already skips them: a
-    // workspace need not have all three, and dying here would refuse a --root
-    // that the scan itself accepted.
-    const entries = await readdir(fullDir, {withFileTypes: true}).catch(
-      (): [] => [],
-    );
+    const entries = await readdir(fullDir, {withFileTypes: true});
     for (const entry of entries) {
       if (entry.isDirectory()) {
         // A canonical `dir/name` identifier, not a filesystem path: it is
