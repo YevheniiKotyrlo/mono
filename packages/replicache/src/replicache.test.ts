@@ -1825,6 +1825,11 @@ test('online', async () => {
 
   const consoleDebugStub = vi.spyOn(console, 'debug');
 
+  const loggedPushThrew = () =>
+    consoleDebugStub.mock.calls.some(args =>
+      args.join(' ').includes('Push threw'),
+    );
+
   fetchMocker.post(pushURL, async () => {
     await sleep(10);
     return {throws: new Error('Simulate fetch error in push')};
@@ -1838,11 +1843,7 @@ test('online', async () => {
   await tickAFewTimes(vi);
 
   expect(rep.online).toBe(false);
-  expect(
-    consoleDebugStub.mock.calls.some(args =>
-      args.join('\n').includes('Push threw'),
-    ),
-  );
+  expect(loggedPushThrew()).toBe(true);
   expect(log).toEqual([false]);
 
   consoleDebugStub.mockClear();
@@ -1852,11 +1853,7 @@ test('online', async () => {
 
   await tickAFewTimes(vi, 20);
 
-  expect(
-    !consoleDebugStub.mock.calls.some(args =>
-      args.join('\n').includes('Push threw'),
-    ),
-  );
+  expect(loggedPushThrew()).toBe(false);
   expect(rep.online).toBe(true);
   expect(log).toEqual([false, true]);
 });

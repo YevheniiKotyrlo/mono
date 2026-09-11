@@ -287,8 +287,6 @@ describe('TDigest', () => {
     for (const x of normalData) {
       td.add(x, 1);
     }
-    expect(q1).toBeDefined;
-
     const q2 = td.quantile(0.9);
     expect(q2).toBe(q1);
   });

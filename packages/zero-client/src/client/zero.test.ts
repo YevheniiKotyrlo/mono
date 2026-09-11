@@ -3591,7 +3591,9 @@ describe('Disconnect on hide', () => {
         let timeTillHiddenDisconnect = Math.floor(
           DEFAULT_PING_TIMEOUT_MS * 6.3,
         );
-        expect(timeTillHiddenDisconnect > DEFAULT_PING_TIMEOUT_MS * 2);
+        expect(timeTillHiddenDisconnect).greaterThan(
+          DEFAULT_PING_TIMEOUT_MS * 2,
+        );
         changeVisibilityState('hidden');
         while (timeTillHiddenDisconnect > DEFAULT_PING_TIMEOUT_MS * 2) {
           await vi.advanceTimersByTimeAsync(DEFAULT_PING_TIMEOUT_MS);
@@ -4972,7 +4974,12 @@ test('We should send a deleteClient when a Zero instance is closed', async () =>
   vi.useRealTimers();
 
   await vi.waitFor(() => {
-    expect(mockSocket1.messages).toMatchInlineSnapshot(`[]`);
+    // `vi.waitFor` re-runs this body at one source location, and inline
+    // snapshots are keyed by location: once an attempt records `[]`, a later
+    // attempt carrying a message is rejected as a duplicate-location snapshot
+    // rather than reported as the message it found. `toEqual` has no location
+    // identity.
+    expect(mockSocket1.messages).toEqual([]);
     expect(mockSocket2.messages.map(s => JSON.parse(s))).toEqual([
       ['deleteClients', {clientIDs: [z1.clientID]}],
     ]);

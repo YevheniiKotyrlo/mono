@@ -12,7 +12,7 @@ test('PeekIterator', () => {
   expect(c.peek().value).toBe('c');
   expect(c.peek().value).toBe('c');
   expect(c.next().value).toBe('c');
-  expect(c.peek().done);
-  expect(c.peek().done);
-  expect(c.next().done);
+  expect(c.peek().done).toBe(true);
+  expect(c.peek().done).toBe(true);
+  expect(c.next().done).toBe(true);
 });
