@@ -38,6 +38,7 @@ import {
 import type {SingletonService} from '../services/service.ts';
 import {ConfigurationError} from '../types/configuration-error.ts';
 import {inProcChannel} from '../types/processes.ts';
+import type {Worker} from '../types/processes.ts';
 
 describe('shutdown', () => {
   const lc = createSilentLogContext();
@@ -211,6 +212,43 @@ describe('shutdown', () => {
     expect(events.filter(e => e === 'stop supporting')).toHaveLength(2);
   });
 
+  test('a manager with only supporting workers waits for all of them', async () => {
+    // The replication manager runs with no syncers, so every worker it registers
+    // is supporting and it never reaches the user-facing branch. Exiting on the
+    // first close abandons the rest — and one of them is the replicator, which
+    // still holds the replica file.
+    //
+    // Its own manager, because the shared one seeds user-facing workers and that
+    // is precisely what hides this.
+    const ownProc = new EventEmitter();
+    const ownProcesses = new ProcessManager(lc, ownProc);
+    const fake = (pid: number) =>
+      Object.assign(new EventEmitter(), {
+        kill: vi.fn<(signal?: NodeJS.Signals) => void>(),
+        send: vi.fn<Worker['send']>(),
+        pid,
+        connected: true,
+      });
+    const first = fake(5001);
+    const second = fake(5002);
+    ownProcesses.addSubprocess(first, 'supporting', 'first');
+    ownProcesses.addSubprocess(second, 'supporting', 'second');
+
+    let exitCode: number | undefined;
+    ownProc.on('exit', code => {
+      exitCode = code;
+    });
+
+    ownProc.emit('message', [...SHUTDOWN_MESSAGE]);
+
+    first.emit('close', 0);
+    await Promise.resolve();
+    expect(exitCode).toBe(undefined);
+
+    second.emit('close', 0);
+    await vi.waitFor(() => expect(exitCode).toBe(0));
+  });
+
   test('a supporting worker that never stops does not hold the process forever', async () => {
     // A wait without a bound is worse than giving up: a container runtime would
     // kill the process mid-shutdown for exceeding its grace period.
@@ -231,7 +269,9 @@ describe('shutdown', () => {
       // Neither supporting worker ever finishes draining.
 
       await vi.advanceTimersByTimeAsync(10_000);
-      expect(await exited.promise).toBe(0);
+      // Bounded, and honest about why it ended: these workers were killed, so
+      // this is not the code a completed drain reports.
+      expect(await exited.promise).toBe(INTENTIONAL_SHUTDOWN_ERROR_CODE);
     } finally {
       vi.useRealTimers();
     }
@@ -275,6 +315,42 @@ describe('shutdown', () => {
     expect(await exited.promise).toBe(0);
   });
 
+  test('a child with an IPC channel is asked rather than terminated', async () => {
+    // The complement of the case above, and the one that pins the change: a
+    // request is addressed by what the target can RECEIVE. Without it the suite
+    // asserts only the fallback, which is what it asserted before the change.
+    const kill = vi.fn<(signal?: NodeJS.Signals) => void>();
+    const send = vi.fn<Worker['send']>();
+    const forked = Object.assign(new EventEmitter(), {
+      kill,
+      send,
+      pid: 4244,
+      // What Node reports for a child forked WITH an ipc channel.
+      connected: true,
+    });
+    processes.addSubprocess(forked, 'supporting', 'forked-child');
+
+    const exited = resolver<number>();
+    proc.on('exit', code => exited.resolve(code));
+
+    proc.emit('message', [...SHUTDOWN_MESSAGE]);
+
+    await syncer1.draining.promise;
+    await syncer2.draining.promise;
+    syncer1.finishDrain.resolve();
+    syncer2.finishDrain.resolve();
+
+    await changeStreamer.draining.promise;
+    await replicator.draining.promise;
+    changeStreamer.finishDrain.resolve();
+    replicator.finishDrain.resolve();
+
+    expect(send).toHaveBeenCalledWith([...SHUTDOWN_MESSAGE]);
+    expect(kill).not.toHaveBeenCalled();
+    forked.emit('close', 0);
+    expect(await exited.promise).toBe(0);
+  });
+
   test('a worker that ignores the request is terminated past the deadline', async () => {
     // Warning and exiting leaves it running, still holding the replica — the
     // outcome the bounded wait exists to prevent. Terminating is the one thing
@@ -309,7 +385,9 @@ describe('shutdown', () => {
       await vi.advanceTimersByTimeAsync(10_000);
 
       expect(kill.mock.calls).toEqual([['SIGTERM'], ['SIGKILL']]);
-      expect(await exited.promise).toBe(0);
+      // Not 0: a drain that had to kill a worker did not complete, and the exit
+      // code is the only place that distinction survives.
+      expect(await exited.promise).toBe(INTENTIONAL_SHUTDOWN_ERROR_CODE);
     } finally {
       vi.useRealTimers();
     }
@@ -669,12 +747,11 @@ describe('shutdownRequested', () => {
   });
 
   test('a request arriving during startup still stops the services', async () => {
-    // The window between arming and having services to stop. It is the one the
-    // first version of this reopened: arming early consumes the queued IPC message,
-    // Node delivers it to that listener and to no other, so a listener installed
-    // alongside the services would never see it and the request would be recorded
-    // and then dropped. Which is why the signal is passed in rather than installed
-    // there — this asserts the request survives the gap.
+    // The window between arming and having services to stop. A 'message' event
+    // reaches only the listeners present when it arrives, so a listener installed
+    // alongside the services would never see a request that landed during
+    // startup. That is why the signal is armed first and passed in rather than
+    // installed there — this asserts the request survives the gap.
     const parent = new EventEmitter();
     const shutdown = shutdownRequested(parent);
 

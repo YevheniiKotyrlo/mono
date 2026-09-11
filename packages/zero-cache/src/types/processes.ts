@@ -176,6 +176,14 @@ export interface Worker extends Subprocess, Receiver {
    * has an IPC channel by construction.
    */
   send: Sender['send'];
+
+  /**
+   * Required, unlike {@link Subprocess.connected}, and for the same reason
+   * `send` is: a fake that models a fork has to state whether its channel is
+   * open. Left optional, an in-process fake reads `undefined` here and silently
+   * takes the kill path that the ask exists to replace.
+   */
+  readonly connected: boolean;
 }
 
 /**
@@ -208,7 +216,8 @@ function wrap<P extends EventEmitter>(proc: P): P & Receiver {
   }) as P & Receiver;
 }
 
-type Proc = Pick<ChildProcess, 'send' | 'kill' | 'pid'> & EventEmitter;
+type Proc = Pick<ChildProcess, 'send' | 'kill' | 'pid' | 'connected'> &
+  EventEmitter;
 
 /**
  * The parentWorker for forked processes, or `null` if the process was not forked.
@@ -349,10 +358,20 @@ export function inProcChannel(): [Worker, Worker] {
 
   return [
     wrap(
-      Object.assign(worker1, {send: sendTo(worker2), kill: kill(worker2), pid}),
+      Object.assign(worker1, {
+        send: sendTo(worker2),
+        kill: kill(worker2),
+        pid,
+        connected: true,
+      }),
     ),
     wrap(
-      Object.assign(worker2, {send: sendTo(worker1), kill: kill(worker1), pid}),
+      Object.assign(worker2, {
+        send: sendTo(worker1),
+        kill: kill(worker1),
+        pid,
+        connected: true,
+      }),
     ),
   ];
 }
@@ -393,5 +412,5 @@ export function broadcastWorker(workers: Worker[]): Worker {
     }
   };
 
-  return wrap(Object.assign(emitter, {send, kill, pid}));
+  return wrap(Object.assign(emitter, {send, kill, pid, connected: true}));
 }

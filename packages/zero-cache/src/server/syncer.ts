@@ -81,6 +81,12 @@ export default async function runWorker(
   env: NodeJS.ProcessEnv,
   ...args: string[]
 ): Promise<void> {
+  // Armed before anything that can block. A 'message' event reaches the
+  // listeners that exist at that instant and is not replayed for one added
+  // later, so a signal armed after an awaited startup discards any request that
+  // arrived during it.
+  const shutdown = shutdownRequested(parent);
+
   assert(args.length >= 2, `expected [fileMode, workerIndex, ...flags]`);
   const fileMode = v.parse(args[0], replicaFileModeSchema);
   const workerIndex = Number(args[1]);
@@ -289,7 +295,7 @@ export default async function runWorker(
 
   void dbWarmup.then(() => parent.send(['ready', {ready: true}]));
 
-  return runUntilKilled(lc, parent, shutdownRequested(parent), syncer);
+  return runUntilKilled(lc, parent, shutdown, syncer);
 }
 
 // fork()

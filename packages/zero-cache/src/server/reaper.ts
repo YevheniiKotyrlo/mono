@@ -32,6 +32,12 @@ export default async function runWorker(
   env: NodeJS.ProcessEnv,
   ...argv: string[]
 ): Promise<void> {
+  // Armed before anything that can block. A 'message' event reaches the
+  // listeners that exist at that instant and is not replayed for one added
+  // later, so a signal armed after an awaited startup discards any request that
+  // arrived during it.
+  const shutdown = shutdownRequested(parent);
+
   installProfileHandler(parent, 'reaper');
   const config = getNormalizedZeroConfig({env, argv});
 
@@ -51,7 +57,7 @@ export default async function runWorker(
   return runUntilKilled(
     lc,
     parent,
-    shutdownRequested(parent),
+    shutdown,
     new CVRPurger(lc, cvrDB, shard, {
       inactivityThresholdMs:
         cvr.garbageCollectionInactivityThresholdHours * MS_PER_HOUR,

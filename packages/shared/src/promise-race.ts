@@ -1,5 +1,4 @@
 import {resolver} from '@rocicorp/resolver';
-import {promiseVoid} from './resolved-promises.ts';
 
 type PromiseRaceResult<T extends Record<string, PromiseLike<unknown>>> = {
   [K in Extract<keyof T, string>]: {
@@ -45,6 +44,32 @@ export async function promiseRace<
 }
 
 /**
+ * Awaits `promise`, giving up if `signal` aborts first.
+ *
+ * The sibling of {@link promiseOrAbort} for an abort that is an expected
+ * outcome rather than a failure: it resolves to `undefined` instead of
+ * rejecting, so a real error from `promise` is not swallowed along with the
+ * abort. It owns the race so that it can also own the listener, which it
+ * removes however the race ends.
+ */
+export async function raceAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T | undefined> {
+  if (signal.aborted) {
+    return undefined;
+  }
+  const {promise: aborted, resolve} = resolver<undefined>();
+  const handler = () => resolve(undefined);
+  signal.addEventListener('abort', handler, {once: true});
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    signal.removeEventListener('abort', handler);
+  }
+}
+
+/**
  * A memory-safe way to race a short-lived `Promise` with one or more
  * long-leved `AbortSignal`s. This works around the unsafe practice
  * of racing a short-lived promise (e.g. in a loop) with a long-lived one,
@@ -57,23 +82,6 @@ export async function promiseRace<
  * {@link AbortController} and race the former against the signal of the
  * latter.
  */
-/**
- * Resolves when `signal` aborts, immediately if it already has.
- *
- * The sibling of {@link promiseOrAbort} for the case where the abort is an
- * expected outcome rather than a failure: racing against this ends the wait
- * without a rejection to catch, so a real error from the other side of the race
- * is not swallowed along with it.
- */
-export function whenAborted(signal: AbortSignal): Promise<void> {
-  if (signal.aborted) {
-    return promiseVoid;
-  }
-  const {promise, resolve} = resolver<void>();
-  signal.addEventListener('abort', () => resolve(), {once: true});
-  return promise;
-}
-
 export async function promiseOrAbort<T>(
   shortLived: Promise<T>,
   ...longLived: AbortSignal[]

@@ -4,7 +4,7 @@ import type {ObservableCallback} from '@opentelemetry/api';
 import {consoleLogSink, LogContext} from '@rocicorp/logger';
 import {assert} from '../../../shared/src/asserts.ts';
 import {must} from '../../../shared/src/must.ts';
-import {whenAborted} from '../../../shared/src/promise-race.ts';
+import {raceAbort} from '../../../shared/src/promise-race.ts';
 import {sleep} from '../../../shared/src/sleep.ts';
 import * as v from '../../../shared/src/valita.ts';
 import type {
@@ -194,15 +194,15 @@ export default async function runWorker(
   // once one is known — which never happens before `run()` — so waiting for it
   // unconditionally would wait forever, holding the replica open while the
   // manager's deadline elapses.
-  await Promise.race([
+  await raceAbort(
     (async () => {
       for await (const _ of replicator.subscribe()) {
         parent.send(['ready', {ready: true}]);
         break;
       }
     })(),
-    whenAborted(shutdown),
-  ]);
+    shutdown,
+  );
 
   return running;
 }

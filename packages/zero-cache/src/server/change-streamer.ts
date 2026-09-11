@@ -60,6 +60,12 @@ export default async function runWorker(
   env: NodeJS.ProcessEnv,
   ...argv: string[]
 ): Promise<void> {
+  // Armed before anything that can block. A 'message' event reaches the
+  // listeners that exist at that instant and is not replayed for one added
+  // later, so a signal armed after an awaited startup discards any request that
+  // arrived during it.
+  const shutdown = shutdownRequested(parent);
+
   installProfileHandler(parent, 'change-streamer');
   const config = getNormalizedZeroConfig({env, argv});
   const {
@@ -420,7 +426,7 @@ export default async function runWorker(
     await runUntilKilled(
       lc,
       parent,
-      shutdownRequested(parent),
+      shutdown,
       changeStreamerWebServer,
       backupMonitor,
     );

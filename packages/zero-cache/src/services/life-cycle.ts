@@ -4,6 +4,7 @@ import type {EventEmitter} from 'stream';
 import type {LogContext} from '@rocicorp/logger';
 import {resolver} from '@rocicorp/resolver';
 import {must} from '../../../shared/src/must.ts';
+import {sleep} from '../../../shared/src/sleep.ts';
 import {logLastChanceSQLiteCorruptionDiagnostics} from '../db/sqlite-corruption.ts';
 import {
   getOrCreateHistogram,
@@ -144,6 +145,15 @@ function workerStartupDuration() {
  */
 const WORKER_STOP_TIMEOUT_MS = 5_000;
 
+/**
+ * How long to wait for the closes a SIGKILL should cause, before exiting anyway.
+ *
+ * Short, because this is confirmation rather than patience: everything that was
+ * going to shut down gracefully has already had {@link WORKER_STOP_TIMEOUT_MS}
+ * to do it.
+ */
+const KILL_CONFIRM_TIMEOUT_MS = 1_000;
+
 // An internal error code used to indicate that a message has already been
 // logged at level ERRROR. When a process exits with this error code, the
 // parent process logs the exit at level WARN instead of ERROR.
@@ -173,6 +183,8 @@ export class ProcessManager {
    * for, so their exits do not each try to end the process.
    */
   #stopping = false;
+  /** Whether the wait escalated to SIGKILL, so nothing should signal again. */
+  #terminated = false;
 
   #runningState = new RunningState('process-manager');
   #drainStart = 0;
@@ -202,24 +214,27 @@ export class ProcessManager {
 
     // ... which will result in sending `SIGTERM` to the remaining workers.
     proc.on('exit', code => {
-      if (this.#stopping) {
-        // The drain already asked these workers and escalated past its deadline,
-        // so asking again on the way out would re-signal a worker that has
-        // already been terminated.
+      if (this.#terminated) {
+        // These workers were already SIGKILLed by the wait, so signalling again
+        // on the way out reaches a process that is gone. Gated on the escalation
+        // having happened rather than on `#stopping`, because a forceful exit
+        // arriving DURING the wait still has to terminate what is left — and not
+        // on the exit code, which cannot tell the wait's own forced exit from an
+        // external abort.
         return;
       }
-      this.#stop(
-        this.#all,
-        code === 0
-          ? {kind: 'ask'} // graceful, drained shutdown
-          : {
-              kind: 'terminate',
-              signal:
-                code === INTENTIONAL_SHUTDOWN_ERROR_CODE
-                  ? 'SIGQUIT' // intentional abort without drain
-                  : 'SIGABRT', // unintentional shutdown, alertable error
-            },
-      );
+      // Always a signal, never an ask: this runs from inside `process.exit()`,
+      // where there is no loop left to flush an IPC message. The ask belongs to
+      // the bounded wait, which is still running when it sends one.
+      this.#stop(this.#all, {
+        kind: 'terminate',
+        signal:
+          code === 0
+            ? 'SIGTERM' // graceful, drained shutdown
+            : code === INTENTIONAL_SHUTDOWN_ERROR_CODE
+              ? 'SIGQUIT' // intentional abort without drain
+              : 'SIGABRT', // unintentional shutdown, alertable error
+      });
     });
 
     // For other (catchable) kill signals, exit with a non-zero error code
@@ -298,23 +313,38 @@ export class ProcessManager {
     const deadline = new Promise<'timeout'>(resolve => {
       timer = setTimeout(resolve, WORKER_STOP_TIMEOUT_MS, 'timeout');
     });
-    void Promise.race([Promise.all(pending).then(() => 'stopped'), deadline])
-      .then(outcome => {
-        if (outcome === 'timeout') {
-          this.#lc.warn?.(
-            `terminating ${this.#all.size} worker(s) still running after ` +
-              `${WORKER_STOP_TIMEOUT_MS} ms`,
-          );
-          // The ask went unanswered, so escalate to the one thing that ends a
-          // process on every platform. Without this the wait expires and this
-          // process exits leaving those workers running — still holding the
-          // replica, which is the outcome the wait exists to prevent.
-          this.#stop(this.#all, {kind: 'terminate', signal: 'SIGKILL'});
+    void Promise.race([
+      Promise.all(pending).then(() => 'stopped' as const),
+      deadline,
+    ])
+      .then(async outcome => {
+        if (outcome === 'stopped') {
+          return code;
         }
+        this.#lc.warn?.(
+          `terminating ${this.#all.size} worker(s) still running after ` +
+            `${WORKER_STOP_TIMEOUT_MS} ms`,
+        );
+        // The ask went unanswered, so escalate to the one thing that ends a
+        // process on every platform. Without this the wait expires and this
+        // process exits leaving those workers running — still holding the
+        // replica, which is the outcome the wait exists to prevent.
+        this.#terminated = true;
+        this.#stop(this.#all, {kind: 'terminate', signal: 'SIGKILL'});
+        // A signal is asynchronous, so exiting in the same turn would assert
+        // nothing about whether it landed. Wait for the closes it should cause,
+        // bounded again so a worker that survives SIGKILL cannot hold the exit.
+        await Promise.race([
+          Promise.all(pending),
+          sleep(KILL_CONFIRM_TIMEOUT_MS),
+        ]);
+        // A drain that had to kill did not complete, so it does not report the
+        // code a completed one would.
+        return code === 0 ? INTENTIONAL_SHUTDOWN_ERROR_CODE : code;
       })
-      .finally(() => {
+      .then(exitCode => {
         clearTimeout(timer);
-        this.#exit(code);
+        this.#exit(exitCode);
       });
   }
 
@@ -449,6 +479,14 @@ export class ProcessManager {
         // one of them is the replicator and it still holds the replica file.
         return;
       }
+      if (this.#drainStart > 0 && this.#all.size > 0) {
+        // A manager whose workers are ALL supporting never reaches the
+        // user-facing branch below, so without this it exits on the first close
+        // and signals the rest from inside `process.exit()`. The replication
+        // manager is that shape — it runs with no syncers — and it is the one
+        // holding the backup replica and litestream.
+        return this.#exitWhenWorkersHaveStopped(code);
+      }
       return this.#exit(code);
     }
 
@@ -533,10 +571,10 @@ export class ProcessManager {
  * whose startup blocks would otherwise never reach a
  * listener: a view-syncer restoring its replica waits for the replication-manager
  * to publish a restorable backup, which this repo documents as taking many
- * minutes. A request arriving in that window is held by the IPC channel and
- * delivered once a listener appears — but nothing in the startup path has any
- * reason to finish, so the worker never reaches the listener that would honour
- * it. Breaking that wait is what a signal used to do; a worker that cannot be
+ * minutes. A `'message'` event reaches the listeners that exist when it arrives
+ * and is not replayed for one added later, so a request that lands in that
+ * window is read off the channel and discarded — and nothing in the startup path
+ * has any reason to finish, so the worker never honours it. Breaking that wait is what a signal used to do; a worker that cannot be
  * asked to stop while starting up is a worker the manager cannot stop at all,
  * and it exits leaving that worker holding the replica file.
  *
