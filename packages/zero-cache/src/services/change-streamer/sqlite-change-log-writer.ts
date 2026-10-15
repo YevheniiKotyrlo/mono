@@ -452,12 +452,20 @@ export class SQLiteChangeLogWriter {
       e,
     );
     this.close();
+    // Before the delete: `onDisabled` closes the catchup reader, which holds its
+    // own handle on this file, and Windows refuses to unlink an open file. Guarded,
+    // so a throwing callback can neither skip the delete nor escape into the write
+    // path this fails softly for.
+    try {
+      this.#opts.onDisabled?.();
+    } catch (disableError) {
+      this.#lc.error?.(`error disabling catchup for ${file}`, disableError);
+    }
     try {
       deleteChangeLogDB(this.#opts.replicaFile);
     } catch (deleteError) {
       this.#lc.error?.(`unable to delete ${file}`, deleteError);
     }
-    this.#opts.onDisabled?.();
   }
 }
 
