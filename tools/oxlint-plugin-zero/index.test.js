@@ -1,5 +1,6 @@
 import {describe, expect, test} from 'vitest';
 import {
+  bareShimSpawnCommand,
   hasSelectStar,
   shouldCheck,
   stripCommentOnlyLines,
@@ -96,6 +97,188 @@ describe('shouldCheck', () => {
       false,
     );
   });
+});
+
+// Minimal ESTree-shaped literals; only the fields the predicates read.
+const literal = value => ({type: 'Literal', value});
+
+const spawnCall = (name, commandValue, options) => ({
+  type: 'CallExpression',
+  callee: {type: 'Identifier', name},
+  arguments: [
+    commandValue === undefined ? undefined : literal(commandValue),
+    {type: 'ArrayExpression', elements: []},
+    options,
+  ],
+});
+const objectWith = (keyName, value = {type: 'Literal', value: true}) => ({
+  type: 'ObjectExpression',
+  properties: [{type: 'Property', key: {name: keyName}, value}],
+});
+
+describe('bareShimSpawnCommand', () => {
+  test.each(['spawn', 'spawnSync', 'execFile', 'execFileSync'])(
+    'flags a bare shim command via %s',
+    name => {
+      expect(bareShimSpawnCommand(spawnCall(name, 'npm'))).toBe('npm');
+    },
+  );
+
+  test('flags tsc, the case that breaks the build', () => {
+    expect(bareShimSpawnCommand(spawnCall('spawn', 'tsc'))).toBe('tsc');
+  });
+
+  test('reads only the leading word of a command string', () => {
+    expect(
+      bareShimSpawnCommand(spawnCall('spawn', 'tsc -p tsconfig.json')),
+    ).toBe('tsc');
+  });
+
+  test('ignores a real executable', () => {
+    expect(bareShimSpawnCommand(spawnCall('spawn', 'git'))).toBeUndefined();
+    expect(bareShimSpawnCommand(spawnCall('spawn', 'docker'))).toBeUndefined();
+  });
+
+  test('ignores a call that already passes an explicit shell option', () => {
+    expect(
+      bareShimSpawnCommand(spawnCall('spawn', 'npm', objectWith('shell'))),
+    ).toBeUndefined();
+  });
+
+  test('finds the shell option in the two-argument form, where args is omitted', () => {
+    // `args` is optional in every one of these signatures, so the options bag can
+    // sit at index 1. Reading it positionally at index 2 reported these despite
+    // the opt-out — an error on code that had already made the choice.
+    for (const name of ['spawn', 'spawnSync', 'execFile', 'execFileSync']) {
+      const node = {
+        type: 'CallExpression',
+        callee: {type: 'Identifier', name},
+        arguments: [literal('npm'), objectWith('shell')],
+      };
+      expect(bareShimSpawnCommand(node)).toBeUndefined();
+    }
+  });
+
+  test('still flags the two-argument form when the options do not opt in', () => {
+    const node = {
+      type: 'CallExpression',
+      callee: {type: 'Identifier', name: 'spawn'},
+      arguments: [literal('npm'), objectWith('cwd')],
+    };
+    expect(bareShimSpawnCommand(node)).toBe('npm');
+  });
+
+  test.each([false, null, 0, ''])(
+    'flags a call whose shell option is the falsy literal %p',
+    value => {
+      // `shell: false` is the configuration that fails on Windows, so treating
+      // the key's presence as the opt-out would exempt exactly the call this
+      // rule exists to report.
+      expect(
+        bareShimSpawnCommand(
+          spawnCall(
+            'spawn',
+            'npm',
+            objectWith('shell', {
+              type: 'Literal',
+              value,
+            }),
+          ),
+        ),
+      ).toBe('npm');
+    },
+  );
+
+  test.each([
+    ['undefined', {type: 'Identifier', name: 'undefined'}],
+    ['void 0', {type: 'UnaryExpression', operator: 'void'}],
+  ])('flags a shell option written as %s', (_name, value) => {
+    // Neither is a Literal, so a Literal-only falsy check exempts them — and both
+    // are byte-for-byte the configuration that fails, same as `shell: false`.
+    expect(
+      bareShimSpawnCommand(
+        spawnCall('spawn', 'npm', objectWith('shell', value)),
+      ),
+    ).toBe('npm');
+  });
+
+  test('exempts a shell option whose value is not statically falsy', () => {
+    // A variable could be either; assuming it is falsy would report code that
+    // may well be correct.
+    expect(
+      bareShimSpawnCommand(
+        spawnCall(
+          'spawn',
+          'npm',
+          objectWith('shell', {
+            type: 'Identifier',
+            name: 'useShell',
+          }),
+        ),
+      ),
+    ).toBeUndefined();
+  });
+
+  test('treats a spread options object as opting in', () => {
+    // Its contents are not knowable here, so staying quiet is the cheaper error:
+    // a missed finding costs less than an error on correct code.
+    const node = {
+      type: 'CallExpression',
+      callee: {type: 'Identifier', name: 'spawn'},
+      arguments: [
+        literal('npm'),
+        {type: 'ArrayExpression', elements: []},
+        {
+          type: 'ObjectExpression',
+          properties: [
+            {
+              type: 'SpreadElement',
+              argument: {type: 'Identifier', name: 'base'},
+            },
+          ],
+        },
+      ],
+    };
+    expect(bareShimSpawnCommand(node)).toBeUndefined();
+  });
+
+  test('an unrelated option does not exempt the call', () => {
+    expect(
+      bareShimSpawnCommand(spawnCall('spawn', 'npm', objectWith('stdio'))),
+    ).toBe('npm');
+  });
+
+  test('ignores a non-literal command, which it cannot resolve statically', () => {
+    const node = spawnCall('spawn', undefined);
+    node.arguments[0] = {type: 'Identifier', name: 'litestream'};
+    expect(bareShimSpawnCommand(node)).toBeUndefined();
+  });
+
+  test('ignores unrelated calls', () => {
+    expect(bareShimSpawnCommand(spawnCall('execSync', 'npm'))).toBeUndefined();
+  });
+});
+
+test('bareShimSpawnCommand flags the member form childProcess.spawn(...)', () => {
+  const node = spawnCall('spawn', 'npm');
+  node.callee = {
+    type: 'MemberExpression',
+    computed: false,
+    object: {type: 'Identifier', name: 'childProcess'},
+    property: {type: 'Identifier', name: 'spawn'},
+  };
+  expect(bareShimSpawnCommand(node)).toBe('npm');
+});
+
+test('bareShimSpawnCommand ignores a computed member callee it cannot read', () => {
+  const node = spawnCall('spawn', 'npm');
+  node.callee = {
+    type: 'MemberExpression',
+    computed: true,
+    object: {type: 'Identifier', name: 'childProcess'},
+    property: {type: 'Identifier', name: 'spawn'},
+  };
+  expect(bareShimSpawnCommand(node)).toBeUndefined();
 });
 
 // `no-select-star`'s two halves. Exported and, until now, covered only through
