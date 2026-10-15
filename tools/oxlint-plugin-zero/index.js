@@ -31,6 +31,26 @@ const whitespace = /\s+/;
 const scriptFile = /\.(?:cmd|bat)$/i;
 const childProcessModules = new Set(['node:child_process', 'child_process']);
 
+// chai's property assertions assert when they are read — `expect(x).to.be.true` —
+// so a statement ending on one of these is an assertion. Any other name a
+// statement ends on is a matcher, or a chain word, that was never called.
+const chaiPropertyAssertions = new Set([
+  'ok',
+  'true',
+  'false',
+  'null',
+  'undefined',
+  'NaN',
+  'exist',
+  'empty',
+  'arguments',
+  'Arguments',
+  'extensible',
+  'sealed',
+  'frozen',
+  'finite',
+]);
+
 const plugin = {
   meta: {
     name: 'zero',
@@ -125,6 +145,33 @@ const plugin = {
                 messageId: 'resolveEntrypoint',
                 data: {command},
               });
+            }
+          },
+        };
+      },
+    },
+
+    'no-unasserted-expect': {
+      meta: {
+        type: 'problem',
+        docs: {
+          description:
+            'Disallow an expect() statement that asserts nothing: one with no matcher, or one whose matcher is read but never called.',
+        },
+        schema: [],
+        messages: {
+          noMatcher:
+            'This expect() has no matcher, so it passes whatever the value is. Call one: expect(value).toBe(expected).',
+          uncalledMatcher:
+            "'{{name}}' is read but never called, so this expect() passes whatever the value is. Call it: .{{name}}(…).",
+        },
+      },
+      create(context) {
+        return {
+          ExpressionStatement(node) {
+            const finding = unassertedExpect(node);
+            if (finding !== undefined) {
+              context.report({node, ...finding});
             }
           },
         };
@@ -240,6 +287,45 @@ function opensShell(argument) {
   return opens;
 }
 
+function isExpectCall(node) {
+  return (
+    node?.type === 'CallExpression' &&
+    node.callee?.type === 'Identifier' &&
+    node.callee.name === 'expect'
+  );
+}
+
+/**
+ * Returns the report for a statement that builds an assertion and discards it —
+ * `expect(x)` with no matcher, or a chain on it ending on a name that is never
+ * called — otherwise undefined.
+ *
+ * Only an expression statement can discard one: an `expect(x)` that is returned
+ * or assigned is someone else's to finish. Reach: plain member chains; a
+ * computed member (`expect(x)['toBe']`) is out of it.
+ */
+function unassertedExpect(statement) {
+  const expression =
+    statement?.expression?.type === 'AwaitExpression'
+      ? statement.expression.argument
+      : statement?.expression;
+  if (isExpectCall(expression)) {
+    return {messageId: 'noMatcher'};
+  }
+  if (expression?.type !== 'MemberExpression' || expression.computed) {
+    return undefined;
+  }
+  let receiver = expression.object;
+  while (receiver?.type === 'MemberExpression' && !receiver.computed) {
+    receiver = receiver.object;
+  }
+  const name = expression.property?.name;
+  if (!isExpectCall(receiver) || chaiPropertyAssertions.has(name)) {
+    return undefined;
+  }
+  return {messageId: 'uncalledMatcher', data: {name}};
+}
+
 export default plugin;
 export {
   bareShimSpawnCommand,
@@ -247,4 +333,5 @@ export {
   shouldCheck,
   stripCommentOnlyLines,
   toPosixPath,
+  unassertedExpect,
 };

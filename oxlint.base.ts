@@ -195,6 +195,12 @@ export const baseConfig = {
     // `packages/*/tool/**` or `packages/*/src/tool/**`; an override cannot narrow
     // an ignore, so widening its reach means removing that pattern.
     'zero/no-bare-shim-spawn': 'error',
+
+    // An expect() that asserts nothing passes whatever the value is.
+    // `jest/valid-expect` reports the shape too, but also chai's property
+    // assertions and vitest's `expect(value, message)`, so it cannot be enabled
+    // here.
+    'zero/no-unasserted-expect': 'error',
   },
   overrides: [
     {

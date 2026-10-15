@@ -25,6 +25,7 @@ import {afterEach, expect, test} from 'vitest';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN = join(HERE, 'index.js');
+const REPOSITORY = resolve(HERE, '..', '..');
 
 /**
  * Where oxlint's CLI actually lives, resolved through its manifest.
@@ -53,32 +54,25 @@ function resolveOxlint() {
 
 const OXLINT = resolveOxlint();
 
-const fixtureRoots = [];
+const temporaryRoots = [];
 
 afterEach(() => {
-  // Each case writes a workspace to run the real linter against; without this
-  // they accumulate in the temp directory for the life of the machine.
-  for (const root of fixtureRoots.splice(0)) {
+  // Each case writes a workspace or a config to run the real linter with;
+  // without this they accumulate in the temp directory for the life of the
+  // machine.
+  for (const root of temporaryRoots.splice(0)) {
     rmSync(root, {recursive: true, force: true});
   }
 });
 
 /**
- * Lints `files` (path relative to the fixture root -> source) with only `rule`
- * enabled, as `ruleConfig`. Returns the exit status and the files the rule
- * reported, as POSIX paths.
+ * Writes `.oxlintrc.json` into `directory`, loading this plugin with only `rule`
+ * enabled, as `ruleConfig`, and returns its path.
  */
-function lintFixture(rule, ruleConfig, files) {
-  const root = mkdtempSync(join(tmpdir(), 'zero-plugin-smoke-'));
-  fixtureRoots.push(root);
-  for (const [relativePath, source] of Object.entries(files)) {
-    const filePath = join(root, relativePath);
-    mkdirSync(dirname(filePath), {recursive: true});
-    writeFileSync(filePath, source);
-  }
-
+function writeRuleConfig(directory, rule, ruleConfig) {
+  const path = join(directory, '.oxlintrc.json');
   writeFileSync(
-    join(root, '.oxlintrc.json'),
+    path,
     JSON.stringify({
       plugins: ['eslint', 'typescript'],
       jsPlugins: [PLUGIN],
@@ -96,11 +90,23 @@ function lintFixture(rule, ruleConfig, files) {
       },
     }),
   );
+  return path;
+}
 
-  const result = spawnSync(process.execPath, [OXLINT, '.', '--format=json'], {
-    cwd: root,
-    encoding: 'utf8',
-  });
+/**
+ * Runs oxlint in `cwd` with `args`, and returns its exit status, its JSON
+ * report, and the diagnostics `rule` raised in it.
+ */
+function runOxlint(cwd, args, rule) {
+  const result = spawnSync(
+    process.execPath,
+    [OXLINT, ...args, '--format=json'],
+    {
+      cwd,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
   let report;
   try {
     report = JSON.parse(result.stdout ?? '');
@@ -112,10 +118,56 @@ function lintFixture(rule, ruleConfig, files) {
     );
   }
   const code = `zero(${rule.slice('zero/'.length)})`;
-  const reported = (report.diagnostics ?? [])
-    .filter(diagnostic => diagnostic.code === code)
-    .map(diagnostic => diagnostic.filename.replaceAll('\\', '/'));
-  return {status: result.status, reported};
+  const diagnostics = (report.diagnostics ?? []).filter(
+    diagnostic => diagnostic.code === code,
+  );
+  return {status: result.status, report, diagnostics};
+}
+
+const posixFilename = diagnostic => diagnostic.filename.replaceAll('\\', '/');
+
+/**
+ * Lints `files` (path relative to the fixture root -> source) with only `rule`
+ * enabled, as `ruleConfig`. Returns the exit status and the files the rule
+ * reported, as POSIX paths.
+ */
+function lintFixture(rule, ruleConfig, files) {
+  const root = mkdtempSync(join(tmpdir(), 'zero-plugin-smoke-'));
+  temporaryRoots.push(root);
+  for (const [relativePath, source] of Object.entries(files)) {
+    const filePath = join(root, relativePath);
+    mkdirSync(dirname(filePath), {recursive: true});
+    writeFileSync(filePath, source);
+  }
+  writeRuleConfig(root, rule, ruleConfig);
+
+  const {status, diagnostics} = runOxlint(root, ['.'], rule);
+  return {status, reported: diagnostics.map(posixFilename)};
+}
+
+/**
+ * Lints this repository with only `rule` enabled, as `ruleConfig`: every file
+ * git does not ignore, with neither the repository's ignore patterns nor its
+ * nested configs, so a directory its lint config leaves out is still read.
+ * Returns how many files were linted and each report as `path:line`.
+ */
+function lintRepository(rule, ruleConfig) {
+  const configRoot = mkdtempSync(join(tmpdir(), 'zero-plugin-repository-'));
+  temporaryRoots.push(configRoot);
+  const config = writeRuleConfig(configRoot, rule, ruleConfig);
+
+  const {report, diagnostics} = runOxlint(
+    REPOSITORY,
+    ['-c', config, '--disable-nested-config', '.'],
+    rule,
+  );
+  return {
+    files: report.number_of_files,
+    reported: diagnostics.map(
+      diagnostic =>
+        `${posixFilename(diagnostic)}:${diagnostic.labels?.[0]?.span?.line}`,
+    ),
+  };
 }
 
 const selectStar = 'const sql = `SELECT * FROM issues`;\nexport default sql;\n';
@@ -153,4 +205,38 @@ test('no-bare-shim-spawn reports a shim spawned by bare name, and not an executa
   // the other file's silence comes from the rule and not from a missing plugin.
   expect(reported).toEqual(['npm.ts']);
   expect(status).not.toBe(0);
+});
+
+const testBody = statements =>
+  `import {expect, test} from 'vitest';\n\n` +
+  `test('case', () => {\n  ${statements.join('\n  ')}\n});\n`;
+
+test('no-unasserted-expect reports an expect() that asserts nothing, and not one that asserts', () => {
+  const {status, reported} = lintFixture('zero/no-unasserted-expect', 'error', {
+    'no-matcher.test.ts': testBody(['expect(1 > 0);']),
+    'uncalled.test.ts': testBody(['expect(1).toBeDefined;']),
+    'asserted.test.ts': testBody([
+      'expect(1).toBe(1);',
+      'expect(true).to.be.true;',
+    ]),
+  });
+
+  // As above, the two reports prove the rule ran, so the asserting file's
+  // silence comes from the rule.
+  expect(reported.toSorted()).toEqual([
+    'no-matcher.test.ts',
+    'uncalled.test.ts',
+  ]);
+  expect(status).not.toBe(0);
+});
+
+test('the repository has no expect() that asserts nothing', () => {
+  const {files, reported} = lintRepository(
+    'zero/no-unasserted-expect',
+    'error',
+  );
+
+  // A scan that reached nothing would pass by checking nothing.
+  expect(files).toBeGreaterThan(500);
+  expect(reported).toEqual([]);
 });
