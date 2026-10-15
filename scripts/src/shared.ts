@@ -1,5 +1,6 @@
 import {execFileSync} from 'node:child_process';
-import {appendFileSync, readFileSync, writeFileSync} from 'node:fs';
+import {appendFileSync, existsSync, readFileSync, writeFileSync} from 'node:fs';
+import {resolveNodeShimCommand} from './node-shim-command.ts';
 
 export const zeroPackageName = '@rocicorp/zero';
 export const zeroPackageJsonPath = 'packages/zero/package.json';
@@ -30,13 +31,45 @@ export type ZeroTag<V extends ZeroVersion = ZeroVersion> = `zero/v${V}`;
 export type MaintenanceZeroBranch = `maint/zero/${string}`;
 export type ReleaseBranch = 'main' | MaintenanceZeroBranch;
 
-export const defaultExec: Exec = (command, args, options) =>
-  String(
-    execFileSync(command, [...args], {
-      encoding: 'utf8',
-      ...options,
-    }) ?? '',
-  );
+/**
+ * The one place that knows how to actually run a command.
+ *
+ * Every input the resolution depends on is a seam: the platform, whether the
+ * entrypoint exists, where node lives, and what finally gets spawned. A test
+ * that supplies all four asserts the same string on every host; one that leaves
+ * `nodePath` to the runner has to compose the expected path itself, and composing
+ * it with the host's separators is what made these cases fail everywhere but
+ * Windows.
+ */
+export function createExec({
+  execFile = execFileSync,
+  platform = process.platform,
+  fileExists = existsSync,
+  nodePath = process.execPath,
+}: {
+  execFile?: typeof execFileSync;
+  platform?: NodeJS.Platform;
+  fileExists?: (path: string) => boolean;
+  nodePath?: string;
+} = {}): Exec {
+  return (command, args, options) => {
+    const resolved = resolveNodeShimCommand(
+      command,
+      args,
+      platform,
+      fileExists,
+      nodePath,
+    );
+    return String(
+      execFile(resolved.command, resolved.args, {
+        encoding: 'utf8',
+        ...options,
+      }) ?? '',
+    );
+  };
+}
+
+export const defaultExec: Exec = createExec();
 
 const stableZeroVersionPattern = /^\d+\.\d+\.\d+$/;
 export const headVersionShaLength = 8;
@@ -188,8 +221,14 @@ export function npmZeroVersionExists(version: ZeroVersion, exec = defaultExec) {
     ) {
       return false;
     }
+    // Fall back to the message and keep the cause: a failure that never reached
+    // npm carries no `stderr`, so reporting only that produces a sentence ending
+    // in a colon and discards the one explanation available.
+    const reason =
+      stderr.trim() || (error instanceof Error ? error.message : '');
     throw new Error(
-      `Could not check npm for ${zeroPackageName}@${version}: ${stderr}`,
+      `Could not check npm for ${zeroPackageName}@${version}: ${reason}`,
+      {cause: error},
     );
   }
 }
