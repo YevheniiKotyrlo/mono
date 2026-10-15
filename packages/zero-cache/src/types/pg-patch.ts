@@ -7,14 +7,13 @@ import postgres from 'postgres';
  * `Postgres.zeroPatch`. pnpm applies the patch in this repo and in the Docker
  * image, but not when `@rocicorp/zero` is installed from npm.
  *
- * The patch includes the `CopyDone` fix for
- * https://github.com/porsager/postgres/issues/499
- * (https://github.com/porsager/postgres/pull/1016). Without it, a connection
- * can stop responding after a COPY, on any Node version: if the last
- * `CopyData` fills the stream's buffer, the socket is paused, and it is never
- * resumed once the stream has ended. Node version and OS only change how often
- * this happens. Initial sync and backfill only wait for their COPY connections
- * to close when this returns `true`.
+ * The patch fixes https://github.com/porsager/postgres/issues/499. Without it,
+ * a connection can stop responding after a COPY, on any Node version: if a
+ * `CopyData` fills the stream's buffer, the socket is paused, and nothing
+ * resumes it once the COPY has ended, whether it completed, failed or had its
+ * stream destroyed. Node version and OS only change how often this happens.
+ * Initial sync and backfill only wait for their COPY connections to close when
+ * this returns `true`.
  *
  * A later version of the patch can raise the number to mark new fixes.
  */
