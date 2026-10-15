@@ -116,6 +116,56 @@ export type ReplicaOptions = {
 export type ServerContext = JSONObject;
 
 /**
+ * The share of upstream's `max_connections` that giving each table its own copy
+ * worker may spend. A worker is a connection, and that count follows the
+ * publication rather than any setting, so a 1,000-table publication would ask
+ * for 1,000 connections. `cvr-db` and `change-db` fall back to `upstream-db`,
+ * so zero-cache's own budget already claims a share of the same server, and the
+ * replication stream and other clients need the rest.
+ */
+export const PER_TABLE_WORKER_SHARE = 0.25;
+
+/** Past a few dozen concurrent COPY streams, more connections buy no throughput. */
+export const PER_TABLE_WORKER_CEILING = 50;
+
+export function perTableWorkerCeiling(maxConnections: number): number {
+  return Math.max(
+    1,
+    Math.min(
+      PER_TABLE_WORKER_CEILING,
+      Math.floor(maxConnections * PER_TABLE_WORKER_SHARE),
+    ),
+  );
+}
+
+/**
+ * How many workers copy the tables. Idle workers do nothing, so the requested
+ * count is capped at the table count. Where each table needs a connection of its
+ * own, the count is raised toward the table count, but only as far as
+ * {@link perTableWorkerCeiling} allows: a requested count above the ceiling is
+ * still honoured, since the ceiling bounds only what the raise adds on its own.
+ */
+export function copyWorkerCount({
+  requested,
+  numTables,
+  workerPerTable,
+  maxConnections,
+}: {
+  requested: number;
+  numTables: number;
+  workerPerTable: boolean;
+  maxConnections: number;
+}): number {
+  if (workerPerTable) {
+    return Math.min(
+      numTables,
+      Math.max(perTableWorkerCeiling(maxConnections), requested),
+    );
+  }
+  return Math.min(requested, numTables);
+}
+
+/**
  * @returns The {@link ReplicaState} of the initialized replica, or `undefined`
  *          for a shadow sync.
  */
@@ -164,7 +214,7 @@ export async function initialSync(
   try {
     const copyProfiler = profileCopy ? await CpuProfiler.connect() : null;
     sql = await connectPgClient(lc, upstreamURI, 'initial-sync');
-    await checkUpstreamConfig(sql);
+    const {maxConnections} = await checkUpstreamConfig(sql);
 
     // In shadow mode we assume the shard is already initialized and just
     // read back the existing publications. `ensurePublishedTables` would
@@ -212,16 +262,28 @@ export async function initialSync(
       // where the unpatched hang was seen most often, give each table its own
       // connection so that no COPY runs after another one, as in 1.10.
       const workerPerTable = !pgPatched && platform() === 'win32';
-      if (workerPerTable && tableCopyWorkers < numTables) {
+      const numWorkers = copyWorkerCount({
+        requested: tableCopyWorkers,
+        numTables,
+        workerPerTable,
+        maxConnections,
+      });
+      if (numWorkers > tableCopyWorkers) {
         lc.warn?.(
           `Increasing the number of copy workers from ${tableCopyWorkers} to ` +
-            `${numTables} to work around a postgres.js connection bug ` +
+            `${numWorkers} to work around a postgres.js connection bug ` +
             `(https://github.com/porsager/postgres/issues/499)`,
         );
       }
-      const numWorkers = workerPerTable
-        ? numTables
-        : Math.min(tableCopyWorkers, numTables);
+      if (workerPerTable && numTables > numWorkers) {
+        lc.warn?.(
+          `${numTables} tables share ${numWorkers} copy workers, bounded by ` +
+            `upstream's max_connections of ${maxConnections}, so a worker runs ` +
+            `several COPY streams and can hang on the same bug. Run zero-cache ` +
+            `with Zero's patched postgres.js, as the rocicorp/zero Docker image ` +
+            `does, or raise max_connections.`,
+        );
+      }
 
       const copyPool = await connectPgClient(
         lc,
@@ -519,11 +581,14 @@ export async function shadowInitialSync(
   }
 }
 
-async function checkUpstreamConfig(sql: PostgresDB) {
-  const {walLevel, version} = (
-    await sql<{walLevel: string; version: number}[]>`
-      SELECT current_setting('wal_level') as "walLevel", 
-             current_setting('server_version_num') as "version";
+async function checkUpstreamConfig(
+  sql: PostgresDB,
+): Promise<{maxConnections: number}> {
+  const {walLevel, version, maxConnections} = (
+    await sql<{walLevel: string; version: number; maxConnections: string}[]>`
+      SELECT current_setting('wal_level') as "walLevel",
+             current_setting('server_version_num') as "version",
+             current_setting('max_connections') as "maxConnections";
   `
   )[0];
 
@@ -537,6 +602,7 @@ async function checkUpstreamConfig(sql: PostgresDB) {
       `Must be running Postgres 15 or higher (currently: "${version}")`,
     );
   }
+  return {maxConnections: Number(maxConnections)};
 }
 
 async function ensurePublishedTables(

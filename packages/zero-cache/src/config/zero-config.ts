@@ -1778,6 +1778,11 @@ export const zeroOptions = {
         `10 MB of table data in memory during initial sync. Increasing the number of`,
         `workers may improve initial sync speed; however, note that local disk throughput`,
         `(i.e. IOPS), upstream CPU, and network bandwidth may also be bottlenecks.`,
+        ``,
+        `On Windows, without Zero's patched postgres.js, the count is raised toward the`,
+        `number of published tables, so that no connection runs a COPY after another one.`,
+        `That raise is bounded by a quarter of upstream's max_connections, at most 50;`,
+        `asking for more than the bound here still gets it.`,
       ],
     },
 
