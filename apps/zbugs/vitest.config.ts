@@ -1,7 +1,9 @@
 import {dirname, resolve} from 'path';
 import {fileURLToPath} from 'url';
 import {defineConfig, mergeConfig} from 'vitest/config';
-import config from '../../packages/shared/src/tool/vitest-config.ts';
+import config, {
+  pgProjectDefaults,
+} from '../../packages/shared/src/tool/vitest-config.ts';
 
 const ci = process.env['CI'] === 'true' || process.env['CI'] === '1';
 
@@ -25,9 +27,8 @@ export function configForVersion(version: number, url: string) {
       ],
     },
     test: {
+      ...pgProjectDefaults(),
       name: `${name}/pg-${version}`,
-      browser: {enabled: false},
-      silent: 'passed-only',
       include: [
         'src/**/*.pg.test.?(c|m)[jt]s?(x)',
         'server/**/*.pg.test.?(c|m)[jt]s?(x)',

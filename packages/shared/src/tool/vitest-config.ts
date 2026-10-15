@@ -1,7 +1,50 @@
+import {availableParallelism} from 'node:os';
 import {playwright} from '@vitest/browser-playwright';
 import {defineConfig} from 'vitest/config';
 import type {BrowserConfigOptions} from 'vitest/node';
 import {makeDefine} from '../build.ts';
+
+/**
+ * How many pg test files may run at once. These projects contend on one
+ * Postgres server rather than on CPUs, so vitest's default of
+ * `availableParallelism() - 1` oversubscribes it: past a handful of files the
+ * server and its disk are the bottleneck, and cases time out under load that
+ * pass alone. Capped rather than fixed, so a machine with fewer cores keeps
+ * vitest's own limit.
+ */
+export function maxConcurrentPgFiles(): number {
+  return Math.min(Math.max(availableParallelism() - 1, 1), 6);
+}
+
+/** The most a pg project grants a case, which is what CI gets. */
+const MAX_PG_TEST_TIMEOUT_MS = 60_000;
+
+/**
+ * The group Postgres-backed projects run in, after the default-group ones, so
+ * the fast suites report first.
+ */
+export const PG_PROJECT_GROUP_ORDER = 1;
+
+/**
+ * The settings every Postgres-backed project shares. One definition, because
+ * vitest refuses to run projects in one `sequence.groupOrder` that disagree on
+ * `maxWorkers`, and its error names the two projects rather than the reason.
+ */
+export function pgProjectDefaults() {
+  const timeout = CI ? MAX_PG_TEST_TIMEOUT_MS : MAX_PG_TEST_TIMEOUT_MS / 2;
+  return {
+    browser: {enabled: false},
+    silent: 'passed-only',
+    maxWorkers: maxConcurrentPgFiles(),
+    // A group of their own: they share a pool only with projects bounded the
+    // same way, so the no-pg suite keeps its full width.
+    sequence: {groupOrder: PG_PROJECT_GROUP_ORDER},
+    retry: CI ? 2 : 0,
+    testTimeout: timeout,
+    hookTimeout: timeout,
+    slowTestThreshold: timeout / 10,
+  } as const;
+}
 
 export const CI = process.env['CI'] === 'true' || process.env['CI'] === '1';
 const {VITEST_BROWSER} = process.env;
