@@ -185,11 +185,14 @@ export function logSQLiteChangeLogStartup(
 export async function sqliteFileBytes(
   lc: LogContext,
   file: string,
+  // A test reaches the warning below only by injecting the failure: Windows
+  // reports ENOENT for the malformed paths that give ENOTDIR on POSIX.
+  statFile: (path: string) => Promise<{size: number}> = stat,
 ): Promise<number> {
   const sizes = await Promise.all(
     [file, `${file}-wal`, `${file}-wal2`].map(async path => {
       try {
-        return (await stat(path)).size;
+        return (await statFile(path)).size;
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
           lc.warn?.(`unable to stat ${path} for size metrics`, e);
