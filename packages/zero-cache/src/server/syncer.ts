@@ -19,7 +19,11 @@ import {registerSQLiteCorruptionDiagnosticTarget} from '../db/sqlite-corruption.
 import {warmupConnections} from '../db/warmup.ts';
 import {initEventSink} from '../observability/events.ts';
 import {getOrCreateGauge} from '../observability/metrics.ts';
-import {exitAfter, runUntilKilled} from '../services/life-cycle.ts';
+import {
+  exitAfter,
+  runUntilKilled,
+  shutdownRequested,
+} from '../services/life-cycle.ts';
 import {MutagenService} from '../services/mutagen/mutagen.ts';
 import {PusherService} from '../services/mutagen/pusher.ts';
 import type {ReplicaState} from '../services/replicator/replicator.ts';
@@ -84,6 +88,8 @@ export default async function runWorker(
   env: NodeJS.ProcessEnv,
   ...args: string[]
 ): Promise<void> {
+  const shutdown = shutdownRequested(parent);
+
   assert(args.length >= 2, `expected [fileMode, workerIndex, ...flags]`);
   const fileMode = v.parse(args[0], replicaFileModeSchema);
   const workerIndex = Number(args[1]);
@@ -398,7 +404,7 @@ export default async function runWorker(
   void dbWarmup.then(() => parent.send(['ready', {ready: true}]));
 
   try {
-    return await runUntilKilled(lc, parent, syncer);
+    return await runUntilKilled(lc, parent, shutdown, syncer);
   } finally {
     // Logs the work done since the last interval.
     stopQueryStats?.();

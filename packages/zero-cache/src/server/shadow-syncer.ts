@@ -3,7 +3,11 @@ import {must} from '../../../shared/src/must.ts';
 import {getServerContext} from '../config/server-context.ts';
 import {getNormalizedZeroConfig} from '../config/zero-config.ts';
 import {initEventSink} from '../observability/events.ts';
-import {exitAfter, runUntilKilled} from '../services/life-cycle.ts';
+import {
+  exitAfter,
+  runUntilKilled,
+  shutdownRequested,
+} from '../services/life-cycle.ts';
 import {ShadowSyncService} from '../services/shadow-sync/shadow-sync-service.ts';
 import {
   parentWorker,
@@ -24,6 +28,8 @@ export default function runWorker(
   env: NodeJS.ProcessEnv,
   ...argv: string[]
 ): Promise<void> {
+  const shutdown = shutdownRequested(parent);
+
   const config = getNormalizedZeroConfig({env, argv});
 
   startOtelAuto(
@@ -51,7 +57,7 @@ export default function runWorker(
 
   parent.send(['ready', {ready: true}]);
 
-  return runUntilKilled(lc, parent, service);
+  return runUntilKilled(lc, parent, shutdown, service);
 }
 
 // fork()
