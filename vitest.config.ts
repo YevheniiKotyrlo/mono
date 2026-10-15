@@ -1,5 +1,9 @@
 import {readdirSync} from 'node:fs';
 import {defineConfig} from 'vitest/config';
+import {
+  isVitestConfig,
+  selectProjectConfigs,
+} from './scripts/src/vitest-projects.ts';
 
 // Electron-hosted terminals (VSCode's integrated terminal, Cursor, Claude
 // Code, ...) leak ELECTRON_RUN_AS_NODE=1 into spawned shells. node-gyp-build
@@ -30,25 +34,9 @@ function* getProjects(): Iterable<string> {
 
     // Process files in this directory first
     const fileNames = entries.filter(e => e.isFile()).map(e => e.name);
-    const configNames = fileNames.filter(
-      name =>
-        /^vitest\.config.*\.ts$/.test(name) &&
-        // Drop bench configs up front — those are run separately via
-        // `pnpm run bench`. They must not count towards `hasSuffixed` below,
-        // or a package whose only suffixed config is a bench one (e.g.
-        // zero-client) would have its base config suppressed by a config that
-        // is then itself skipped, silently contributing no projects at all.
-        !name.includes('.bench'),
-    );
-    const hasSuffixed = configNames.some(name =>
-      /^vitest\.config\.[^.]+\.ts$/.test(name),
-    );
+    const configNames = fileNames.filter(isVitestConfig);
 
-    for (const name of configNames) {
-      // Skip the root config file to avoid self-reference
-      if (basePath === '' && name === 'vitest.config.ts') continue;
-      // If any suffixed config exists in this dir, exclude the base config
-      if (name === 'vitest.config.ts' && hasSuffixed) continue;
+    for (const name of selectProjectConfigs(configNames, basePath === '')) {
       yield `${basePath}${name}`;
     }
 
