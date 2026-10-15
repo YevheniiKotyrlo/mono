@@ -1,6 +1,7 @@
 import {existsSync, statSync} from 'node:fs';
 import type {LogContext} from '@rocicorp/logger';
 import {SqliteError} from '@rocicorp/zero-sqlite3';
+import {SQLITE_FILE_SUFFIXES} from '../../../shared/src/sqlite-file-suffixes.ts';
 import {Database} from '../../../zqlite/src/db.ts';
 
 // Matches primary corruption codes and extended variants (e.g.
@@ -9,7 +10,6 @@ import {Database} from '../../../zqlite/src/db.ts';
 const SQLITE_CORRUPTION_CODE = /^SQLITE_(CORRUPT(_|$)|NOTADB$)/;
 const SQLITE_CORRUPTION_MESSAGE =
   /database disk image is malformed|file is not a database|database is malformed|malformed database/i;
-const SQLITE_FILE_SUFFIXES = ['', '-wal', '-wal2', '-shm', '-journal'] as const;
 const MAX_LOGGED_CHECK_ISSUES = 20;
 
 type ErrorSummary = {
