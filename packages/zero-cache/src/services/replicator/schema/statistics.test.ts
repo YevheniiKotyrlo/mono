@@ -3,7 +3,11 @@ import {afterEach, beforeEach, describe, expect, test} from 'vitest';
 import {createSilentLogContext} from '../../../../../shared/src/logging-test-utils.ts';
 import {parseOptions} from '../../../../../shared/src/options.ts';
 import {Database} from '../../../../../zqlite/src/db.ts';
-import {ZERO_ENV_VAR_PREFIX, zeroOptions} from '../../../config/zero-config.ts';
+import {
+  DEFAULT_REPLICA_ANALYSIS_LIMIT,
+  ZERO_ENV_VAR_PREFIX,
+  zeroOptions,
+} from '../../../config/zero-config.ts';
 import {createLiteIndexStatement} from '../../../db/create.ts';
 import {deleteLiteDB} from '../../../db/delete-lite-db.ts';
 import {runSchemaMigrations} from '../../../db/migration-lite.ts';
@@ -17,7 +21,6 @@ import {
   type ReplicaFileMode,
 } from '../../../workers/replicator.ts';
 import {
-  CURRENT_SCHEMA_VERSION,
   initReplica,
   schemaVersionMigrationMap,
 } from '../../change-source/common/replica-schema.ts';
@@ -30,6 +33,9 @@ import {initReplicationState} from './replication-state.ts';
 const lc = createSilentLogContext();
 
 const ROWS = 10_000;
+
+// The replica schema version before the one that adds `_zero.statistics`.
+const VERSION_BEFORE_STATISTICS = 18;
 
 // Every row has the same `deleted`, so statistics read from every row give an
 // index led by it ROWS rows per value, and a sample about as many as it read.
@@ -317,7 +323,7 @@ describe('replica statistics', () => {
     // gathers statistics of its own.
     const earlierVersions = Object.fromEntries(
       Object.entries(schemaVersionMigrationMap).filter(
-        ([version]) => Number(version) < CURRENT_SCHEMA_VERSION,
+        ([version]) => Number(version) <= VERSION_BEFORE_STATISTICS,
       ),
     );
     await runSchemaMigrations(lc, 'replica', file.path, {}, earlierVersions);
@@ -333,6 +339,30 @@ describe('replica statistics', () => {
 
     expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBe(ROWS);
     expect(recordedAnalysisLimit(file.path)).toBe(0);
+  });
+
+  test('a replica analyzed before the record keeps its statistics under the default limit', async () => {
+    await syncReplica();
+    await prepare(5000);
+
+    const earlier = new Database(lc, file.path);
+    try {
+      earlier.exec(/*sql*/ `
+        DROP TABLE "_zero.statistics";
+        UPDATE "_zero.versionHistory"
+          SET dataVersion = ${VERSION_BEFORE_STATISTICS},
+              schemaVersion = ${VERSION_BEFORE_STATISTICS}`);
+    } finally {
+      earlier.close({optimize: false});
+    }
+    await prepare(DEFAULT_REPLICA_ANALYSIS_LIMIT);
+
+    expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBeOneOf(
+      sampleSizes(5000),
+    );
+    expect(recordedAnalysisLimit(file.path)).toBe(
+      DEFAULT_REPLICA_ANALYSIS_LIMIT,
+    );
   });
 });
 
@@ -358,14 +388,10 @@ describe('replica statistics after a replicated schema change', () => {
     expect(replicateIndexCreation(0)).toBe(ROWS);
   });
 
-  test.each([1000, 5000])(
-    'a replicated index is sampled under a limit of %d',
-    analysisLimit => {
-      expect(replicateIndexCreation(analysisLimit)).toBeOneOf(
-        sampleSizes(analysisLimit),
-      );
-    },
-  );
+  // Above the 2000 rows SQLite's default mask puts in place of a larger limit.
+  test('a replicated index is sampled under a limit of 5000', () => {
+    expect(replicateIndexCreation(5000)).toBeOneOf(sampleSizes(5000));
+  });
 
   test('an initial sync leaves statistics to the replicator', () => {
     const replica = new Database(lc, ':memory:');

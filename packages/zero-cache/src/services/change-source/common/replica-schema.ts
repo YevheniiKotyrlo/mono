@@ -142,7 +142,7 @@ export const CREATE_V17_BACKFILLING_TABLE = /*sql*/ `
 `;
 
 export const CREATE_V19_STATISTICS_TABLE = /*sql*/ `
-  CREATE TABLE "_zero.statistics" (
+  CREATE TABLE IF NOT EXISTS "_zero.statistics" (
     analysisLimit INTEGER NOT NULL,
     lock INTEGER PRIMARY KEY DEFAULT 1 CHECK (lock=1)
   );
@@ -388,17 +388,24 @@ export const schemaVersionMigrationMap: IncrementalMigrationMap = {
   // again when `replica.analysisLimit` changes. See
   // `replicator/schema/statistics.ts`.
   //
+  // A replica that has statistics records 1000, the limit the replicator
+  // gathered them under before this version, so that a replica kept at the
+  // default limit is not analyzed again.
+  //
   // No `minSafeVersion`: an older zero-cache ignores the table. It does gather
-  // statistics of its own, under other limits, so rolling forward again
-  // forgets the record, and the replicator gathers every table's statistics
-  // under its limit.
+  // statistics of its own, so rolling forward again records 1000 in place of
+  // the limit recorded before.
   19: {
     migrateSchema: (_, db) => {
       db.exec(CREATE_V19_STATISTICS_TABLE);
     },
 
     migrateData: (_, db) => {
-      db.exec(/*sql*/ `DELETE FROM "_zero.statistics"`);
+      db.exec(/*sql*/ `
+        DELETE FROM "_zero.statistics";
+        INSERT INTO "_zero.statistics" (analysisLimit, lock)
+          SELECT 1000, 1 FROM sqlite_master WHERE name = 'sqlite_stat1';
+      `);
     },
   },
 };

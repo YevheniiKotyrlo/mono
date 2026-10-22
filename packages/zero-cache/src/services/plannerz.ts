@@ -24,8 +24,8 @@ import {getReplicationState} from './replicator/schema/replication-state.ts';
  */
 const APPROXIMATE_METHOD =
   'ANALYZE under an analysis_limit (ZERO_REPLICA_ANALYSIS_LIMIT). Row counts ' +
-  'and per-key averages are sampled estimates, and sqlite_stat4 is not ' +
-  'collected.';
+  'are exact, per-key averages are sampled estimates, and sqlite_stat4 is ' +
+  'not collected.';
 const FULL_METHOD =
   'ANALYZE with no analysis limit, as zero-cache runs under ' +
   'ZERO_REPLICA_ANALYSIS_LIMIT=0. sqlite_stat4 has rows.';

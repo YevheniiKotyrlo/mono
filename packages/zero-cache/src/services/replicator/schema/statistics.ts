@@ -22,7 +22,8 @@ export const CREATE_STATISTICS_TABLE = /*sql*/ `
 /**
  * The `PRAGMA optimize` mask the replicator gathers statistics with: SQLite's
  * default mask without 0x10, with which SQLite would replace an
- * `analysis_limit` of 0, or of 2000 and above, with a temporary 2000.
+ * `analysis_limit` of 0, or of 2000 and above, with a temporary 2000, or less
+ * when the pass covers more than 100 tables and indexes.
  *
  * https://sqlite.org/pragma.html#pragma_optimize
  */
