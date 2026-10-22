@@ -17,10 +17,7 @@ import {
   getAscendingEvents,
   recordEvent,
 } from '../services/replicator/schema/replication-state.ts';
-import {
-  applyPragmas,
-  type PragmaConfig,
-} from '../services/replicator/write-worker-client.ts';
+import type {PragmaConfig} from '../services/replicator/write-worker-client.ts';
 import type {Worker} from '../types/processes.ts';
 
 export const replicaFileModeSchema = v.literalUnion(
@@ -82,7 +79,7 @@ const MB = 1024 * 1024;
 
 async function prepare(
   lc: LogContext,
-  {file, vacuumIntervalHours, analysisLimit}: ReplicaOptions,
+  {file, vacuumIntervalHours}: ReplicaOptions,
   walMode: WalMode,
   mode: ReplicaFileMode,
 ): Promise<{file: string; walMode: WalMode; pageSize: number}> {
@@ -159,9 +156,6 @@ async function prepare(
     }
 
     await setJournalMode(lc, replica, walMode);
-
-    const pragmas = getPragmaConfig(mode, analysisLimit);
-    applyPragmas(replica, pragmas);
   } finally {
     // The write worker gathers the replica's statistics when it opens it.
     replica.close({optimize: false});
@@ -194,9 +188,8 @@ async function setJournalMode(
 }
 
 /**
- * Returns the PragmaConfig for a given replica file mode.
- * This is used by both the main thread (setupReplica) and
- * the write worker thread to apply the same pragma settings.
+ * Returns the PragmaConfig that the write worker applies to its connection to
+ * the replica, for a given replica file mode.
  */
 export function getPragmaConfig(
   mode: ReplicaFileMode,

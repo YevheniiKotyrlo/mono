@@ -154,9 +154,10 @@ const replicaOptions = {
       `again when a value it compares with a column those histograms describe changes.`,
       ``,
       `The replica records the limit its statistics were gathered under, and the replicator`,
-      `gathers those of every table again when it starts under another one. A view-syncer`,
-      `restores the replication-manager's replica, so set the same limit on both: a`,
-      `view-syncer under another limit analyzes every table whenever it restores one.`,
+      `gathers those of every table again when it starts under another one; statistics an`,
+      `earlier zero-cache gathered, which it did not record, are kept under a limit of 1000.`,
+      `A view-syncer restores the replication-manager's replica, so set the same limit on`,
+      `both: a view-syncer under another limit analyzes every table whenever it restores one.`,
     ],
   },
 };

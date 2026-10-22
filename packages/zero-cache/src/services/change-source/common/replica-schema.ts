@@ -142,8 +142,8 @@ export const CREATE_V17_BACKFILLING_TABLE = /*sql*/ `
 `;
 
 export const CREATE_V19_STATISTICS_TABLE = /*sql*/ `
-  CREATE TABLE IF NOT EXISTS "_zero.statistics" (
-    analysisLimit INTEGER NOT NULL,
+  CREATE TABLE "_zero.statistics" (
+    analysisLimit INTEGER,
     lock INTEGER PRIMARY KEY DEFAULT 1 CHECK (lock=1)
   );
 `;
@@ -388,10 +388,11 @@ export const schemaVersionMigrationMap: IncrementalMigrationMap = {
   // again when `replica.analysisLimit` changes. See
   // `replicator/schema/statistics.ts`.
   //
-  // A replica that has statistics records 1000 for them, the `analysis_limit`
-  // an earlier zero-cache set on the replica's connections, whether it reaches
-  // this version by an upgrade or by rolling forward after a rollback: a limit
-  // of 1000 keeps them, and another limit gathers every table's again.
+  // A replica that has statistics records NULL for them, whether it reaches
+  // this version by an upgrade or by rolling forward after a rollback: an
+  // earlier zero-cache gathered them, under limits it did not record. A limit
+  // of 1000, the one it set on the replicator's connections, keeps them, and
+  // another limit gathers every table's again.
   //
   // No `minSafeVersion`: an older zero-cache ignores the table.
   19: {
@@ -403,7 +404,7 @@ export const schemaVersionMigrationMap: IncrementalMigrationMap = {
       db.exec(/*sql*/ `
         DELETE FROM "_zero.statistics";
         INSERT INTO "_zero.statistics" (analysisLimit, lock)
-          SELECT 1000, 1 FROM sqlite_master WHERE name = 'sqlite_stat1';
+          SELECT NULL, 1 FROM sqlite_master WHERE name = 'sqlite_stat1';
       `);
     },
   },

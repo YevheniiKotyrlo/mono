@@ -3,11 +3,8 @@ import {afterEach, beforeEach, describe, expect, test} from 'vitest';
 import {createSilentLogContext} from '../../../../../shared/src/logging-test-utils.ts';
 import {parseOptions} from '../../../../../shared/src/options.ts';
 import {Database} from '../../../../../zqlite/src/db.ts';
-import {
-  DEFAULT_REPLICA_ANALYSIS_LIMIT,
-  ZERO_ENV_VAR_PREFIX,
-  zeroOptions,
-} from '../../../config/zero-config.ts';
+import type {NormalizedZeroConfig} from '../../../config/normalize.ts';
+import {ZERO_ENV_VAR_PREFIX, zeroOptions} from '../../../config/zero-config.ts';
 import {createLiteIndexStatement} from '../../../db/create.ts';
 import {deleteLiteDB} from '../../../db/delete-lite-db.ts';
 import {runSchemaMigrations} from '../../../db/migration-lite.ts';
@@ -20,15 +17,18 @@ import {
   setupReplica,
   type ReplicaFileMode,
 } from '../../../workers/replicator.ts';
+import {analyzeQuery} from '../../analyze.ts';
 import {
   initReplica,
   schemaVersionMigrationMap,
 } from '../../change-source/common/replica-schema.ts';
 import {ReplicaPoller} from '../../change-streamer/replica-poller.ts';
+import {buildPlannerzBundleFromDB} from '../../plannerz.ts';
 import {ChangeProcessor} from '../change-processor.ts';
 import {fakeReplicator, ReplicationMessages} from '../test-utils.ts';
-import {applyPragmas, ThreadWriteWorkerClient} from '../write-worker-client.ts';
+import {ThreadWriteWorkerClient} from '../write-worker-client.ts';
 import {initReplicationState} from './replication-state.ts';
+import {readStatisticsLimit} from './statistics.ts';
 
 const lc = createSilentLogContext();
 
@@ -105,12 +105,10 @@ function rowsPerLeadingValue(path: string, index: string): number | undefined {
   }
 }
 
-function recordedAnalysisLimit(path: string): number | undefined {
+function recordedAnalysisLimit(path: string): number | null | undefined {
   const db = new Database(lc, path, {readonly: true});
   try {
-    return db
-      .prepare(`SELECT analysisLimit FROM "_zero.statistics"`)
-      .get<{analysisLimit: number} | undefined>()?.analysisLimit;
+    return readStatisticsLimit(db);
   } finally {
     db.close();
   }
@@ -255,12 +253,13 @@ describe('replica statistics', () => {
     },
   );
 
-  test("a synced replica the change-streamer polls first is analyzed under the replicator's limit", async () => {
+  test("the change-streamer's poll of a synced replica gathers no statistics", async () => {
     await syncReplica();
     new ReplicaPoller(lc, file.path).start().cancel();
-    await startReplicator(0);
 
-    expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBe(ROWS);
+    expect(
+      rowsPerLeadingValue(file.path, 'item_deleted_created'),
+    ).toBeUndefined();
   });
 
   test('a changed limit gathers every table again', async () => {
@@ -272,7 +271,7 @@ describe('replica statistics', () => {
     expect(recordedAnalysisLimit(file.path)).toBe(0);
   });
 
-  test("an unanalyzed table the change-streamer polls past is analyzed at the replicator's next preparation", async () => {
+  test("an unanalyzed table the change-streamer polls past is analyzed at the replicator's next start", async () => {
     await syncReplica();
     await startReplicator(0);
     addUnanalyzedTable();
@@ -294,6 +293,100 @@ describe('replica statistics', () => {
     expect(rowsPerLeadingValue(copy, 'other_deleted_created')).toBe(ROWS);
   });
 
+  test('analyzing a query gathers no statistics', async () => {
+    // A replicated table, which the query analysis can see, whose index has
+    // no statistics.
+    const replica = file.connect(lc);
+    try {
+      initReplicationState(replica, ['zero_data'], '01');
+      const messages = new ReplicationMessages({item: 'id'});
+      const replicator = fakeReplicator(lc, replica);
+      replicator.processTransaction(
+        '02',
+        messages.createTable({
+          schema: 'public',
+          name: 'item',
+          columns: {
+            id: {pos: 1, dataType: 'int8', notNull: true},
+            deleted: {pos: 2, dataType: 'int8', notNull: true},
+            ['created_at']: {pos: 3, dataType: 'int8', notNull: true},
+          },
+          primaryKey: ['id'],
+        }),
+        messages.createIndex({
+          schema: 'public',
+          tableName: 'item',
+          name: 'item_pkey',
+          unique: true,
+          columns: {id: 'ASC'},
+        }),
+      );
+      replicator.processTransaction(
+        '03',
+        ...ROWS_OF_ONE_VALUE.slice(0, 100).map(row =>
+          messages.insert('item', row),
+        ),
+      );
+      createIndex(replica, 'item');
+    } finally {
+      replica.close({optimize: false});
+    }
+
+    await analyzeQuery(
+      lc,
+      {
+        replica: {file: file.path},
+        enableQueryPlanner: false,
+        log: LOG_CONFIG,
+      } as NormalizedZeroConfig,
+      {
+        tables: {
+          item: {
+            columns: {
+              id: {type: 'number'},
+              deleted: {type: 'number'},
+              ['created_at']: {type: 'number'},
+            },
+            primaryKey: ['id'],
+          },
+        },
+      },
+      {
+        table: 'item',
+        where: {
+          type: 'simple',
+          op: '=',
+          left: {type: 'column', name: 'deleted'},
+          right: {type: 'literal', value: 0},
+        },
+        orderBy: [
+          ['created_at', 'asc'],
+          ['id', 'asc'],
+        ],
+        limit: 10,
+      },
+    );
+
+    expect(
+      rowsPerLeadingValue(file.path, 'item_deleted_created'),
+    ).toBeUndefined();
+  });
+
+  test('/plannerz reports the limit the statistics were gathered under', async () => {
+    await syncReplica();
+    await startReplicator(0);
+
+    const db = new Database(lc, file.path, {readonly: true});
+    try {
+      const {statsQuality} = buildPlannerzBundleFromDB(lc, db, {
+        enableQueryPlanner: true,
+      } as NormalizedZeroConfig);
+      expect(statsQuality.analysisLimit).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
   test('preparing a replica gathers no statistics', async () => {
     await syncReplica();
     await setupReplica(lc, 'serving', {file: file.path, analysisLimit: 0});
@@ -308,13 +401,13 @@ describe('replica statistics', () => {
     await startReplicator(0);
 
     const worker = new ThreadWriteWorkerClient();
-    await worker.init(
-      file.path,
-      'serving',
-      getPragmaConfig('serving', 0),
-      LOG_CONFIG,
-    );
     try {
+      await worker.init(
+        file.path,
+        'serving',
+        getPragmaConfig('serving', 0),
+        LOG_CONFIG,
+      );
       addUnanalyzedTable();
     } finally {
       await worker.stop();
@@ -351,7 +444,7 @@ describe('replica statistics', () => {
     expect(recordedAnalysisLimit(file.path)).toBe(0);
   });
 
-  test('a replica analyzed before the record keeps its statistics under the default limit', async () => {
+  test('a replica analyzed before the record keeps its statistics under a limit of 1000', async () => {
     await syncReplica();
     await startReplicator(5000);
 
@@ -365,14 +458,12 @@ describe('replica statistics', () => {
     } finally {
       earlier.close({optimize: false});
     }
-    await startReplicator(DEFAULT_REPLICA_ANALYSIS_LIMIT);
+    await startReplicator(1000);
 
     expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBeOneOf(
       sampleSizes(5000),
     );
-    expect(recordedAnalysisLimit(file.path)).toBe(
-      DEFAULT_REPLICA_ANALYSIS_LIMIT,
-    );
+    expect(recordedAnalysisLimit(file.path)).toBeNull();
   });
 });
 
@@ -381,10 +472,9 @@ describe('replica statistics after a replicated schema change', () => {
     const replica = new Database(lc, ':memory:');
     try {
       initReplicationState(replica, ['zero_data'], '01');
-      applyPragmas(replica, getPragmaConfig('serving', analysisLimit));
       createTable(replica, 'item');
 
-      fakeReplicator(lc, replica).processTransaction(
+      fakeReplicator(lc, replica, analysisLimit).processTransaction(
         '02',
         new ReplicationMessages({item: 'id'}).createIndex(ITEM_INDEX),
       );
