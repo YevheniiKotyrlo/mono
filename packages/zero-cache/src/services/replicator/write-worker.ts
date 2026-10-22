@@ -15,11 +15,7 @@ import {createLogContext} from '../../server/logging.ts';
 import type {ChangeStreamData} from '../change-source/protocol/current/downstream.ts';
 import {LitestreamCheckpointer} from '../litestream/litestream-checkpointer.ts';
 import {LitestreamController} from '../litestream/litestream-controller.ts';
-import {
-  ChangeProcessor,
-  REPLICA_OPTIMIZE_MASK,
-  type ChangeProcessorMode,
-} from './change-processor.ts';
+import {ChangeProcessor, type ChangeProcessorMode} from './change-processor.ts';
 import {readReplicaBackfills} from './schema/backfilling.ts';
 import {getSubscriptionState} from './schema/replication-state.ts';
 import {
@@ -172,7 +168,9 @@ function createAPI(): API {
     stop() {
       checkpointer?.close();
       checkpointer = undefined;
-      db?.close({optimize: REPLICA_OPTIMIZE_MASK});
+      // The replicator gathers the replica's statistics when it prepares it,
+      // and after a schema change.
+      db?.close({optimize: false});
       db = undefined;
       runner = undefined;
       processor = undefined;

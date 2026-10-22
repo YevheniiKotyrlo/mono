@@ -105,6 +105,11 @@ export const shardOptions = {
   },
 };
 
+export const DEFAULT_REPLICA_ANALYSIS_LIMIT = 1000;
+
+// SQLite keeps the low 31 bits of `PRAGMA analysis_limit`.
+const MAX_REPLICA_ANALYSIS_LIMIT = 0x7fffffff;
+
 const replicaOptions = {
   file: {
     type: v.string().optional(() => 'zero.db'),
@@ -129,16 +134,26 @@ const replicaOptions = {
     type: v
       .number()
       .assert(
-        n => Number.isInteger(n) && n >= 0,
-        `replica.analysisLimit must be an integer >= 0`,
+        value =>
+          Number.isSafeInteger(value) &&
+          value >= 0 &&
+          value <= MAX_REPLICA_ANALYSIS_LIMIT,
+        `must be an integer between 0 and ${MAX_REPLICA_ANALYSIS_LIMIT}`,
       )
-      .optional(() => 1000),
+      .optional(() => DEFAULT_REPLICA_ANALYSIS_LIMIT),
     desc: [
-      `The number of rows of each index that ANALYZE reads whenever zero-cache gathers the`,
-      `replica's query planner statistics. A sample is quick to gather, but it can misjudge`,
-      `an index led by a column with few distinct values in a large table, such as a`,
-      `soft-delete flag, so that SQLite scans that index instead of seeking a more`,
-      `selective one. Set to {bold 0} to read every row.`,
+      `The number of rows of each index that ANALYZE reads when the replicator gathers the`,
+      `replica's query planner statistics: at startup, and after a replicated schema change.`,
+      `A sample is quick to gather, but it can misjudge an index led by a column with few`,
+      `distinct values in a large table, such as a soft-delete flag, so that SQLite scans that`,
+      `index instead of seeking a more selective one.`,
+      ``,
+      `Set to {bold 0} to read every row, which also gathers SQLite's {bold sqlite_stat4}`,
+      `histograms. Each pass then reads every row of the tables it analyzes, including the`,
+      `pass after a schema change, which replication waits for.`,
+      ``,
+      `At the first startup after this value changes, the replicator gathers the statistics of`,
+      `every table under the new limit.`,
     ],
   },
 };

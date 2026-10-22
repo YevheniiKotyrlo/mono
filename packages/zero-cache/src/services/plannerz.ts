@@ -17,17 +17,18 @@ import {StatementRunner} from '../db/statements.ts';
 import {getReplicationState} from './replicator/schema/replication-state.ts';
 
 /**
- * How the statistics in the replica were gathered. zero-cache only ever runs
- * `PRAGMA optimize`, and always under an `analysis_limit`, which samples rather
- * than scanning. A replica that someone ran `ANALYZE` on by hand has better
- * statistics, which is visible in `sqlite_stat4` having rows at all.
+ * How the statistics in the replica were gathered. zero-cache gathers them
+ * under `replica.analysisLimit`, which samples rather than scanning unless it
+ * is 0. Only an `ANALYZE` without a limit collects `sqlite_stat4`, so its
+ * having rows at all shows statistics read from every row.
  */
 const APPROXIMATE_METHOD =
-  'PRAGMA optimize under an analysis_limit. Row counts and per-key averages ' +
-  'are sampled estimates, and sqlite_stat4 is not collected.';
+  'ANALYZE under an analysis_limit (ZERO_REPLICA_ANALYSIS_LIMIT). Row counts ' +
+  'and per-key averages are sampled estimates, and sqlite_stat4 is not ' +
+  'collected.';
 const FULL_METHOD =
-  'ANALYZE, with no analysis limit. sqlite_stat4 has rows, so a full ANALYZE ' +
-  'ran against this replica at some point.';
+  'ANALYZE with no analysis limit, as zero-cache runs under ' +
+  'ZERO_REPLICA_ANALYSIS_LIMIT=0. sqlite_stat4 has rows.';
 
 /**
  * A fixed glossary, sent with every bundle. The audience is a language model

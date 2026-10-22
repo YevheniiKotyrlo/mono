@@ -17,6 +17,7 @@ import {
   getAscendingEvents,
   recordEvent,
 } from '../services/replicator/schema/replication-state.ts';
+import {gatherStatistics} from '../services/replicator/schema/statistics.ts';
 import {
   applyPragmas,
   type PragmaConfig,
@@ -163,13 +164,9 @@ async function prepare(
     const pragmas = getPragmaConfig(mode, analysisLimit);
     applyPragmas(replica, pragmas);
 
-    // Analyzes every table that lacks statistics, as a freshly synced replica's
-    // do, under the analysis_limit above: without 0x10, SQLite does not swap
-    // in a limit of its own.
-    replica.pragma('optimize = 0x10002');
-    lc.info?.(`optimized ${file}`);
+    gatherStatistics(lc, replica);
   } finally {
-    replica.close();
+    replica.close({optimize: false});
   }
   return {file, walMode, pageSize};
 }
@@ -236,7 +233,8 @@ export function setupReplica(
       lc.info?.(`copying ${file} to ${copyLocation}`);
       const replica = new Database(lc, file);
       replica.prepare(`VACUUM INTO ?`).run(copyLocation);
-      replica.close();
+      // The replica's statistics are maintained by its replicator.
+      replica.close({optimize: false});
       lc.info?.(`finished copy (${Date.now() - start} ms)`);
 
       return prepare(lc, {...replicaOptions, file: copyLocation}, 'wal2', mode);

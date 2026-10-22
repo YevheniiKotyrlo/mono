@@ -3,6 +3,7 @@ import {LogContext} from '@rocicorp/logger';
 import {resolver} from '@rocicorp/resolver';
 import type {LogConfig} from '../../../../shared/src/logging.ts';
 import {Queue} from '../../../../shared/src/queue.ts';
+import {DEFAULT_REPLICA_ANALYSIS_LIMIT} from '../../config/zero-config.ts';
 import {parentWorker, type Worker} from '../../types/processes.ts';
 import type {Source} from '../../types/streams.ts';
 import {getPragmaConfig, setupReplica} from '../../workers/replicator.ts';
@@ -237,7 +238,7 @@ export default async function runWorker(
   failpointArg?: string,
 ): Promise<void> {
   const failpoint = parseFailpoint(failpointArg);
-  const replica = {file: dbPath, analysisLimit: 1000};
+  const replica = {file: dbPath, analysisLimit: DEFAULT_REPLICA_ANALYSIS_LIMIT};
   await setupReplica(lc, 'serving', replica);
 
   const worker = new FailpointWriteWorkerClient(

@@ -73,6 +73,7 @@ import {
   ZERO_VERSION_COLUMN_NAME,
   updateReplicationWatermark,
 } from './schema/replication-state.ts';
+import {optimizeStatistics} from './schema/statistics.ts';
 import {TableMetadataTracker} from './schema/table-metadata.ts';
 
 export type ChangeProcessorMode = ReplicatorMode | 'initial-sync';
@@ -83,13 +84,6 @@ const MAX_SQLITE_BIND_BYTES = Math.min(
   bufferConstants.MAX_LENGTH,
   bufferConstants.MAX_STRING_LENGTH,
 );
-
-/**
- * The `PRAGMA optimize` mask the replicator runs on its replica: 0x02 alone,
- * since the default mask adds 0x10, with which SQLite replaces an
- * `analysis_limit` of 0, or of 2000 and above, with 2000.
- */
-export const REPLICA_OPTIMIZE_MASK = 0x02;
 
 export type CommitResult = {
   watermark: string;
@@ -1133,7 +1127,7 @@ class TransactionProcessor {
     // them under its analysis limit when it prepares the replica.
     if (this.#schemaChanged && this.#mode !== 'initial-sync') {
       const start = Date.now();
-      this.#db.db.pragma(`optimize = ${REPLICA_OPTIMIZE_MASK}`);
+      optimizeStatistics(this.#db.db);
       this.#lc.info?.(
         `PRAGMA optimized after schema change (${Date.now() - start} ms)`,
       );
