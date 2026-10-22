@@ -32,6 +32,8 @@ import {initReplicationState} from './replication-state.ts';
 
 const lc = createSilentLogContext();
 
+const LOG_CONFIG = {level: 'error', format: 'text'} as const;
+
 const ROWS = 10_000;
 
 // The replica schema version before the one that adds `_zero.statistics`.
@@ -196,8 +198,28 @@ describe('replica statistics', () => {
     });
   }
 
-  function prepare(analysisLimit: number, mode: ReplicaFileMode = 'serving') {
-    return setupReplica(lc, mode, {file: file.path, analysisLimit});
+  // The replicator's start: it prepares the replica, and its write worker
+  // opens the prepared file. Returns that file.
+  async function startReplicator(
+    analysisLimit: number,
+    fileMode: ReplicaFileMode = 'serving',
+  ): Promise<string> {
+    const {file: replicaFile} = await setupReplica(lc, fileMode, {
+      file: file.path,
+      analysisLimit,
+    });
+    const worker = new ThreadWriteWorkerClient();
+    try {
+      await worker.init(
+        replicaFile,
+        fileMode === 'backup' ? 'backup' : 'serving',
+        getPragmaConfig(fileMode, analysisLimit),
+        LOG_CONFIG,
+      );
+    } finally {
+      await worker.stop();
+    }
+    return replicaFile;
   }
 
   // A table replicated while empty, which its schema change leaves without
@@ -214,7 +236,7 @@ describe('replica statistics', () => {
 
   test('a synced replica is analyzed from every row under a limit of 0', async () => {
     await syncReplica();
-    await prepare(0);
+    await startReplicator(0);
 
     expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBe(ROWS);
     expect(recordedAnalysisLimit(file.path)).toBe(0);
@@ -224,7 +246,7 @@ describe('replica statistics', () => {
     'a synced replica is sampled under a limit of %d',
     async analysisLimit => {
       await syncReplica();
-      await prepare(analysisLimit);
+      await startReplicator(analysisLimit);
 
       expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBeOneOf(
         sampleSizes(analysisLimit),
@@ -236,15 +258,15 @@ describe('replica statistics', () => {
   test("a synced replica the change-streamer polls first is analyzed under the replicator's limit", async () => {
     await syncReplica();
     new ReplicaPoller(lc, file.path).start().cancel();
-    await prepare(0);
+    await startReplicator(0);
 
     expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBe(ROWS);
   });
 
   test('a changed limit gathers every table again', async () => {
     await syncReplica();
-    await prepare(1000);
-    await prepare(0);
+    await startReplicator(1000);
+    await startReplicator(0);
 
     expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBe(ROWS);
     expect(recordedAnalysisLimit(file.path)).toBe(0);
@@ -252,62 +274,50 @@ describe('replica statistics', () => {
 
   test("an unanalyzed table the change-streamer polls past is analyzed at the replicator's next preparation", async () => {
     await syncReplica();
-    await prepare(0);
+    await startReplicator(0);
     addUnanalyzedTable();
     new ReplicaPoller(lc, file.path).start().cancel();
-    await prepare(0);
+    await startReplicator(0);
 
     expect(rowsPerLeadingValue(file.path, 'other_deleted_created')).toBe(ROWS);
   });
 
   test('copying the replica to serve gathers no statistics on the original', async () => {
     await syncReplica();
-    await prepare(0, 'backup');
+    await startReplicator(0, 'backup');
     addUnanalyzedTable();
-    await prepare(0, 'serving-copy');
+    const copy = await startReplicator(0, 'serving-copy');
 
     expect(
       rowsPerLeadingValue(file.path, 'other_deleted_created'),
     ).toBeUndefined();
+    expect(rowsPerLeadingValue(copy, 'other_deleted_created')).toBe(ROWS);
+  });
+
+  test('preparing a replica gathers no statistics', async () => {
+    await syncReplica();
+    await setupReplica(lc, 'serving', {file: file.path, analysisLimit: 0});
+
     expect(
-      rowsPerLeadingValue(
-        replicaFileName(file.path, 'serving-copy'),
-        'other_deleted_created',
-      ),
-    ).toBe(ROWS);
+      rowsPerLeadingValue(file.path, 'item_deleted_created'),
+    ).toBeUndefined();
   });
 
   test('stopping the write worker gathers no statistics', async () => {
     await syncReplica();
-    await prepare(0);
-    addUnanalyzedTable();
+    await startReplicator(0);
 
     const worker = new ThreadWriteWorkerClient();
-    await worker.init(file.path, 'serving', getPragmaConfig('serving', 0), {
-      level: 'error',
-      format: 'text',
-    });
-    await worker.stop();
-
-    expect(
-      rowsPerLeadingValue(file.path, 'other_deleted_created'),
-    ).toBeUndefined();
-  });
-
-  test('a preparation that fails before gathering statistics gathers none', async () => {
-    await syncReplica();
-    await prepare(0, 'backup');
-    addUnanalyzedTable();
-
-    // An open read transaction keeps the replicator from moving the replica
-    // out of 'wal' mode, as a serving replica must.
-    const reader = new Database(lc, file.path, {readonly: true});
+    await worker.init(
+      file.path,
+      'serving',
+      getPragmaConfig('serving', 0),
+      LOG_CONFIG,
+    );
     try {
-      reader.exec('BEGIN');
-      reader.prepare('SELECT count(*) FROM item').get();
-      await expect(prepare(0)).rejects.toThrow('database is locked');
+      addUnanalyzedTable();
     } finally {
-      reader.close();
+      await worker.stop();
     }
 
     expect(
@@ -317,10 +327,10 @@ describe('replica statistics', () => {
 
   test('a rollback past the record, and forward again, gathers every table again', async () => {
     await syncReplica();
-    await prepare(0);
+    await startReplicator(0);
 
     // An earlier zero-cache resets the replica's data version to its own, and
-    // gathers statistics of its own.
+    // samples `item` at 1000, as it does after a schema change on the table.
     const earlierVersions = Object.fromEntries(
       Object.entries(schemaVersionMigrationMap).filter(
         ([version]) => Number(version) <= VERSION_BEFORE_STATISTICS,
@@ -335,7 +345,7 @@ describe('replica statistics', () => {
       earlier.close({optimize: false});
     }
 
-    await prepare(0);
+    await startReplicator(0);
 
     expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBe(ROWS);
     expect(recordedAnalysisLimit(file.path)).toBe(0);
@@ -343,7 +353,7 @@ describe('replica statistics', () => {
 
   test('a replica analyzed before the record keeps its statistics under the default limit', async () => {
     await syncReplica();
-    await prepare(5000);
+    await startReplicator(5000);
 
     const earlier = new Database(lc, file.path);
     try {
@@ -355,7 +365,7 @@ describe('replica statistics', () => {
     } finally {
       earlier.close({optimize: false});
     }
-    await prepare(DEFAULT_REPLICA_ANALYSIS_LIMIT);
+    await startReplicator(DEFAULT_REPLICA_ANALYSIS_LIMIT);
 
     expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBeOneOf(
       sampleSizes(5000),

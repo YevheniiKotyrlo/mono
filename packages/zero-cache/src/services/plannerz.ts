@@ -20,15 +20,14 @@ import {getReplicationState} from './replicator/schema/replication-state.ts';
  * How the statistics in the replica were gathered. zero-cache gathers them
  * under `replica.analysisLimit`, which samples rather than scanning unless it
  * is 0. Only an `ANALYZE` without a limit collects `sqlite_stat4`, so its
- * having rows at all shows statistics read from every row.
+ * having rows at all shows that statistics were read from every row.
  */
 const APPROXIMATE_METHOD =
-  'ANALYZE under an analysis_limit (ZERO_REPLICA_ANALYSIS_LIMIT). Row counts ' +
-  'are exact, per-key averages are sampled estimates, and sqlite_stat4 is ' +
-  'not collected.';
+  'ANALYZE under an analysis_limit. Per-key averages are sampled ' +
+  'estimates, and sqlite_stat4 is not collected.';
 const FULL_METHOD =
-  'ANALYZE with no analysis limit, as zero-cache runs under ' +
-  'ZERO_REPLICA_ANALYSIS_LIMIT=0. sqlite_stat4 has rows.';
+  'ANALYZE, with no analysis limit. sqlite_stat4 has rows, so a full ANALYZE ' +
+  'ran against this replica at some point.';
 
 /**
  * A fixed glossary, sent with every bundle. The audience is a language model

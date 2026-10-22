@@ -157,9 +157,9 @@ export async function runSchemaMigrations(
       }
     }
 
-    // The replicator gathers the replica's statistics when it prepares it,
-    // under its configured analysis limit, so neither the migration nor
-    // closing its connection runs ANALYZE or `PRAGMA optimize`.
+    // The replica's statistics are maintained by the replicator, under its
+    // configured analysis limit, so neither the migration nor closing its
+    // connection runs ANALYZE or `PRAGMA optimize`.
     //
     // Do not run `quick_check` here. It scans the full database and can
     // dominate startup time for large replicas or slower disks.

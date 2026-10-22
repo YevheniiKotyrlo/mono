@@ -17,7 +17,6 @@ import {
   getAscendingEvents,
   recordEvent,
 } from '../services/replicator/schema/replication-state.ts';
-import {gatherStatistics} from '../services/replicator/schema/statistics.ts';
 import {
   applyPragmas,
   type PragmaConfig,
@@ -163,9 +162,8 @@ async function prepare(
 
     const pragmas = getPragmaConfig(mode, analysisLimit);
     applyPragmas(replica, pragmas);
-
-    gatherStatistics(lc, replica);
   } finally {
+    // The write worker gathers the replica's statistics when it opens it.
     replica.close({optimize: false});
   }
   return {file, walMode, pageSize};
@@ -233,7 +231,7 @@ export function setupReplica(
       lc.info?.(`copying ${file} to ${copyLocation}`);
       const replica = new Database(lc, file);
       replica.prepare(`VACUUM INTO ?`).run(copyLocation);
-      // The replica's statistics are maintained by its replicator.
+      // The replica's statistics are maintained by the replicator.
       replica.close({optimize: false});
       lc.info?.(`finished copy (${Date.now() - start} ms)`);
 

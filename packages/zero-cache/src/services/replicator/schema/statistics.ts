@@ -2,15 +2,18 @@ import type {LogContext} from '@rocicorp/logger';
 import type {Database} from '../../../../../zqlite/src/db.ts';
 
 /**
- * The replicator alone gathers the replica's query planner statistics, under
- * its connection's `analysis_limit` (`replica.analysisLimit`): when it prepares
- * the replica, and after a replicated schema change. Every other connection
- * to the replica either opens it read-only or closes it with
- * `{optimize: false}`, so that nothing gathers statistics under another limit.
+ * The replicator's write worker, the replica's one writer, alone gathers the
+ * replica's query planner statistics, under its connection's `analysis_limit`
+ * (`replica.analysisLimit`), in its own thread: when it opens the replica, and
+ * after a replicated schema change. Every other connection to the replica
+ * either opens it read-only or closes it with `{optimize: false}`, so that
+ * nothing gathers statistics under another limit.
  */
 
 // analysisLimit : The `analysis_limit` under which the replicator last
-//                 gathered the statistics of every table.
+//                 gathered the statistics of every table. Statistics an
+//                 earlier zero-cache left count as gathered under 1000, the
+//                 `analysis_limit` it set on the replica's connections.
 // lock          : Auto-magic column for enforcing single-row semantics.
 export const CREATE_STATISTICS_TABLE = /*sql*/ `
   CREATE TABLE "_zero.statistics" (

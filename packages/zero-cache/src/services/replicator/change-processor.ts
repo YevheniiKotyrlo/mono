@@ -1123,8 +1123,8 @@ class TransactionProcessor {
     }
     updateReplicationWatermark(this.#db, watermark);
 
-    // An initial sync leaves the statistics to the replicator, which gathers
-    // them under its analysis limit when it prepares the replica.
+    // An initial sync leaves the statistics to the replicator, whose write
+    // worker gathers them under its analysis limit when it opens the replica.
     if (this.#schemaChanged && this.#mode !== 'initial-sync') {
       const start = Date.now();
       optimizeStatistics(this.#db.db);

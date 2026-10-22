@@ -388,13 +388,12 @@ export const schemaVersionMigrationMap: IncrementalMigrationMap = {
   // again when `replica.analysisLimit` changes. See
   // `replicator/schema/statistics.ts`.
   //
-  // A replica that has statistics records 1000, the limit the replicator
-  // gathered them under before this version, so that a replica kept at the
-  // default limit is not analyzed again.
+  // A replica that has statistics records 1000 for them, the `analysis_limit`
+  // an earlier zero-cache set on the replica's connections, whether it reaches
+  // this version by an upgrade or by rolling forward after a rollback: a limit
+  // of 1000 keeps them, and another limit gathers every table's again.
   //
-  // No `minSafeVersion`: an older zero-cache ignores the table. It does gather
-  // statistics of its own, so rolling forward again records 1000 in place of
-  // the limit recorded before.
+  // No `minSafeVersion`: an older zero-cache ignores the table.
   19: {
     migrateSchema: (_, db) => {
       db.exec(CREATE_V19_STATISTICS_TABLE);
