@@ -23,12 +23,12 @@ import {
   schemaVersionMigrationMap,
 } from '../../change-source/common/replica-schema.ts';
 import {ReplicaPoller} from '../../change-streamer/replica-poller.ts';
-import {buildPlannerzBundleFromDB} from '../../plannerz.ts';
+import {buildPlannerzBundleFromDB, parseStat1} from '../../plannerz.ts';
 import {ChangeProcessor} from '../change-processor.ts';
 import {fakeReplicator, ReplicationMessages} from '../test-utils.ts';
 import {ThreadWriteWorkerClient} from '../write-worker-client.ts';
 import {initReplicationState} from './replication-state.ts';
-import {readStatisticsLimit} from './statistics.ts';
+import {readStatisticsRecord, type StatisticsRecord} from './statistics.ts';
 
 const lc = createSilentLogContext();
 
@@ -93,7 +93,9 @@ function readRowsPerLeadingValue(
   const row = db
     .prepare('SELECT stat FROM sqlite_stat1 WHERE idx = ?')
     .get<{stat: string} | undefined>(index);
-  return row === undefined ? undefined : Number(row.stat.split(' ')[1]);
+  return row === undefined
+    ? undefined
+    : parseStat1(row.stat).avgRowsPerPrefix[0];
 }
 
 function rowsPerLeadingValue(path: string, index: string): number | undefined {
@@ -105,13 +107,17 @@ function rowsPerLeadingValue(path: string, index: string): number | undefined {
   }
 }
 
-function recordedAnalysisLimit(path: string): number | null | undefined {
+function recordedStatistics(path: string): StatisticsRecord {
   const db = new Database(lc, path, {readonly: true});
   try {
-    return readStatisticsLimit(db);
+    return readStatisticsRecord(db);
   } finally {
     db.close();
   }
+}
+
+function gatheredUnder(analysisLimit: number): StatisticsRecord {
+  return {type: 'gathered', analysisLimit};
 }
 
 // A sample reads as many rows as the limit, or one more.
@@ -204,7 +210,6 @@ describe('replica statistics', () => {
   ): Promise<string> {
     const {file: replicaFile} = await setupReplica(lc, fileMode, {
       file: file.path,
-      analysisLimit,
     });
     const worker = new ThreadWriteWorkerClient();
     try {
@@ -237,7 +242,7 @@ describe('replica statistics', () => {
     await startReplicator(0);
 
     expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBe(ROWS);
-    expect(recordedAnalysisLimit(file.path)).toBe(0);
+    expect(recordedStatistics(file.path)).toEqual(gatheredUnder(0));
   });
 
   test.each([1000, 5000])(
@@ -249,7 +254,9 @@ describe('replica statistics', () => {
       expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBeOneOf(
         sampleSizes(analysisLimit),
       );
-      expect(recordedAnalysisLimit(file.path)).toBe(analysisLimit);
+      expect(recordedStatistics(file.path)).toEqual(
+        gatheredUnder(analysisLimit),
+      );
     },
   );
 
@@ -268,7 +275,7 @@ describe('replica statistics', () => {
     await startReplicator(0);
 
     expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBe(ROWS);
-    expect(recordedAnalysisLimit(file.path)).toBe(0);
+    expect(recordedStatistics(file.path)).toEqual(gatheredUnder(0));
   });
 
   test("an unanalyzed table the change-streamer polls past is analyzed at the replicator's next start", async () => {
@@ -381,7 +388,7 @@ describe('replica statistics', () => {
       const {statsQuality} = buildPlannerzBundleFromDB(lc, db, {
         enableQueryPlanner: true,
       } as NormalizedZeroConfig);
-      expect(statsQuality.analysisLimit).toBe(0);
+      expect(statsQuality.recorded).toEqual(gatheredUnder(0));
     } finally {
       db.close();
     }
@@ -389,7 +396,7 @@ describe('replica statistics', () => {
 
   test('preparing a replica gathers no statistics', async () => {
     await syncReplica();
-    await setupReplica(lc, 'serving', {file: file.path, analysisLimit: 0});
+    await setupReplica(lc, 'serving', {file: file.path});
 
     expect(
       rowsPerLeadingValue(file.path, 'item_deleted_created'),
@@ -441,7 +448,7 @@ describe('replica statistics', () => {
     await startReplicator(0);
 
     expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBe(ROWS);
-    expect(recordedAnalysisLimit(file.path)).toBe(0);
+    expect(recordedStatistics(file.path)).toEqual(gatheredUnder(0));
   });
 
   test('a replica analyzed before the record keeps its statistics under a limit of 1000', async () => {
@@ -463,7 +470,7 @@ describe('replica statistics', () => {
     expect(rowsPerLeadingValue(file.path, 'item_deleted_created')).toBeOneOf(
       sampleSizes(5000),
     );
-    expect(recordedAnalysisLimit(file.path)).toBeNull();
+    expect(recordedStatistics(file.path)).toEqual({type: 'earlier'});
   });
 });
 

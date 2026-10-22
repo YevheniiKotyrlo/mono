@@ -15,7 +15,10 @@ import {
 } from '../db/lite-tables.ts';
 import {StatementRunner} from '../db/statements.ts';
 import {getReplicationState} from './replicator/schema/replication-state.ts';
-import {readStatisticsLimit} from './replicator/schema/statistics.ts';
+import {
+  readStatisticsRecord,
+  type StatisticsRecord,
+} from './replicator/schema/statistics.ts';
 
 /**
  * How the statistics in the replica were gathered. zero-cache gathers them
@@ -72,8 +75,9 @@ const ABOUT = {
     'The planner flags in `server.planner`.',
     'The analysis limit (ZERO_REPLICA_ANALYSIS_LIMIT): 0 gathers the ' +
       'statistics from every row, sqlite_stat4 included. ' +
-      '`statsQuality.analysisLimit` is the limit they were gathered under, ' +
-      'null when an earlier zero-cache gathered them without recording one.',
+      '`statsQuality.recorded` says how they were gathered: "gathered" ' +
+      'under its `analysisLimit`, "earlier" by an earlier zero-cache, which ' +
+      'recorded no limit, or "none" when nothing is recorded.',
   ],
   caveats: [
     'Row counts are estimates from the statistics, not COUNT(*). This ' +
@@ -181,7 +185,7 @@ export type PlannerzBundle = {
     stat1Present: boolean;
     stat4Rows: number;
     method: string;
-    analysisLimit: number | null | undefined;
+    recorded: StatisticsRecord;
     tablesWithoutStats: string[];
   };
   tables: TableStats[];
@@ -387,9 +391,9 @@ export function buildPlannerzBundleFromDB(
       stat1Present,
       stat4Rows,
       method: stat4Rows > 0 ? FULL_METHOD : APPROXIMATE_METHOD,
-      analysisLimit: tableExists(db, '_zero.statistics')
-        ? readStatisticsLimit(db)
-        : undefined,
+      recorded: tableExists(db, '_zero.statistics')
+        ? readStatisticsRecord(db)
+        : {type: 'none'},
       tablesWithoutStats,
     },
     tables: tableStats,

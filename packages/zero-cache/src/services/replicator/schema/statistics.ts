@@ -1,4 +1,5 @@
 import type {LogContext} from '@rocicorp/logger';
+import {unreachable} from '../../../../../shared/src/asserts.ts';
 import type {Database} from '../../../../../zqlite/src/db.ts';
 
 /**
@@ -22,6 +23,12 @@ export const CREATE_STATISTICS_TABLE = /*sql*/ `
   );
 `;
 
+/** What the replica records about how its statistics were gathered. */
+export type StatisticsRecord =
+  | {readonly type: 'none'}
+  | {readonly type: 'earlier'}
+  | {readonly type: 'gathered'; readonly analysisLimit: number};
+
 /**
  * The `analysis_limit` an earlier zero-cache set on the replicator's
  * connections. Statistics it gathered are kept under this limit.
@@ -41,33 +48,59 @@ const OPTIMIZE_MASK = 0xfffe & ~0x10;
 /** Checks every table, rather than only those the connection has queried. */
 const OPTIMIZE_ALL_TABLES = 0x10000;
 
-/**
- * The `analysis_limit` the replica records its statistics were gathered
- * under: `null` for statistics an earlier zero-cache gathered, and `undefined`
- * when the replica records none.
- */
-export function readStatisticsLimit(db: Database): number | null | undefined {
-  return db
+export function readStatisticsRecord(db: Database): StatisticsRecord {
+  const row = db
     .prepare(`SELECT analysisLimit FROM "_zero.statistics"`)
-    .get<{analysisLimit: number | null} | undefined>()?.analysisLimit;
+    .get<{analysisLimit: number | null} | undefined>();
+  if (row === undefined) {
+    return {type: 'none'};
+  }
+  return row.analysisLimit === null
+    ? {type: 'earlier'}
+    : {type: 'gathered', analysisLimit: row.analysisLimit};
+}
+
+/** The `analysis_limit` under which the recorded statistics are kept. */
+function keptUnder(record: StatisticsRecord): number | undefined {
+  switch (record.type) {
+    case 'none':
+      return undefined;
+    case 'earlier':
+      return EARLIER_ANALYSIS_LIMIT;
+    case 'gathered':
+      return record.analysisLimit;
+    default:
+      unreachable(record);
+  }
+}
+
+function describe(record: StatisticsRecord): string {
+  switch (record.type) {
+    case 'none':
+      return 'it records none';
+    case 'earlier':
+      return 'an earlier zero-cache gathered them';
+    case 'gathered':
+      return `it records ${record.analysisLimit}`;
+    default:
+      unreachable(record);
+  }
 }
 
 /**
  * Gathers the replica's statistics under the connection's `analysis_limit`:
- * those of every table when the replica records none, or another limit, and
- * otherwise those of each table that SQLite finds without statistics or ten
- * times larger or smaller than when they were gathered.
+ * those of every table, in one transaction, when the replica keeps none under
+ * that limit, and otherwise those of each table that SQLite finds without
+ * statistics or ten times larger or smaller than when they were gathered.
  */
 export function gatherStatistics(lc: LogContext, db: Database): void {
   const start = performance.now();
   const [{analysis_limit: analysisLimit}] = db.pragma<{
     analysis_limit: number;
   }>('analysis_limit');
-  const recorded = readStatisticsLimit(db);
+  const record = readStatisticsRecord(db);
 
-  if (
-    (recorded === null ? EARLIER_ANALYSIS_LIMIT : recorded) === analysisLimit
-  ) {
+  if (keptUnder(record) === analysisLimit) {
     db.pragma(`optimize = ${OPTIMIZE_ALL_TABLES | OPTIMIZE_MASK}`);
     lc.info?.(
       `optimized ${db.name} (${(performance.now() - start).toFixed(2)} ms)`,
@@ -75,19 +108,18 @@ export function gatherStatistics(lc: LogContext, db: Database): void {
     return;
   }
 
+  lc.info?.(
+    `analyzing every table of ${db.name} under analysis_limit ${analysisLimit}, ` +
+      `where ${describe(record)}`,
+  );
   db.transaction(() => {
     db.exec('ANALYZE main');
     db.prepare(
       `INSERT OR REPLACE INTO "_zero.statistics" (analysisLimit, lock) VALUES (?, 1)`,
     ).run(analysisLimit);
   });
-  const gatheredBefore =
-    recorded === null
-      ? 'an earlier zero-cache gathered them'
-      : `it recorded ${recorded ?? 'no limit'}`;
   lc.info?.(
-    `analyzed every table of ${db.name} under analysis_limit ${analysisLimit}, ` +
-      `where ${gatheredBefore} (${(performance.now() - start).toFixed(2)} ms)`,
+    `analyzed every table of ${db.name} (${(performance.now() - start).toFixed(2)} ms)`,
   );
 }
 

@@ -74,12 +74,17 @@ export function deleteStaleChangeLog(
   return true;
 }
 
+type PreparedReplicaOptions = Pick<
+  ReplicaOptions,
+  'file' | 'vacuumIntervalHours'
+>;
+
 const MILLIS_PER_HOUR = 1000 * 60 * 60;
 const MB = 1024 * 1024;
 
 async function prepare(
   lc: LogContext,
-  {file, vacuumIntervalHours}: ReplicaOptions,
+  {file, vacuumIntervalHours}: PreparedReplicaOptions,
   walMode: WalMode,
   mode: ReplicaFileMode,
 ): Promise<{file: string; walMode: WalMode; pageSize: number}> {
@@ -205,7 +210,7 @@ export function getPragmaConfig(
 export function setupReplica(
   lc: LogContext,
   mode: ReplicaFileMode,
-  replicaOptions: ReplicaOptions,
+  replicaOptions: PreparedReplicaOptions,
 ) {
   lc.info?.(`setting up ${mode} replica`);
 

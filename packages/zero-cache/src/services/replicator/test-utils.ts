@@ -34,6 +34,10 @@ export interface FakeReplicator {
   ): void;
 }
 
+/**
+ * Replicates transactions through a ChangeProcessor on `db`, whose
+ * `analysis_limit` it sets as the replicator's write worker sets its own.
+ */
 export function fakeReplicator(
   lc: LogContext,
   db: Database,
@@ -59,6 +63,10 @@ export function fakeReplicator(
   };
 }
 
+/**
+ * Creates a 'serving' ChangeProcessor on `db`, after setting the connection's
+ * `analysis_limit` as the replicator's write worker sets its own.
+ */
 export function createChangeProcessor(
   db: Database,
   failures: (lc: LogContext, err: unknown) => void = (_, err) => {
@@ -66,8 +74,6 @@ export function createChangeProcessor(
   },
   analysisLimit = DEFAULT_REPLICA_ANALYSIS_LIMIT,
 ): ChangeProcessor {
-  // The replicator's write worker gathers statistics under the replica's
-  // analysis_limit, which it sets on its connection.
   db.pragma(`analysis_limit = ${analysisLimit}`);
   return new ChangeProcessor(new StatementRunner(db), 'serving', failures);
 }
