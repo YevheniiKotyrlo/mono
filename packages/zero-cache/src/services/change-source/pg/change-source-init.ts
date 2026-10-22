@@ -163,7 +163,9 @@ export async function initializePostgresChangeSource(
     const subscriptionState = getSubscriptionStateAndContext(
       new StatementRunner(replica),
     );
-    replica.close();
+    // The replicator gathers the replica's statistics when it prepares it,
+    // under its analysis limit.
+    replica.close({optimize: false});
 
     // Check that upstream is properly setup, and throw an AutoReset to re-run
     // initial sync if not.

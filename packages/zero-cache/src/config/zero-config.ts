@@ -124,6 +124,23 @@ const replicaOptions = {
       `operations are not performed.`,
     ],
   },
+
+  analysisLimit: {
+    type: v
+      .number()
+      .assert(
+        n => Number.isInteger(n) && n >= 0,
+        `replica.analysisLimit must be an integer >= 0`,
+      )
+      .optional(() => 1000),
+    desc: [
+      `The number of rows of each index that ANALYZE reads whenever zero-cache gathers the`,
+      `replica's query planner statistics. A sample is quick to gather, but it can misjudge`,
+      `an index led by a column with few distinct values in a large table, such as a`,
+      `soft-delete flag, so that SQLite scans that index instead of seeking a more`,
+      `selective one. Set to {bold 0} to read every row.`,
+    ],
+  },
 };
 
 export type ReplicaOptions = Config<typeof replicaOptions>;

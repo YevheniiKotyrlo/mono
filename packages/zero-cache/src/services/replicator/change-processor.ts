@@ -84,6 +84,13 @@ const MAX_SQLITE_BIND_BYTES = Math.min(
   bufferConstants.MAX_STRING_LENGTH,
 );
 
+/**
+ * The `PRAGMA optimize` mask the replicator runs on its replica: 0x02 alone,
+ * since the default mask adds 0x10, with which SQLite replaces an
+ * `analysis_limit` of 0, or of 2000 and above, with 2000.
+ */
+export const REPLICA_OPTIMIZE_MASK = 0x02;
+
 export type CommitResult = {
   watermark: string;
   completedBackfill: DownloadStatus | undefined;
@@ -1122,9 +1129,11 @@ class TransactionProcessor {
     }
     updateReplicationWatermark(this.#db, watermark);
 
-    if (this.#schemaChanged) {
+    // An initial sync leaves the statistics to the replicator, which gathers
+    // them under its analysis limit when it prepares the replica.
+    if (this.#schemaChanged && this.#mode !== 'initial-sync') {
       const start = Date.now();
-      this.#db.db.pragma('optimize');
+      this.#db.db.pragma(`optimize = ${REPLICA_OPTIMIZE_MASK}`);
       this.#lc.info?.(
         `PRAGMA optimized after schema change (${Date.now() - start} ms)`,
       );

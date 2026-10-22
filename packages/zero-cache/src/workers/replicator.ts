@@ -82,7 +82,7 @@ const MB = 1024 * 1024;
 
 async function prepare(
   lc: LogContext,
-  {file, vacuumIntervalHours}: ReplicaOptions,
+  {file, vacuumIntervalHours, analysisLimit}: ReplicaOptions,
   walMode: WalMode,
   mode: ReplicaFileMode,
 ): Promise<{file: string; walMode: WalMode; pageSize: number}> {
@@ -160,9 +160,12 @@ async function prepare(
 
     await setJournalMode(lc, replica, walMode);
 
-    const pragmas = getPragmaConfig(mode);
+    const pragmas = getPragmaConfig(mode, analysisLimit);
     applyPragmas(replica, pragmas);
 
+    // Analyzes every table that lacks statistics, as a freshly synced replica's
+    // do, under the analysis_limit above: without 0x10, SQLite does not swap
+    // in a limit of its own.
     replica.pragma('optimize = 0x10002');
     lc.info?.(`optimized ${file}`);
   } finally {
@@ -200,10 +203,13 @@ async function setJournalMode(
  * This is used by both the main thread (setupReplica) and
  * the write worker thread to apply the same pragma settings.
  */
-export function getPragmaConfig(mode: ReplicaFileMode): PragmaConfig {
+export function getPragmaConfig(
+  mode: ReplicaFileMode,
+  analysisLimit: number,
+): PragmaConfig {
   return {
     busyTimeout: 30000,
-    analysisLimit: 1000,
+    analysisLimit,
     walAutocheckpoint: mode === 'backup' ? 0 : undefined,
   };
 }

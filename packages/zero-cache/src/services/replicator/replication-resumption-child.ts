@@ -237,17 +237,23 @@ export default async function runWorker(
   failpointArg?: string,
 ): Promise<void> {
   const failpoint = parseFailpoint(failpointArg);
-  await setupReplica(lc, 'serving', {file: dbPath});
+  const replica = {file: dbPath, analysisLimit: 1000};
+  await setupReplica(lc, 'serving', replica);
 
   const worker = new FailpointWriteWorkerClient(
     new ThreadWriteWorkerClient(),
     parent,
     failpoint,
   );
-  await worker.init(dbPath, 'serving', getPragmaConfig('serving'), {
-    level: 'error',
-    format: 'text',
-  });
+  await worker.init(
+    dbPath,
+    'serving',
+    getPragmaConfig('serving', replica.analysisLimit),
+    {
+      level: 'error',
+      format: 'text',
+    },
+  );
 
   const replicator = new ReplicatorService(
     lc,
