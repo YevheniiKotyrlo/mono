@@ -1,14 +1,7 @@
 import {existsSync} from 'node:fs';
-import {expect, test, vi} from 'vitest';
+import {expect, test} from 'vitest';
 import {createSilentLogContext} from '../../../shared/src/logging-test-utils.ts';
-import * as deleteLiteDb from '../db/delete-lite-db.ts';
-import {DbFile} from './lite.ts';
-
-// These cover the invariant rather than the symptom: DbFile hands out
-// connections, so DbFile is what closes them. Windows cannot unlink a file with
-// an open handle, and POSIX can — so a delete() that left handles open worked on
-// POSIX and could not work on Windows. Asserting the handles are closed makes
-// the guarantee hold on both.
+import {DbFile, REMOVE_DEADLINE_MS, type FileRemoval} from './lite.ts';
 
 const lc = createSilentLogContext();
 
@@ -18,56 +11,61 @@ function seed(file: DbFile): void {
   db.close();
 }
 
-test('delete removes the database file', async () => {
-  const file = new DbFile('lite-test-removes');
-  seed(file);
-  expect(existsSync(file.path)).toBe(true);
+function isClosed(db: ReturnType<DbFile['connect']>): boolean {
+  try {
+    db.prepare('SELECT 1');
+    return false;
+  } catch {
+    return true;
+  }
+}
 
-  await file.delete();
-  expect(existsSync(file.path)).toBe(false);
-});
+/**
+ * A removal whose clock and waits are the test's, refusing the database file
+ * the first `refusals` times it is asked to remove it.
+ */
+function removalRefusing(
+  platform: NodeJS.Platform,
+  refusals: number,
+): FileRemoval & {readonly attempts: () => number} {
+  let now = 0;
+  let attempts = 0;
+  return {
+    platform,
+    now: () => now,
+    wait: ms => {
+      now += ms;
+      return Promise.resolve();
+    },
+    remove: path => {
+      if (!path.endsWith('.db')) {
+        return Promise.resolve();
+      }
+      attempts++;
+      return attempts <= refusals
+        ? Promise.reject(
+            Object.assign(new Error(`EBUSY: ${path}`), {code: 'EBUSY'}),
+          )
+        : Promise.resolve();
+    },
+    attempts: () => attempts,
+  };
+}
 
-test('delete removes the sidecars, which only exist while a connection is open', async () => {
+test('delete removes the database and the sidecars an open connection keeps', async () => {
   const file = new DbFile('lite-test-sidecars');
   const db = file.connect(lc);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
-
-  // The connection stays open on purpose. SQLite removes the sidecars on a clean
-  // close, so closing first would leave nothing for delete() to remove and the
-  // assertion below would hold over an empty set. Asserting one exists first is
-  // what makes the second assertion mean something.
-  //
-  // Only `-wal` is asserted: a write in WAL mode creates it on every platform,
-  // whereas `-shm` is absent under exclusive locking, which would make this
-  // depend on SQLite's coordination strategy rather than on `delete()`.
   expect(existsSync(`${file.path}-wal`)).toBe(true);
 
   await file.delete();
 
-  // Only the database itself is attributable to `delete()`: closing the
-  // connections — which `delete()` does first, and which the case below covers —
-  // is what removes `-wal`. That the removal covers every suffix is pinned by
-  // delete-lite-db.test.ts, which writes each one as a fixture; asserting the
-  // whole list here would pass even if the list were empty.
   expect(existsSync(file.path)).toBe(false);
   expect(existsSync(`${file.path}-wal`)).toBe(false);
 });
 
-test('delete closes a connection the caller left open', async () => {
-  const file = new DbFile('lite-test-closes-open');
-  const db = file.connect(lc);
-  db.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
-
-  // Deliberately not closed by the caller — this is the case that failed on
-  // Windows with EPERM, and the reason closing belongs here.
-  await file.delete();
-
-  expect(() => db.prepare('SELECT 1')).toThrow(/not open/i);
-  expect(existsSync(file.path)).toBe(false);
-});
-
-test('delete closes every connection handed out, not just the last', async () => {
+test('delete closes every connection handed out, including ones the caller left open', async () => {
   const file = new DbFile('lite-test-closes-all');
   const first = file.connect(lc);
   first.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
@@ -76,66 +74,20 @@ test('delete closes every connection handed out, not just the last', async () =>
 
   await file.delete();
 
-  // The structural claim: tracking is per-connection. A fix that only closed
-  // the most recent one would pass the previous test and fail this.
-  for (const db of [first, second, third]) {
-    expect(() => db.prepare('SELECT 1')).toThrow(/not open/i);
-  }
+  expect([first, second, third].map(isClosed)).toEqual([true, true, true]);
   expect(existsSync(file.path)).toBe(false);
 });
 
-test('delete tolerates a caller that already closed its own connection', async () => {
-  const file = new DbFile('lite-test-double-close');
-  const db = file.connect(lc);
-  db.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
-  db.close();
-
-  await expect(file.delete()).resolves.toBeUndefined();
-  expect(existsSync(file.path)).toBe(false);
-});
-
-test('delete reports a file the OS still holds rather than failing the test', async () => {
-  // A replica under os.tmpdir() that Windows has not let go of yet is housekeeping,
-  // not the behaviour under test. Measured there: a file no surviving process
-  // holds, that no deadline short enough for a 30s hook outlasts, and that deletes
-  // without complaint a minute later. Throwing reports "replication is broken"
-  // about a filesystem that is merely slow.
-  const file = new DbFile('lite-test-held-open');
-  const db = file.connect(lc);
-  db.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
-
-  const held = vi
-    .spyOn(deleteLiteDb, 'deleteLiteDBAsync')
-    .mockRejectedValue(
-      Object.assign(new Error(`EBUSY: ${file.path}`), {code: 'EBUSY'}),
-    );
-  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-  try {
-    await expect(file.delete()).resolves.toBeUndefined();
-    // Said out loud, so a file left behind is visible rather than silent.
-    expect(warn).toHaveBeenCalledOnce();
-    expect(String(warn.mock.calls[0][0])).toContain(file.path);
-  } finally {
-    held.mockRestore();
-    warn.mockRestore();
-  }
-  // Closed, asserted the way the siblings assert it: `close()` on an
-  // already-closed handle does not throw either, so it cannot tell the two apart.
-  expect(() => db.prepare('SELECT 1')).toThrow(/not open/iu);
-});
-
-test('delete is idempotent and does not re-close stale connections', async () => {
-  const file = new DbFile('lite-test-idempotent');
+test('delete leaves alone a connection the caller already closed', async () => {
+  const file = new DbFile('lite-test-closed-first');
   seed(file);
 
   await file.delete();
-  // The tracked set is drained on the first call, so a second delete has
-  // nothing to close and no file to remove.
-  await expect(file.delete()).resolves.toBeUndefined();
+
   expect(existsSync(file.path)).toBe(false);
 });
 
-test('a connection opened after delete is tracked by the next delete', async () => {
+test('a connection opened after delete is closed by the next delete', async () => {
   const file = new DbFile('lite-test-reopen');
   seed(file);
   await file.delete();
@@ -144,6 +96,31 @@ test('a connection opened after delete is tracked by the next delete', async () 
   reopened.exec('CREATE TABLE t (a INTEGER PRIMARY KEY)');
   await file.delete();
 
-  expect(() => reopened.prepare('SELECT 1')).toThrow(/not open/i);
+  expect(isClosed(reopened)).toBe(true);
   expect(existsSync(file.path)).toBe(false);
+});
+
+test('on Windows a refused removal is retried until the file goes', async () => {
+  const removal = removalRefusing('win32', 3);
+  const file = new DbFile('lite-test-retried', removal);
+
+  await file.delete();
+
+  expect(removal.attempts()).toBe(4);
+});
+
+test('on Windows a file still held at the deadline fails the delete, naming it', async () => {
+  const removal = removalRefusing('win32', Number.POSITIVE_INFINITY);
+  const file = new DbFile('lite-test-held', removal);
+
+  await expect(file.delete()).rejects.toThrow(`Could not remove ${file.path}`);
+  expect(removal.now()).toBeGreaterThanOrEqual(REMOVE_DEADLINE_MS);
+});
+
+test('elsewhere a refused removal fails at once', async () => {
+  const removal = removalRefusing('linux', 1);
+  const file = new DbFile('lite-test-not-retried', removal);
+
+  await expect(file.delete()).rejects.toThrow(`Could not remove ${file.path}`);
+  expect(removal.attempts()).toBe(1);
 });

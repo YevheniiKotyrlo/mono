@@ -1,50 +1,39 @@
-/* oxlint-disable no-console */
-// Warns about a temp file it could not remove, the way ./db.ts warns about a
-// database it could not drop: a test helper reporting leftovers has no log
-// context to route through, and staying silent is what lets them accumulate.
-import {mkdtempSync, rmSync} from 'node:fs';
+import {rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
 import type {LogContext} from '@rocicorp/logger';
-import {afterEach, expect} from 'vitest';
+import {expect} from 'vitest';
 import {randInt} from '../../../shared/src/rand.ts';
+import {sleep} from '../../../shared/src/sleep.ts';
 import {Database} from '../../../zqlite/src/db.ts';
-import {deleteLiteDBAsync} from '../db/delete-lite-db.ts';
+import {SQLITE_FILE_SUFFIXES} from '../db/delete-lite-db.ts';
 import {id} from '../types/sql.ts';
 
-/** Every directory handed out below, removed after the case that asked for one. */
-const ownedDirs: string[] = [];
+/** How long {@link DbFile.delete} retries a file Windows still holds. */
+export const REMOVE_DEADLINE_MS = 2_000;
+const REMOVE_RETRY_DELAY_MS = 50;
 
-// Registered here rather than per file, the way ./db.ts ends its pool: the hook
-// belongs with the thing that needs it, and a helper that hands out a directory
-// without removing it is how thousands of them collect in the system temp
-// directory — nothing else ever cleans that up.
-afterEach(() => {
-  for (const dir of ownedDirs.splice(0)) {
-    try {
-      rmSync(dir, {recursive: true, force: true});
-    } catch (e) {
-      console.warn(`Unable to remove temp directory ${dir}`, e);
-    }
-  }
-});
+export type FileRemoval = {
+  readonly platform: NodeJS.Platform;
+  readonly now: () => number;
+  readonly wait: (ms: number) => Promise<void>;
+  readonly remove: (path: string) => Promise<void>;
+};
 
-/** A temp directory owned by the running case. */
-export function ownedTempDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
-  ownedDirs.push(dir);
-  return dir;
-}
+const SYSTEM_FILE_REMOVAL: FileRemoval = {
+  platform: process.platform,
+  now: Date.now,
+  wait: sleep,
+  remove: path => rm(path, {force: true}),
+};
 
 export class DbFile {
   readonly path;
+  readonly #removal: FileRemoval;
   readonly #connections: Database[] = [];
 
-  constructor(testName: string) {
-    // join, not string concatenation: concatenating gave a mixed-separator path
-    // like `C:\Users\…\Temp/name-123.db`, which works but leaks into failure
-    // messages and any path comparison.
-    this.path = join(tmpdir(), `${testName}-${randInt(1000000, 9999999)}.db`);
+  constructor(testName: string, removal: FileRemoval = SYSTEM_FILE_REMOVAL) {
+    this.path = `${tmpdir()}/${testName}-${randInt(1000000, 9999999)}.db`;
+    this.#removal = removal;
   }
 
   connect(lc: LogContext): Database {
@@ -54,52 +43,47 @@ export class DbFile {
   }
 
   /**
-   * Closes the connections this file handed out, then removes it.
-   *
-   * The close is load-bearing on Windows, which refuses to unlink a file that
-   * still has an open handle (EPERM/EBUSY). POSIX allows unlink-while-open, so
-   * a `delete()` that left connections open worked there and failed here —
-   * which is why the file that hands out the connections is what closes them,
-   * rather than asking every test to remember.
-   *
-   * Awaited for the handles this process does NOT own. A test that spawned
-   * zero-cache and killed it is racing the operating system's release of that
-   * process's handles, and only an asynchronous retry can win: the synchronous
-   * one blocks the loop that performs the release, so it spins until its budget
-   * runs out against a file nothing is free to unlock. The integration suites
-   * fail exactly that way — measurably, for 30s — and pass on the second
-   * asynchronous attempt.
-   *
-   * Reported rather than thrown when the removal does not win that race. This is
-   * a file under `os.tmpdir()`, so what is at stake is housekeeping, not the
-   * behaviour any caller is testing — and on Windows the last handle on a replica
-   * can outlive every process that opened it by longer than a hook is allowed to
-   * take. Measured: files that no surviving process holds, that no deadline short
-   * enough to fit a 30s hook can outlast, and that delete without complaint a
-   * minute later. Failing there reports "replication is broken" about a
-   * filesystem that is merely slow to let go, which is a worse answer than
-   * saying what actually happened.
-   *
-   * Production keeps the throwing form. `deleteLiteDB` is called where a replica
-   * that refuses to go is a real problem, and it still says so.
+   * Closes the connections this file handed out, then removes it and its
+   * sidecars. Windows refuses to unlink a file with an open handle, so a
+   * refused removal is retried there until {@link REMOVE_DEADLINE_MS}: a
+   * handle a worker thread of this process holds is released only once the
+   * event loop runs its teardown, which a blocking retry would starve.
    */
   async delete(): Promise<void> {
     for (const db of this.#connections.splice(0)) {
+      db.close();
+    }
+    await removeDatabaseFiles(this.path, this.#removal);
+  }
+}
+
+async function removeDatabaseFiles(
+  path: string,
+  removal: FileRemoval,
+): Promise<void> {
+  const deadline = removal.now() + REMOVE_DEADLINE_MS;
+  let remaining: readonly string[] = SQLITE_FILE_SUFFIXES.map(
+    suffix => `${path}${suffix}`,
+  );
+  for (;;) {
+    const held: string[] = [];
+    const failures: unknown[] = [];
+    for (const file of remaining) {
       try {
-        db.close();
-      } catch {
-        // Tests are free to close their own connection first; closing twice is
-        // not an error worth failing teardown over.
+        await removal.remove(file);
+      } catch (e) {
+        held.push(file);
+        failures.push(e);
       }
     }
-    try {
-      await deleteLiteDBAsync(this.path);
-    } catch (error) {
-      console.warn(
-        `left ${this.path} behind: the operating system still had it open`,
-        error,
-      );
+    if (held.length === 0) {
+      return;
     }
+    if (removal.platform !== 'win32' || removal.now() >= deadline) {
+      throw new AggregateError(failures, `Could not remove ${held.join(', ')}`);
+    }
+    remaining = held;
+    await removal.wait(REMOVE_RETRY_DELAY_MS);
   }
 }
 
