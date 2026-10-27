@@ -243,7 +243,6 @@ export const pgContainerTest = baseTest.extend<{pgConnectionString: string}>({
     // object destructuring.
     // oxlint-disable-next-line no-empty-pattern
     async ({}, use) => {
-      // The same settings the shared setup starts its container with.
       const container = await new PostgreSqlContainer(mustInject('pgImage'))
         .withCommand([
           'postgres',
