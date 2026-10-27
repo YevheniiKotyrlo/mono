@@ -26,7 +26,7 @@ export function warnIfPostgresUnpatched(lc: LogContext): void {
     lc.warn?.(
       `postgres.js does not have Zero's patch for a bug that can leave a ` +
         `Postgres connection unresponsive after a COPY, on any Node version ` +
-        `(https://github.com/porsager/postgres/pull/1016). Initial sync and ` +
+        `(https://github.com/porsager/postgres/issues/499). Initial sync and ` +
         `backfill will not wait for their COPY connections to close, as in ` +
         `zero-cache 1.10. The rocicorp/zero Docker image includes the patch.`,
     );
