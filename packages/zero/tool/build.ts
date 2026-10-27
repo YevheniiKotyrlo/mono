@@ -1,9 +1,9 @@
 // Build script for @rocicorp/zero package
 import {spawn} from 'node:child_process';
-import {existsSync, readFileSync} from 'node:fs';
+import {existsSync} from 'node:fs';
 import {chmod, copyFile, mkdir, readdir, readFile, rm} from 'node:fs/promises';
-import {builtinModules, createRequire} from 'node:module';
-import {basename, dirname, isAbsolute, relative, resolve} from 'node:path';
+import {builtinModules} from 'node:module';
+import {basename, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parse} from 'oxc-parser';
 import {type InlineConfig, build as viteBuild} from 'vite';
@@ -11,6 +11,7 @@ import {assert} from '../../shared/src/asserts.ts';
 import {
   isExternalModuleId,
   isFileModuleId,
+  isResolvableFileSpecifier,
   makeDefine,
   packageName,
 } from '../../shared/src/build.ts';
@@ -54,9 +55,6 @@ const allowedUndeclaredImports = new Set([
   'solid-js',
 ]);
 
-// Files and bundler-virtual ids are bundled; a package is bundled only when it is
-// on the inline list. The decision lives in shared/build.ts so it can be tested
-// against both platforms' id shapes rather than only the host's.
 const external = (id: string) => isExternalModuleId(id, inlinedModules);
 
 const define = {
@@ -114,11 +112,7 @@ function getWorkerEntryPoints(): Record<string, string> {
   for (const url of Object.values(workerUrls)) {
     assert(url instanceof URL, 'Expected worker URL to be a URL instance');
 
-    // fileURLToPath, not `.pathname`: a file: URL's pathname is a URL path, so
-    // it is percent-encoded and drive-prefixed ('/C:/…'). basename happens to
-    // survive both, which is why this reads as fine — but it only survives them
-    // as long as nothing before the last segment matters.
-    const worker = basename(fileURLToPath(url));
+    const worker = basename(url.pathname);
 
     // verify that the file exists in the expected place.
     const srcPath = resolve('..', baseDir, worker);
@@ -282,14 +276,7 @@ async function assertBareImportsAreDeclared() {
     files.map(async path => {
       for (const id of await collectImportSpecifiers(path)) {
         if (isFileModuleId(id)) {
-          // A file id is fine, but not a TypeScript one: nothing under `out` is
-          // resolvable from a consumer's tree, so a `.ts` specifier there is a
-          // module that was externalized instead of bundled. The emitted file is
-          // then a stub re-exporting a source path that is never published, which
-          // loads nowhere — while the build reports success. Reported here so
-          // that silence is impossible whatever route produced it, rather than
-          // only when the externality predicate is the thing that regressed.
-          if (/\.tsx?$/u.test(id)) {
+          if (!isResolvableFileSpecifier(id)) {
             violations.set(id, [
               ...(violations.get(id) ?? []),
               path.slice(outDir.length + 1),
@@ -317,9 +304,9 @@ async function assertBareImportsAreDeclared() {
     throw new Error(
       `Build output imports modules a consumer cannot resolve:\n${details}\n` +
         `Add a bare specifier to dependencies in package.json, or to ` +
-        `allowedUndeclaredImports in build.ts if consumers provide it. A ` +
-        `TypeScript specifier means the module was externalized rather than ` +
-        `bundled: check isExternalModuleId in shared/src/build.ts.`,
+        `allowedUndeclaredImports in build.ts if consumers provide it. A file ` +
+        `specifier means the module was left as an import rather than bundled: ` +
+        `check isExternalModuleId in shared/src/build.ts.`,
     );
   }
 }
@@ -343,77 +330,13 @@ async function runPromise(p: Promise<unknown>, label: string) {
   console.log(`✓ ${label} completed in ${((end - start) / 1000).toFixed(2)}s`);
 }
 
-// `tsc` on PATH is a `.CMD` shim on Windows, and CreateProcess only ever
-// appends `.exe` — so `spawn('tsc', …)` throws ENOENT there even with
-// node_modules/.bin on PATH. `shell: true` would work but concatenates
-// arguments instead of escaping them (Node DEP0190), so resolve TypeScript's
-// own entrypoint and run it under the current Node instead. Also removes the
-// PATH dependency entirely: the compiler used is the one this package depends on.
-//
-// Resolve through the manifest rather than requesting './bin/tsc' directly:
-// TypeScript 7 added an `exports` map that does not list ./bin/tsc, so
-// resolving that subpath throws ERR_PACKAGE_PATH_NOT_EXPORTED there.
-// './package.json' is exported by both 6 and 7, and reading `bin.tsc` from it
-// keeps this working if the file ever moves.
-function resolveTscEntrypoint(): string {
-  const manifestPath = createRequire(import.meta.url).resolve(
-    'typescript/package.json',
-  );
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
-    bin?: unknown;
-  };
-  const {bin} = manifest;
-  // A string `bin` names the command after the package, so it is the tsc entry
-  // for typescript. Both shapes are read from a file on disk, so neither is
-  // trusted to be a usable string: an empty one resolves to the package
-  // directory and a non-string throws out of `resolve` about `paths[1]`, both
-  // far from the cause.
-  const relativeEntrypoint =
-    typeof bin === 'string'
-      ? bin
-      : ((bin as Record<string, unknown> | undefined)?.tsc ?? undefined);
-  assert(
-    typeof relativeEntrypoint === 'string' && relativeEntrypoint.length > 0,
-    `no usable tsc bin in ${manifestPath}`,
-  );
-  const packageDir = dirname(manifestPath);
-  const entrypoint = resolve(packageDir, relativeEntrypoint);
-  // `resolve` discards the base for an absolute second argument, so a manifest
-  // could otherwise name any file on disk and this would spawn it. npm normalizes
-  // `bin` to stay inside the package; nothing here had.
-  // Compared as path SEGMENTS. A string prefix passes for `…/zero-sibling`
-  // against `…/zero`, which is the escape this exists to refuse; `isAbsolute`
-  // covers the Windows other-drive case, where `relative` returns an absolute
-  // path rather than a `..` prefix.
-  const inside = relative(packageDir, entrypoint);
-  assert(
-    inside.length > 0 && !inside.startsWith('..') && !isAbsolute(inside),
-    `tsc bin in ${manifestPath} points outside its package: ${relativeEntrypoint}`,
-  );
-  return entrypoint;
-}
-
-// Resolved on first use, not at module load: `--bundle-sizes` never compiles, and
-// importing this module for its exports should not require TypeScript to be
-// installed.
-let tscEntrypoint: string | undefined;
-
-function execTsc(args: readonly string[], name: string) {
-  tscEntrypoint ??= resolveTscEntrypoint();
-  const entrypoint = tscEntrypoint;
+function exec(cmd: string, name: string) {
   return runPromise(
     new Promise<void>((resolve, reject) => {
-      const proc = spawn(process.execPath, [entrypoint, ...args], {
-        stdio: 'inherit',
-      });
-      proc.on('exit', (code, signal) =>
-        code === 0
-          ? resolve()
-          : reject(
-              new Error(
-                `${name} failed${code === null ? ` (${signal})` : ` (exit ${code})`}`,
-              ),
-            ),
+      const [command, ...args] = cmd.split(' ');
+      const proc = spawn(command, args, {stdio: 'inherit'});
+      proc.on('exit', code =>
+        code === 0 ? resolve() : reject(new Error(`${name} failed`)),
       );
       proc.on('error', reject);
     }),
@@ -443,12 +366,12 @@ async function build() {
     viteConfig.build = {...viteConfig.build, watch: {}};
     await Promise.all([
       runViteBuild(viteConfig, 'vite build (watch)'),
-      execTsc(
-        ['-p', 'tsconfig.client.json', '--watch', '--preserveWatchOutput'],
+      exec(
+        'tsc -p tsconfig.client.json --watch --preserveWatchOutput',
         'client dts (watch)',
       ),
-      execTsc(
-        ['-p', 'tsconfig.server.json', '--watch', '--preserveWatchOutput'],
+      exec(
+        'tsc -p tsconfig.server.json --watch --preserveWatchOutput',
         'server dts (watch)',
       ),
     ]);
@@ -457,8 +380,8 @@ async function build() {
     const viteConfig = await getViteConfig();
     await Promise.all([
       runViteBuild(viteConfig, 'vite build'),
-      execTsc(['-p', 'tsconfig.client.json'], 'client dts'),
-      execTsc(['-p', 'tsconfig.server.json'], 'server dts'),
+      exec('tsc -p tsconfig.client.json', 'client dts'),
+      exec('tsc -p tsconfig.server.json', 'server dts'),
     ]);
 
     await makeBinFilesExecutable();

@@ -4,8 +4,7 @@ import config from './src/tool/vitest-config.ts';
 export default mergeConfig(config, {
   test: {
     name: 'shared/browser',
-    // build.ts reads the filesystem and resolves paths, so it and its test are
-    // node-only.
+    // build.ts imports node:fs.
     exclude: [
       'src/build.test.ts',
       'src/logging.test.ts',
