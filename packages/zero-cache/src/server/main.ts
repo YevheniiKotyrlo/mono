@@ -12,7 +12,6 @@ import {
   ProcessManager,
   recordStartupDurationMs,
   runUntilKilled,
-  shutdownRequested,
   type WorkerType,
 } from '../services/life-cycle.ts';
 import {
@@ -51,8 +50,6 @@ export default async function runWorker(
   parent: Worker,
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
-  const shutdown = shutdownRequested(parent);
-
   const startMs = Date.now();
   const config = getNormalizedZeroConfig({env});
 
@@ -238,7 +235,6 @@ export default async function runWorker(
     await runUntilKilled(
       lc,
       parent,
-      shutdown,
       new WorkerDispatcher(
         lc,
         taskID,

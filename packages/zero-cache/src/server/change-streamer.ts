@@ -32,7 +32,6 @@ import {
   exitAfter,
   runUntilKilled,
   SupportingProcesses,
-  shutdownRequested,
 } from '../services/life-cycle.ts';
 import {deleteLitestreamMetaDir} from '../services/litestream/commands.ts';
 import {
@@ -74,8 +73,6 @@ export default async function runWorker(
   env: NodeJS.ProcessEnv,
   ...argv: string[]
 ): Promise<void> {
-  const shutdown = shutdownRequested(parent);
-
   installProfileHandler(parent, 'change-streamer');
   const config = getNormalizedZeroConfig({env, argv});
   const {
@@ -528,7 +525,6 @@ export default async function runWorker(
   await runUntilKilled(
     lc,
     parent,
-    shutdown,
     changeStreamerWebServer,
     backupMonitor,
     processes,

@@ -31,9 +31,7 @@ export const MESSAGE_TYPES = {
   stop: 'stop',
   start: 'start',
   init: 'init',
-  // A request to shut down gracefully, for a parent that cannot signal: Node
-  // delivers no signals on Windows, where `kill()` terminates the child outright.
-  shutdown: 'shutdown',
+  signal: 'signal',
 } as const;
 
 export type ClientGroupStatus = {
@@ -68,6 +66,9 @@ export type ProfileResponseMessage = ['profileResponse', ProfileResponse];
  * `SelfDrain`.
  */
 export type DrainRequestedMessage = ['drainRequested', object];
+
+/** A signal sent over IPC, for a child that `kill()` would terminate instead. */
+export type SignalMessage = ['signal', NodeJS.Signals];
 
 export type Message<Payload> = [keyof typeof MESSAGE_TYPES, Payload];
 
@@ -139,30 +140,10 @@ export interface Sender {
   kill(signal?: NodeJS.Signals): void;
 }
 
-/**
- * A child process this one supervises.
- *
- * `send` is optional because an IPC channel is: `fork` opens one, and a bare
- * `spawn` of an external binary does not — there `send` is `undefined` and
- * `connected` is `false`, so calling it throws a TypeError. Declaring it as
- * always present would let a request to shut down be addressed to a child that
- * cannot receive one, which the type should refuse rather than the runtime.
- */
-export interface Subprocess extends EventEmitter {
+export interface Subprocess extends Sender, EventEmitter {
   pid?: number | undefined;
-
-  kill(signal?: NodeJS.Signals): void;
-
-  /**
-   * Explicitly `| undefined`: this is what a channel-less child REPORTS, not
-   * merely a key it omits. `child_process.spawn` returns a handle whose `send`
-   * reads `undefined` and whose `connected` reads `false`, so a fake that models
-   * one has to be able to say that rather than leave the property out.
-   */
-  send?: Sender['send'] | undefined;
-
-  /** Whether an IPC channel is open, and therefore whether `send` exists. */
-  readonly connected?: boolean | undefined;
+  /** Whether an IPC channel to the subprocess is open. */
+  connected?: boolean | undefined;
 }
 
 export interface Receiver extends EventEmitter {
@@ -187,21 +168,7 @@ export interface Receiver extends EventEmitter {
   ): this;
 }
 
-export interface Worker extends Subprocess, Receiver {
-  /**
-   * Always present, unlike {@link Subprocess.send}: a `Worker` is a fork, so it
-   * has an IPC channel by construction.
-   */
-  send: Sender['send'];
-
-  /**
-   * Required, unlike {@link Subprocess.connected}, and for the same reason
-   * `send` is: a fake that models a fork has to state whether its channel is
-   * open. Left optional, an in-process fake reads `undefined` here and silently
-   * takes the kill path that the ask exists to replace.
-   */
-  readonly connected: boolean;
-}
+export interface Worker extends Subprocess, Receiver {}
 
 /**
  * Adds the {@link Receiver.onMessageType()} and {@link Receiver.onceMessageType()}
@@ -233,15 +200,72 @@ function wrap<P extends EventEmitter>(proc: P): P & Receiver {
   }) as P & Receiver;
 }
 
-type Proc = Pick<ChildProcess, 'send' | 'kill' | 'pid' | 'connected'> &
-  EventEmitter;
+type Proc = Pick<ChildProcess, 'send' | 'kill' | 'pid'> & EventEmitter;
+
+type SignalTarget = Pick<
+  NodeJS.Process,
+  'pid' | 'kill' | 'emit' | 'listenerCount'
+>;
+
+/**
+ * Raises `signal` in `target` as the operating system delivers one: to its
+ * listeners, or with the signal's default action, termination, when it has none.
+ */
+export function deliverSignal(
+  target: SignalTarget,
+  signal: NodeJS.Signals,
+): void {
+  if (target.listenerCount(signal) > 0) {
+    target.emit(signal, signal);
+  } else {
+    target.kill(target.pid, signal);
+  }
+}
+
+/**
+ * Sends `signal` to `proc`. On Windows `kill()` terminates a process whatever
+ * the signal, so a subprocess with an IPC channel is sent the signal as a
+ * message instead, which a forked worker raises with {@link deliverSignal}.
+ */
+export function sendSignal(
+  proc: Subprocess,
+  signal: NodeJS.Signals,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === 'win32' && proc.connected === true) {
+    proc.send(['signal', signal] satisfies SignalMessage);
+  } else {
+    proc.kill(signal);
+  }
+}
+
+/** Raises `signal` in this process, as {@link sendSignal} delivers one. */
+export function raiseSignal(
+  signal: NodeJS.Signals,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === 'win32') {
+    deliverSignal(process, signal);
+  } else {
+    process.kill(process.pid, signal);
+  }
+}
+
+function forkedWorker(proc: Proc): Worker {
+  if (process.platform === 'win32') {
+    onMessageType<SignalMessage>(proc, 'signal', signal =>
+      deliverSignal(process, signal),
+    );
+  }
+  return wrap(proc);
+}
 
 /**
  * The parentWorker for forked processes, or `null` if the process was not forked.
  * (Analogous to the `parentPort: MessagePort | null` of the `"workers"` library).
  */
 export const parentWorker: Worker | null = process.send
-  ? wrap(process as Proc)
+  ? forkedWorker(process as Proc)
   : null;
 
 const SINGLE_PROCESS = 'SINGLE_PROCESS';
@@ -375,20 +399,10 @@ export function inProcChannel(): [Worker, Worker] {
 
   return [
     wrap(
-      Object.assign(worker1, {
-        send: sendTo(worker2),
-        kill: kill(worker2),
-        pid,
-        connected: true,
-      }),
+      Object.assign(worker1, {send: sendTo(worker2), kill: kill(worker2), pid}),
     ),
     wrap(
-      Object.assign(worker2, {
-        send: sendTo(worker1),
-        kill: kill(worker1),
-        pid,
-        connected: true,
-      }),
+      Object.assign(worker2, {send: sendTo(worker1), kill: kill(worker1), pid}),
     ),
   ];
 }
@@ -429,5 +443,5 @@ export function broadcastWorker(workers: Worker[]): Worker {
     }
   };
 
-  return wrap(Object.assign(emitter, {send, kill, pid, connected: true}));
+  return wrap(Object.assign(emitter, {send, kill, pid}));
 }

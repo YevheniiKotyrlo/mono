@@ -12,7 +12,6 @@ import {
   ProcessManager,
   runUntilKilled,
   SelfDrain,
-  shutdownRequested,
 } from '../../services/life-cycle.ts';
 import {
   childWorker,
@@ -51,8 +50,6 @@ export async function runWorker(
   parent: Worker | null,
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
-  const shutdown = shutdownRequested(parent ?? process);
-
   // Note: Deprecation warnings are only emitted at this top-level parse;
   //       they are suppressed when parsed in subprocesses.
   const cfg = getZeroConfig({env, emitDeprecationWarnings: true});
@@ -133,7 +130,7 @@ export async function runWorker(
   parent?.send(['ready', {ready: true}]);
 
   try {
-    await runUntilKilled(lc, signals, shutdown, dispatcher);
+    await runUntilKilled(lc, signals, dispatcher);
   } catch (err) {
     processes.logErrorAndExit(err, 'main');
   } finally {

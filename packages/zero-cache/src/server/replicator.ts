@@ -24,7 +24,6 @@ import {reserveAndGetSnapshotStatus} from '../services/change-streamer/snapshot.
 import {
   exitAfter,
   runUntilKilled,
-  shutdownRequested,
   SupportingProcesses,
 } from '../services/life-cycle.ts';
 import {
@@ -137,24 +136,12 @@ export default async function runWorker(
   // reserved the change log for this restore is the one that serves the
   // subscription (single-connection handoff).
   let initialConnection: ReservationFollowup | undefined;
-  const shutdown = shutdownRequested(parent);
   if (
     fileMode === 'serving' &&
     !runningLocalChangeStreamer &&
     (config.litestream.executable || config.litestream.executableV5)
   ) {
-    initialConnection = await restoreReplica(
-      lc,
-      config,
-      changeStreamer,
-      shutdown,
-    );
-    if (initialConnection === undefined) {
-      // No replica is open and no service has started, so returning is the
-      // whole shutdown.
-      lc.info?.('shutdown requested while restoring the replica');
-      return;
-    }
+    initialConnection = await restoreReplica(lc, config, changeStreamer);
   }
 
   const {
@@ -250,7 +237,7 @@ export default async function runWorker(
     parent.send(['ready', {ready: true}]);
   });
 
-  return runUntilKilled(lc, parent, shutdown, replicator, processes);
+  return runUntilKilled(lc, parent, replicator, processes);
 }
 
 export function setupMetrics(
@@ -398,24 +385,16 @@ const MAX_OLDER_REPLICA_VERSION_RETRIES = 20;
 // restoreReplica must not impose its own shorter cap and self-terminate
 // while the backup is still being produced.
 //
-// Unbounded is not uninterruptible: `shutdown` ends the waiting, the
-// reservation and the retry sleeps, when the manager asks the worker to stop.
-// A restore attempt in flight runs litestream as a subprocess and finishes
-// first, which bounds the delay by one attempt.
-//
 // Returns the `followup` of the reservation whose backup was actually
 // restored, still open, so the caller can hand it to IncrementalSyncer's
 // first subscribe() via `followup.subscribe()`: the same replication-manager
 // that reserved the change log is the one that serves the subscription.
-// Returns `undefined` when shutdown was requested before a replica was
-// restored.
 /** Exported for testing. */
 export async function restoreReplica(
   lc: LogContext,
   config: NormalizedZeroConfig,
   changeStreamer: SnapshotReserver,
-  shutdown: AbortSignal = new AbortController().signal,
-): Promise<ReservationFollowup | undefined> {
+): Promise<ReservationFollowup> {
   const start = performance.now();
   let backupURL: string | undefined;
   let result: RestoreResult | undefined;
@@ -429,23 +408,13 @@ export async function restoreReplica(
   const localReplica = readLocalReplica(lc, config.replica.file);
   const localReplicaVersion = localReplica?.replicaVersion;
   try {
-    while (!shutdown.aborted) {
-      let reservation;
-      try {
-        reservation = await reserveAndGetSnapshotStatus(
-          lc,
-          config.taskID,
-          changeStreamer,
-          localReplica,
-          shutdown,
-        );
-      } catch (e) {
-        if (shutdown.aborted) {
-          break;
-        }
-        throw e;
-      }
-      const {reserved, followup} = reservation;
+    for (;;) {
+      const {reserved, followup} = await reserveAndGetSnapshotStatus(
+        lc,
+        config.taskID,
+        changeStreamer,
+        localReplica,
+      );
       if (
         localReplicaVersion !== undefined &&
         reserved.replicaVersion < localReplicaVersion &&
@@ -459,7 +428,7 @@ export async function restoreReplica(
             `(${reserved.replicaVersion}) than the local replica ` +
             `(${localReplicaVersion}). retrying in ${RETRY_INTERVAL_MS / 1000} seconds`,
         );
-        await sleep(RETRY_INTERVAL_MS, shutdown).catch(() => {});
+        await sleep(RETRY_INTERVAL_MS);
         continue;
       }
       // The backupURL comes from the replication-manager's snapshot response.
@@ -499,10 +468,8 @@ export async function restoreReplica(
       lc.info?.(
         `replica not found. retrying in ${RETRY_INTERVAL_MS / 1000} seconds`,
       );
-      // An abort here is the requested shutdown, which the loop condition acts on.
-      await sleep(RETRY_INTERVAL_MS, shutdown).catch(() => {});
+      await sleep(RETRY_INTERVAL_MS);
     }
-    return undefined;
   } finally {
     progress.stop();
     const attrs = litestreamRestoreMetricAttrs(
@@ -510,12 +477,7 @@ export async function restoreReplica(
       'view_syncer',
       backupURL,
     );
-    // A shutdown is neither a success nor a failure, and counting it as an error
-    // would fire the restore-failure metric on every rolling restart.
-    const labels = {
-      ...attrs,
-      result: result ?? (shutdown.aborted ? 'shutdown' : 'error'),
-    };
+    const labels = {...attrs, result: result ?? 'error'};
     litestreamRestoreRuns().add(1, labels);
     litestreamRestoreDuration().recordMs(performance.now() - start, labels);
   }

@@ -4,9 +4,7 @@ import {pid} from 'node:process';
 import type {EventEmitter} from 'stream';
 import type {LogContext} from '@rocicorp/logger';
 import {AbortError} from '../../../shared/src/abort-error.ts';
-import {must} from '../../../shared/src/must.ts';
 import {resolver} from '../../../shared/src/resolver.ts';
-import {sleep} from '../../../shared/src/sleep.ts';
 import {logLastChanceSQLiteCorruptionDiagnostics} from '../db/sqlite-corruption.ts';
 import {
   getOrCreateHistogram,
@@ -14,9 +12,9 @@ import {
 } from '../observability/metrics.ts';
 import {ConfigurationError} from '../types/configuration-error.ts';
 import {
-  MESSAGE_TYPES,
+  raiseSignal,
+  sendSignal,
   singleProcessMode,
-  type Message,
   type Subprocess,
   type Worker,
 } from '../types/processes.ts';
@@ -43,44 +41,9 @@ import type {SingletonService} from './service.ts';
 export type WorkerType = 'user-facing' | 'supporting';
 
 export const GRACEFUL_SHUTDOWN = ['SIGTERM', 'SIGINT'] as const;
-
-/** The wire form of a shutdown request: a {@link Message} with no payload. */
-export const SHUTDOWN_MESSAGE = [
-  MESSAGE_TYPES.shutdown,
-  {},
-] as const satisfies Message<Record<never, never>>;
-
 export const FORCEFUL_SHUTDOWN = ['SIGQUIT', 'SIGABRT'] as const;
 
 type GracefulShutdownSignal = (typeof GRACEFUL_SHUTDOWN)[number];
-
-/**
- * How to stop a child.
- *
- * `ask` is a request the child can drain in response to, delivered over its IPC
- * channel. `terminate` ends the process where it stands. The distinction is a
- * capability of the target, not a property of a signal name: a child with no
- * channel — an external binary this process spawned — can only be terminated, so
- * an `ask` addressed to one degrades to that.
- */
-type StopRequest =
-  | {readonly kind: 'ask'}
-  | {readonly kind: 'terminate'; readonly signal: NodeJS.Signals};
-
-/** The request a signal from outside this process stands for. */
-function stopRequestFor(signal: NodeJS.Signals): StopRequest {
-  return (GRACEFUL_SHUTDOWN as readonly string[]).includes(signal)
-    ? {kind: 'ask'}
-    : // `SIGQUIT` and `SIGABRT` mean stop now, without draining, so terminating
-      // is the intent rather than a substitute for asking.
-      {kind: 'terminate', signal};
-}
-
-function isShutdownRequest(data: unknown): boolean {
-  return (
-    Array.isArray(data) && data.length === 2 && data[0] === SHUTDOWN_MESSAGE[0]
-  );
-}
 
 function workerStartupMetricName(name: string) {
   if (name === 'zero-cache') {
@@ -136,30 +99,6 @@ function workerStartupDuration() {
   });
 }
 
-/**
- * How long a drained shutdown waits for its supporting workers before giving up.
- *
- * Inside the grace period a container runtime allows before a SIGKILL: `docker
- * stop` defaults to 10s for Linux containers, and a Kubernetes pod's
- * `terminationGracePeriodSeconds` defaults to 30s. So exceeding this reports and
- * exits rather than being killed mid-shutdown.
- *
- * Note what this budget is NOT: it is not subtracted from a remaining grace
- * period. It is spent after the user-facing drain, so a drain that already used
- * most of a 10s Docker window can still be cut short. Sizing it against the
- * smaller of the two runtimes is the reason it is this low.
- */
-const WORKER_STOP_TIMEOUT_MS = 5_000;
-
-/**
- * How long to wait for the closes a SIGKILL should cause, before exiting anyway.
- *
- * Short, because this is confirmation rather than patience: everything that was
- * going to shut down gracefully has already had {@link WORKER_STOP_TIMEOUT_MS}
- * to do it.
- */
-const KILL_CONFIRM_TIMEOUT_MS = 1_000;
-
 // An internal error code used to indicate that a message has already been
 // logged at level ERRROR. When a process exits with this error code, the
 // parent process logs the exit at level WARN instead of ERROR.
@@ -182,16 +121,6 @@ export class ProcessManager {
   readonly #start = Date.now();
   readonly #ready: Promise<void>[] = [];
 
-  readonly #closed = new Map<Subprocess, Promise<void>>();
-
-  /**
-   * Set once the remaining workers have been asked to stop and are being waited
-   * for, so their exits do not each try to end the process.
-   */
-  #stopping = false;
-  /** Whether the wait escalated to SIGKILL, so nothing should signal again. */
-  #terminated = false;
-
   #runningState = new RunningState('process-manager');
   #drainStart = 0;
 
@@ -205,43 +134,17 @@ export class ProcessManager {
       proc.on(signal, () => this.#startDrain(signal));
     }
 
-    // The same drain, asked for rather than signalled. This is how a parent stops
-    // its own children (see `#stop`), and the only way to ask at all on Windows,
-    // where Node delivers no signals to a process: a `kill()` there is an immediate
-    // termination that runs none of this and leaves the workers below orphaned,
-    // still holding their files and connections. Signals stay the external contract
-    // for operators and container runtimes.
-    proc.on('message', (data: unknown) => {
-      if (isShutdownRequest(data)) {
-        this.#lc.info?.('received shutdown request');
-        this.#startDrain('SIGTERM');
-      }
-    });
-
     // ... which will result in sending `SIGTERM` to the remaining workers.
-    proc.on('exit', code => {
-      if (this.#terminated) {
-        // These workers were already SIGKILLed by the wait, so signalling again
-        // on the way out reaches a process that is gone. Gated on the escalation
-        // having happened rather than on `#stopping`, because a forceful exit
-        // arriving DURING the wait still has to terminate what is left — and not
-        // on the exit code, which cannot tell the wait's own forced exit from an
-        // external abort.
-        return;
-      }
-      // Always a signal, never an ask: this runs from inside `process.exit()`,
-      // where there is no loop left to flush an IPC message. The ask belongs to
-      // the bounded wait, which is still running when it sends one.
-      this.#stop(this.#all, {
-        kind: 'terminate',
-        signal:
-          code === 0
-            ? 'SIGTERM' // graceful, drained shutdown
-            : code === INTENTIONAL_SHUTDOWN_ERROR_CODE
-              ? 'SIGQUIT' // intentional abort without drain
-              : 'SIGABRT', // unintentional shutdown, alertable error
-      });
-    });
+    proc.on('exit', code =>
+      this.#kill(
+        this.#all,
+        code === 0
+          ? 'SIGTERM' // graceful, drained shutdown
+          : code === INTENTIONAL_SHUTDOWN_ERROR_CODE
+            ? 'SIGQUIT' // intentional abort without drain
+            : 'SIGABRT', // unintentional shutdown, alertable error
+      ),
+    );
 
     // For other (catchable) kill signals, exit with a non-zero error code
     // to send a `SIGQUIT` (intentional shutdown) or `SIGABRT` (unexpected
@@ -256,15 +159,8 @@ export class ProcessManager {
       );
     }
 
-    // Captured here rather than read at exit time. How this manager ends is a
-    // property of how it was started, and re-reading it later lets an unrelated
-    // change of the environment turn what should be an in-process exit into a real
-    // one — which, for an exit that happens a tick after a drain rather than
-    // inside it, means calling `process.exit()` in a test runner's worker and
-    // taking the worker with it.
-    const exitsInProcess = singleProcessMode();
     this.#exitImpl = (code: number) => {
-      if (exitsInProcess) {
+      if (singleProcessMode()) {
         return proc.emit('exit', code) as never; // For unit / integration tests.
       }
       process.exit(code);
@@ -276,82 +172,6 @@ export class ProcessManager {
       this.#startDrain(GRACEFUL_SHUTDOWN[0]);
     }
     await this.#runningState.stopped();
-  }
-
-  /**
-   * Stops the workers that are left and exits once they are gone.
-   *
-   * Reached when the user-facing workers have drained, leaving the supporting ones
-   * — the replicator among them. Exiting first and stopping them from the `exit`
-   * handler on the way out means nothing waits for them, so a caller that observes
-   * this process closing can still be racing a replicator that holds the replica
-   * file open. POSIX hides that completely, because unlink-while-open is legal
-   * there: a caller can delete a file a live worker still has open and see it
-   * succeed. Windows refuses, which is where the race became visible.
-   *
-   * Bounded, because a shutdown that waits without a limit is worse than one that
-   * gives up: a wedged worker would hold the process past whatever grace period a
-   * container runtime allows, and it would be killed mid-shutdown rather than
-   * completing one. Past the deadline this says so and exits anyway.
-   */
-  #exitWhenWorkersHaveStopped(code: number) {
-    if (this.#stopping) {
-      // Already waiting. Re-entering would re-ask every worker, arm a second
-      // deadline and exit twice.
-      return undefined;
-    }
-    if (this.#all.size === 0) {
-      return this.#exit(code);
-    }
-    this.#stopping = true;
-
-    const remaining = [...this.#all];
-    // Every tracked worker has a close promise; `addSubprocess` records one for
-    // each, and the 'close' handler removes it from both maps together.
-    const pending = remaining.map(worker => must(this.#closed.get(worker)));
-    this.#lc.info?.(`stopping ${remaining.length} supporting worker(s)`);
-    this.#stop(this.#all, {kind: 'ask'});
-
-    // Referenced deliberately: if a wedged worker's channel is the only thing
-    // holding the loop open, an unreferenced timer would let the process exit on
-    // an empty loop with Node's code instead of this drain's.
-    let timer: NodeJS.Timeout | undefined;
-    const deadline = new Promise<'timeout'>(resolve => {
-      timer = setTimeout(resolve, WORKER_STOP_TIMEOUT_MS, 'timeout');
-    });
-    void Promise.race([
-      Promise.all(pending).then(() => 'stopped' as const),
-      deadline,
-    ])
-      .then(async outcome => {
-        if (outcome === 'stopped') {
-          return code;
-        }
-        this.#lc.warn?.(
-          `terminating ${this.#all.size} worker(s) still running after ` +
-            `${WORKER_STOP_TIMEOUT_MS} ms`,
-        );
-        // The ask went unanswered, so escalate to the one thing that ends a
-        // process on every platform. Without this the wait expires and this
-        // process exits leaving those workers running — still holding the
-        // replica, which is the outcome the wait exists to prevent.
-        this.#terminated = true;
-        this.#stop(this.#all, {kind: 'terminate', signal: 'SIGKILL'});
-        // A signal is asynchronous, so exiting in the same turn would assert
-        // nothing about whether it landed. Wait for the closes it should cause,
-        // bounded again so a worker that survives SIGKILL cannot hold the exit.
-        await Promise.race([
-          Promise.all(pending),
-          sleep(KILL_CONFIRM_TIMEOUT_MS),
-        ]);
-        // A drain that had to kill did not complete, so it does not report the
-        // code a completed one would.
-        return code === 0 ? INTENTIONAL_SHUTDOWN_ERROR_CODE : code;
-      })
-      .then(exitCode => {
-        clearTimeout(timer);
-        this.#exit(exitCode);
-      });
   }
 
   #exit(code: number) {
@@ -368,11 +188,10 @@ export class ProcessManager {
     }
     this.#lc.info?.(`initiating drain (${signal})`);
     this.#drainStart = Date.now();
-    const request = stopRequestFor(signal);
     if (this.#userFacing.size) {
-      this.#stop(this.#userFacing, request);
+      this.#signal(this.#userFacing, signal);
     } else {
-      this.#stop(this.#all, request);
+      this.#signal(this.#all, signal);
     }
   }
 
@@ -382,16 +201,9 @@ export class ProcessManager {
     }
     this.#all.add(proc);
 
-    // Tracked so a drained shutdown can wait for this worker rather than exiting
-    // out from under it; see #exitWhenWorkersHaveStopped.
-    const closed = resolver<void>();
-    this.#closed.set(proc, closed.promise);
-
     let isOpen = true;
     proc.on('close', (code, signal) => {
       isOpen = false;
-      closed.resolve();
-      this.#closed.delete(proc);
       this.#onExit(code, signal, null, type, name, proc);
     });
 
@@ -486,20 +298,6 @@ export class ProcessManager {
           ? 'info'
           : 'warn';
       this.#lc[log]?.(`${name} (${pid}) exited with code (${code})`, err ?? '');
-      if (this.#stopping) {
-        // Already waiting for these to finish. Exiting on the first one to close
-        // would abandon its siblings — which is the whole point of the wait, since
-        // one of them is the replicator and it still holds the replica file.
-        return;
-      }
-      if (this.#drainStart > 0 && this.#all.size > 0) {
-        // A manager whose workers are ALL supporting never reaches the
-        // user-facing branch below, so without this it exits on the first close
-        // and signals the rest from inside `process.exit()`. The replication
-        // manager is that shape — it runs with no syncers — and it is the one
-        // holding the backup replica and litestream.
-        return this.#exitWhenWorkersHaveStopped(code);
-      }
       return this.#exit(code);
     }
 
@@ -525,7 +323,7 @@ export class ProcessManager {
             } ms)`
           : `all user-facing workers exited`,
       );
-      return this.#exitWhenWorkersHaveStopped(this.#drainStart ? 0 : code);
+      return this.#exit(this.#drainStart ? 0 : code);
     }
 
     if (this.#drainStart === 0) {
@@ -537,36 +335,24 @@ export class ProcessManager {
     return undefined;
   }
 
-  #stop(workers: Iterable<Subprocess>, request: StopRequest) {
+  #signal(workers: Iterable<Subprocess>, signal: NodeJS.Signals) {
     for (const worker of workers) {
-      stopSubprocess(this.#lc, worker, request);
+      try {
+        sendSignal(worker, signal);
+      } catch (e) {
+        this.#lc.error?.(e);
+      }
     }
   }
-}
 
-/**
- * Delivers `request` to `proc`. An `ask` goes over the IPC channel on every
- * platform, because a signal does not ask anything portably: Node delivers none
- * to a process on Windows, where `kill('SIGTERM')` terminates the child where
- * it stands, undrained and still holding its files. Signals stay the contract
- * for operators and container runtimes. A child without a channel - an external
- * binary such as litestream, which has no drain to run - is signalled instead.
- */
-function stopSubprocess(
-  lc: LogContext,
-  proc: Subprocess,
-  request: StopRequest,
-): void {
-  try {
-    if (request.kind === 'ask' && proc.send && proc.connected) {
-      proc.send([...SHUTDOWN_MESSAGE]);
-    } else {
-      proc.kill(
-        request.kind === 'terminate' ? request.signal : GRACEFUL_SHUTDOWN[0],
-      );
+  #kill(workers: Iterable<Subprocess>, signal: NodeJS.Signals) {
+    for (const worker of workers) {
+      try {
+        worker.kill(signal);
+      } catch (e) {
+        this.#lc.error?.(e);
+      }
     }
-  } catch (e) {
-    lc.error?.(e);
   }
 }
 
@@ -577,9 +363,7 @@ function stopSubprocess(
  * Unlike a {@link ProcessManager}, it does not forward `SIGTERM` or `SIGINT`
  * to its subprocesses. Instead, {@link runUntilKilled} stops it along with the
  * worker's other services, i.e. after they have drained, so that the
- * subprocesses keep supporting them until then. Stopping asks a subprocess
- * with an IPC channel (the backup-replicator) to shut down, and signals one
- * without (litestream). Forceful signals (`SIGQUIT`
+ * subprocesses keep supporting them until then. Forceful signals (`SIGQUIT`
  * and `SIGABRT`), on the other hand, are forwarded immediately once the
  * service is running, and the subprocesses are killed if the worker exits
  * before they are stopped.
@@ -604,12 +388,13 @@ export class SupportingProcesses implements SingletonService {
     this.#done.promise.catch(() => {});
 
     parent.on('exit', code =>
-      this.#kill(
+      this.#signal(
         code === 0
           ? 'SIGTERM'
           : code === INTENTIONAL_SHUTDOWN_ERROR_CODE
             ? 'SIGQUIT'
             : 'SIGABRT',
+        (proc, signal) => proc.kill(signal),
       ),
     );
   }
@@ -636,17 +421,14 @@ export class SupportingProcesses implements SingletonService {
     // received during worker initialization, which would otherwise terminate
     // the worker (or be handled by the initialization logic).
     for (const signal of FORCEFUL_SHUTDOWN) {
-      this.#parent.on(signal, () => this.#kill(signal));
+      this.#parent.on(signal, () => this.#signal(signal, sendSignal));
     }
     return this.#done.promise;
   }
 
   async stop(): Promise<void> {
     if (!this.#signaled) {
-      this.#signaled = 'SIGTERM';
-      for (const proc of this.#procs.keys()) {
-        stopSubprocess(this.#lc, proc, {kind: 'ask'});
-      }
+      this.#signal('SIGTERM', sendSignal);
     }
     if (this.#procs.size === 0) {
       this.#done.resolve();
@@ -678,10 +460,17 @@ export class SupportingProcesses implements SingletonService {
     }
   }
 
-  #kill(signal: NodeJS.Signals) {
+  #signal(
+    signal: NodeJS.Signals,
+    send: (proc: Subprocess, signal: NodeJS.Signals) => void,
+  ) {
     this.#signaled = signal;
     for (const proc of this.#procs.keys()) {
-      stopSubprocess(this.#lc, proc, {kind: 'terminate', signal});
+      try {
+        send(proc, signal);
+      } catch (e) {
+        this.#lc.error?.(e);
+      }
     }
   }
 }
@@ -825,38 +614,12 @@ export class PreDrain extends NodeEventEmitter {
 export const STOP_TIMEOUT_MS = 60_000;
 
 /**
- * A signal that aborts when the manager asks this worker to shut down over its
- * IPC channel, which is how a parent asks where it cannot signal: Node delivers
- * no signals on Windows.
+ * Runs the specified services, stopping them on `SIGTERM` or `SIGINT` with
+ * an optional {@link SingletonService.drain drain()}, or stopping them
+ * without draining for `SIGQUIT`, or when the parent process disconnects.
+ * Repeated graceful signals are ignored. If a service stops (or throws) on its
+ * own, the remaining services are stopped without draining.
  *
- * Armed before the worker's startup and consumed by {@link runUntilKilled}. A
- * `'message'` event reaches the listeners that exist when it arrives and is not
- * replayed for one added later, so a request that lands while startup blocks -
- * a view-syncer restoring its replica waits for the replication-manager to
- * publish a backup - would otherwise be discarded and never honoured.
- * Long-running startup work races this signal.
- */
-export function shutdownRequested(parent: EventEmitter): AbortSignal {
-  const controller = new AbortController();
-  parent.on('message', (data: unknown) => {
-    if (isShutdownRequest(data)) {
-      controller.abort();
-    }
-  });
-  return controller.signal;
-}
-
-/**
- * Runs the specified services, stopping them on `SIGTERM` or `SIGINT`, or
- * when the manager asks over IPC, with an optional
- * {@link SingletonService.drain drain()}, or stopping them without draining for
- * `SIGQUIT`, or when the parent process disconnects. Repeated graceful requests
- * are ignored. If a service stops (or throws) on its own, the remaining
- * services are stopped without draining.
- *
- * @param shutdown from {@link shutdownRequested}, armed by the caller before
- *     its startup so that a request arriving during it is not lost. If one
- *     already arrived, the services are not started.
  * @returns a Promise that settles once all services have stopped (or
  *          {@link STOP_TIMEOUT_MS} has elapsed), resolving or rejecting
  *          with the outcome of the first service to stop.
@@ -864,17 +627,9 @@ export function shutdownRequested(parent: EventEmitter): AbortSignal {
 export async function runUntilKilled(
   lc: LogContext,
   parent: EventEmitter,
-  shutdown: AbortSignal,
   ...services: SingletonService[]
 ): Promise<void> {
   if (services.length === 0) {
-    return;
-  }
-  // Already requested, during the caller's startup: not starting the services
-  // is the shutdown. Stopping a service that never ran is not a no-op, since a
-  // `stop()` that waits on what its `run()` assigns would race the `run()`.
-  if (shutdown.aborted) {
-    lc.info?.('shutdown requested before services started; not starting them');
     return;
   }
   const stopped = new Set<SingletonService>();
@@ -931,13 +686,6 @@ export async function runUntilKilled(
     lc.warn?.(`parent process disconnected. stopping without draining`);
     void stopAll('disconnect');
   });
-
-  // The manager's request over IPC drains like a SIGTERM.
-  shutdown.addEventListener(
-    'abort',
-    () => void onSignal(GRACEFUL_SHUTDOWN[0]),
-    {once: true},
-  );
 
   try {
     // Run all services and resolve when any of them stops, or when stopping
@@ -1038,21 +786,15 @@ export async function exitAfter(
  */
 export class HeartbeatMonitor {
   readonly #stopInterval: number;
-  readonly #proc: EventEmitter;
 
   #lc: LogContext;
   #checkIntervalTimer: NodeJS.Timeout | undefined;
   #checkImmediateTimer: NodeJS.Immediate | undefined;
   #lastHeartbeat = 0;
 
-  constructor(
-    lc: LogContext,
-    stopInterval: number,
-    proc: EventEmitter = process,
-  ) {
+  constructor(lc: LogContext, stopInterval: number) {
     this.#lc = lc;
     this.#stopInterval = stopInterval;
-    this.#proc = proc;
   }
 
   onHeartbeat(reqHeaders: IncomingHttpHeaders) {
@@ -1104,13 +846,7 @@ export class HeartbeatMonitor {
             timeSinceLastHeartbeat / 1000
           } seconds ago. draining.`,
         );
-        // Emitted on this process rather than sent to it. `process.kill(
-        // process.pid, 'SIGTERM')` is not a way to ask this process for
-        // anything: libuv maps the terminating signals to `TerminateProcess` on
-        // Windows, so no handler runs and the drain this log line announces
-        // never happens — the process is simply gone, mid-request. Emitting
-        // reaches the manager's own listener on every platform.
-        this.#proc.emit(GRACEFUL_SHUTDOWN[0]);
+        raiseSignal(GRACEFUL_SHUTDOWN[0]);
       }
     });
   };

@@ -34,10 +34,6 @@ export async function reserveAndGetSnapshotStatus(
   taskID: string,
   changeStreamer: SnapshotReserver,
   localReplica?: LocalReplica | undefined,
-  // The manager's request over IPC, which aborts the retry loop alongside the
-  // signals below: this loop otherwise retries until a compatible
-  // replication-manager appears.
-  shutdown?: AbortSignal,
 ): Promise<{reserved: SnapshotStatus; followup: ReservationFollowup}> {
   const abort = new AbortController();
   const {signal} = abort;
@@ -48,10 +44,6 @@ export async function reserveAndGetSnapshotStatus(
   const onSignal = () => abort.abort(new AbortError('SIGTERM/SIGINT'));
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
-  if (shutdown?.aborted) {
-    onSignal();
-  }
-  shutdown?.addEventListener('abort', onSignal, {once: true});
 
   try {
     for (let i = 0; ; i++) {
@@ -92,6 +84,5 @@ export async function reserveAndGetSnapshotStatus(
     // loop), so the signal handlers must not outlive the reservation.
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
-    shutdown?.removeEventListener('abort', onSignal);
   }
 }
