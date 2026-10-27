@@ -18,7 +18,10 @@ export type Exec = (
   args: readonly string[],
   options?: ExecOptions,
 ) => string;
-export type ExecError = Error & {status?: number | undefined; stderr?: Buffer};
+export type ExecError = Error & {
+  status?: number | undefined;
+  stderr?: string | Buffer;
+};
 
 export type StableZeroVersion = `${number}.${number}.${number}`;
 export type CanaryZeroVersion = `${StableZeroVersion}-canary.${number}`;
@@ -32,14 +35,9 @@ export type MaintenanceZeroBranch = `maint/zero/${string}`;
 export type ReleaseBranch = 'main' | MaintenanceZeroBranch;
 
 /**
- * The one place that knows how to actually run a command.
- *
- * Every input the resolution depends on is a seam: the platform, whether the
- * entrypoint exists, where node lives, and what finally gets spawned. A test
- * that supplies all four asserts the same string on every host; one that leaves
- * `nodePath` to the runner has to compose the expected path itself, and composing
- * it with the host's separators is what made these cases fail everywhere but
- * Windows.
+ * Runs a command the way {@link resolveNodeShimCommand} says to. The platform,
+ * the entrypoint probe, the Node path and the spawn function are parameters, so
+ * a test asserts the same strings on every host.
  */
 export function createExec({
   execFile = execFileSync,
@@ -221,9 +219,7 @@ export function npmZeroVersionExists(version: ZeroVersion, exec = defaultExec) {
     ) {
       return false;
     }
-    // Fall back to the message and keep the cause: a failure that never reached
-    // npm carries no `stderr`, so reporting only that produces a sentence ending
-    // in a colon and discards the one explanation available.
+    // A failure that never reached npm, such as a spawn error, has no stderr.
     const reason =
       stderr.trim() || (error instanceof Error ? error.message : '');
     throw new Error(

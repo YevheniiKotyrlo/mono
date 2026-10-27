@@ -257,6 +257,43 @@ describe('bareShimSpawnCommand', () => {
   test('ignores unrelated calls', () => {
     expect(bareShimSpawnCommand(spawnCall('execSync', 'npm'))).toBeUndefined();
   });
+
+  test('a shell: false after a spread decides, as it does at runtime', () => {
+    const node = spawnCall('spawn', 'npm', {
+      type: 'ObjectExpression',
+      properties: [
+        {type: 'SpreadElement', argument: {type: 'Identifier', name: 'base'}},
+        {type: 'Property', key: {name: 'shell'}, value: literal(false)},
+      ],
+    });
+    expect(bareShimSpawnCommand(node)).toBe('npm');
+  });
+
+  test('flags a command written as a template literal', () => {
+    const node = spawnCall('spawn', undefined);
+    node.arguments[0] = {
+      type: 'TemplateLiteral',
+      expressions: [],
+      quasis: [{type: 'TemplateElement', value: {raw: 'npm', cooked: 'npm'}}],
+    };
+    expect(bareShimSpawnCommand(node)).toBe('npm');
+  });
+
+  test('flags a spawn imported under another name', () => {
+    expect(
+      bareShimSpawnCommand(
+        spawnCall('run', 'npm'),
+        new Map([['run', 'spawn']]),
+      ),
+    ).toBe('npm');
+  });
+
+  test('flags a .cmd or .bat file spawned without a shell', () => {
+    expect(bareShimSpawnCommand(spawnCall('spawn', 'npm.cmd'))).toBe('npm.cmd');
+    expect(bareShimSpawnCommand(spawnCall('spawn', 'build.BAT'))).toBe(
+      'build.BAT',
+    );
+  });
 });
 
 test('bareShimSpawnCommand flags the member form childProcess.spawn(...)', () => {

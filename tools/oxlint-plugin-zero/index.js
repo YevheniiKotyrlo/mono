@@ -1,16 +1,7 @@
 const selectStar = /\bselect\b[\s\S]*?\*(?=\s*(?:,|\bfrom\b))[\s\S]*?\bfrom\b/i;
 
-// Commands that resolve to a `.CMD`/`.bat` shim on Windows rather than a real
-// executable image. `CreateProcess` only ever appends `.exe`, so spawning one of
-// these by bare name throws ENOENT on Windows even when the shim is on PATH.
-// `shell: true` "fixes" it but concatenates arguments instead of escaping them
-// (Node DEP0190), so the portable answer is to resolve the JS entrypoint and
-// spawn that with `process.execPath`.
-// Limited to what this repo actually runs: the two sites that prompted the rule
-// (`npm` from the release scripts, `tsc` from the zero build), the package manager
-// and Node's own launchers, and the CLIs it depends on. Names it has no
-// relationship with are left out — an error-level rule should not be enumerating
-// tools nobody here spawns.
+// Commands that are a `.CMD` shim on Windows, which `CreateProcess` does not
+// resolve: it appends only `.exe`. Limited to what this repository runs.
 const shimCommands = new Set([
   'npm',
   'npx',
@@ -28,11 +19,7 @@ const shimCommands = new Set([
   'sst',
 ]);
 
-// `exec` and `execSync` are absent because they always go through a shell, which
-// resolves `npm.cmd` itself.
-//
-// Reach: the command must be a string literal and the callee a plain or member
-// identifier, and the callee's origin is not tracked.
+// `exec` and `execSync` always go through a shell, which resolves the shim.
 const spawnFunctions = new Set([
   'spawn',
   'spawnSync',
@@ -41,6 +28,8 @@ const spawnFunctions = new Set([
 ]);
 
 const whitespace = /\s+/;
+const scriptFile = /\.(?:cmd|bat)$/i;
+const childProcessModules = new Set(['node:child_process', 'child_process']);
 
 const plugin = {
   meta: {
@@ -109,13 +98,27 @@ const plugin = {
         schema: [],
         messages: {
           resolveEntrypoint:
-            "Spawning '{{command}}' by bare name throws ENOENT on Windows: it is a .CMD shim and CreateProcess only appends .exe. Do not reach for `shell: true` — it concatenates arguments instead of escaping them (Node DEP0190). Resolve the JS entrypoint (createRequire(...).resolve) and spawn it with process.execPath.",
+            "Spawning '{{command}}' without a shell fails on Windows: it is a .cmd shim, which CreateProcess does not run. `shell: true` concatenates arguments instead of escaping them (Node DEP0190): spawn its JS entrypoint with process.execPath.",
         },
       },
       create(context) {
+        const aliases = new Map();
         return {
+          ImportDeclaration(node) {
+            if (!childProcessModules.has(node.source.value)) {
+              return;
+            }
+            for (const specifier of node.specifiers) {
+              if (specifier.type === 'ImportSpecifier') {
+                aliases.set(
+                  specifier.local.name,
+                  specifier.imported.name ?? specifier.imported.value,
+                );
+              }
+            }
+          },
           CallExpression(node) {
-            const command = bareShimSpawnCommand(node);
+            const command = bareShimSpawnCommand(node, aliases);
             if (command !== undefined) {
               context.report({
                 node,
@@ -178,16 +181,14 @@ function isStaticallyFalsy(node) {
 }
 
 /**
- * Returns the offending command name when `node` spawns a Windows shim command
- * by bare name without a shell, otherwise undefined.
+ * The shim command `node` spawns without a shell, or undefined. `aliases` maps
+ * the local names `child_process` functions were imported under.
  */
-function bareShimSpawnCommand(node) {
-  // Both spellings count: a bare `spawn(…)` and a `childProcess.spawn(…)` member
-  // call are equally common, and `cp['spawn'](…)` is out of reach either way.
+function bareShimSpawnCommand(node, aliases = new Map()) {
   const callee = node.callee;
   const calleeName =
     callee?.type === 'Identifier'
-      ? callee.name
+      ? (aliases.get(callee.name) ?? callee.name)
       : callee?.type === 'MemberExpression' && !callee.computed
         ? callee.property?.name
         : undefined;
@@ -195,59 +196,48 @@ function bareShimSpawnCommand(node) {
     return undefined;
   }
   const [commandArgument, ...rest] = node.arguments ?? [];
-  if (
-    commandArgument?.type !== 'Literal' ||
-    typeof commandArgument.value !== 'string'
-  ) {
+  const text = staticString(commandArgument);
+  if (text === undefined) {
     return undefined;
   }
-  const command = commandArgument.value.trim().split(whitespace)[0];
-  if (!shimCommands.has(command)) {
+  const command = text.trim().split(whitespace)[0];
+  if (!shimCommands.has(command) && !scriptFile.test(command)) {
     return undefined;
   }
-  // The rule name is the scope: a shim spawned by bare name WITHOUT a shell
-  // cannot be resolved at all. `shell: true` does resolve it, at the different
-  // cost DEP0190 describes, which is Node's warning to give and not this rule's.
-  // So an explicit `shell` is a deliberate opt-out.
-  if (rest.some(hasShellOption)) {
-    return undefined;
+  return rest.some(opensShell) ? undefined : command;
+}
+
+function staticString(node) {
+  if (node?.type === 'Literal') {
+    return typeof node.value === 'string' ? node.value : undefined;
   }
-  return command;
+  if (node?.type === 'TemplateLiteral' && node.expressions.length === 0) {
+    return node.quasis[0]?.value.cooked ?? undefined;
+  }
+  return undefined;
 }
 
 /**
- * Whether an argument is an options object that opts into a shell.
- *
- * The options bag is located by shape, not by position: `args` is optional in
- * every one of these signatures, so `spawn('npm', {shell: true})` puts it at
- * index 1 — reading index 2 reported those calls despite the opt-out. A spread
- * is treated as opting in, because its contents are not knowable here and a
- * false negative is cheaper than an error on correct code.
- *
- * The VALUE decides, not the key's presence: `{shell: false}` is exactly the
- * configuration that fails, so reading only the key would exempt the call this
- * rule exists to report.
+ * Whether an options object opens a shell: its last `shell` key decides, as it
+ * does at runtime, and a spread after it might hold one, so it counts as one.
+ * A statically falsy value — `false`, `undefined`, `void 0` — opens none.
  */
-function hasShellOption(argument) {
+function opensShell(argument) {
   if (argument?.type !== 'ObjectExpression') {
     return false;
   }
-  return argument.properties.some(property => {
+  let opens = false;
+  for (const property of argument.properties) {
     if (property.type === 'SpreadElement') {
-      return true;
-    }
-    if (
-      property.type !== 'Property' ||
-      (property.key?.name !== 'shell' && property.key?.value !== 'shell')
+      opens = true;
+    } else if (
+      property.type === 'Property' &&
+      (property.key?.name === 'shell' || property.key?.value === 'shell')
     ) {
-      return false;
+      opens = !isStaticallyFalsy(property.value);
     }
-    // A statically falsy value is not an opt-out — `{shell: false}` is the very
-    // configuration that fails, and `{shell: undefined}` / `{shell: void 0}` are
-    // that same configuration spelled differently. Anything else — `true`, a
-    // variable, a call — is not knowably falsy, so it counts as deliberate.
-    return !isStaticallyFalsy(property.value);
-  });
+  }
+  return opens;
 }
 
 export default plugin;
