@@ -51,13 +51,13 @@ export type SQLiteChangeLogWriterOptions = {
    */
   onCommit?: ((watermark: string) => void) | undefined;
   /**
-   * Called when the writer disables itself and deletes the file. The reader is
-   * cached on the service, so a delete that leaves it open would leave an
-   * in-process reader serving an unlinked inode while every new open sees
-   * nothing.
+   * Called when the writer disables itself, before it deletes the file, so the
+   * reader cached on the service closes first: Windows refuses to unlink an open
+   * file, and on POSIX the reader would go on serving the unlinked inode while
+   * every new open sees nothing.
    */
   onDisabled?: (() => void) | undefined;
-  /** Called when reconciliation replaces the file, to close cached readers. */
+  /** Called before the writer replaces the file, for the same reason. */
   onRebuilt?: (() => void) | undefined;
   /** Overridable for tests. */
   now?: (() => number) | undefined;
@@ -90,8 +90,8 @@ const DEFAULT_SHADOW_VALIDATION_PERCENT = 1;
  * replica's litestream backup or re-derivable from the replication slot. A write
  * failure must therefore not stop replication for the shard. Corruption is
  * rebuilt once at open; any other write error — a full disk, an I/O error, a
- * permissions problem — logs, disables the writer, deletes the file, closes the
- * reader, and lets the stream continue. The cost is catchup reach, and reach is
+ * permissions problem — logs, disables the writer, closes the reader, deletes the
+ * file, and lets the stream continue. The cost is catchup reach, and reach is
  * recoverable: `too-old` sends a subscriber to a restore.
  *
  * One carve-out keeps that from hiding the bug class this topology introduces. A
@@ -196,11 +196,13 @@ export class SQLiteChangeLogWriter {
     try {
       const db = this.#db;
       if (db === undefined) {
-        const opened = openChangeLogDBForWriting(this.#lc, replicaFile, anchor);
+        const opened = openChangeLogDBForWriting(
+          this.#lc,
+          replicaFile,
+          anchor,
+          () => this.#opts.onRebuilt?.(),
+        );
         this.#db = opened.db;
-        if (opened.replacedFile) {
-          this.#opts.onRebuilt?.();
-        }
         recordSQLiteChangeLogReconcile(this.#lc, opened.result);
         const info = getSQLiteChangeLogInfo(opened.db);
         logSQLiteChangeLogStartup(
@@ -433,7 +435,7 @@ export class SQLiteChangeLogWriter {
   }
 
   /**
-   * Logs, disables the writer, deletes the file, and closes the reader, leaving
+   * Logs, disables the writer, closes the reader and deletes the file, leaving
    * replication running. Disabling is for the life of the process: a log that
    * failed a write is not re-opened until the task restarts, so the behavior a
    * subscriber sees is the same as `sqliteChangeLogMode=off`.
@@ -452,10 +454,7 @@ export class SQLiteChangeLogWriter {
       e,
     );
     this.close();
-    // Before the delete: `onDisabled` closes the catchup reader, which holds its
-    // own handle on this file, and Windows refuses to unlink an open file. Guarded,
-    // so a throwing callback can neither skip the delete nor escape into the write
-    // path this fails softly for.
+    // A throwing callback must neither skip the delete nor escape into the write path.
     try {
       this.#opts.onDisabled?.();
     } catch (disableError) {

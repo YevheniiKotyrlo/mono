@@ -1,4 +1,4 @@
-import {existsSync} from 'node:fs';
+import {existsSync, readFileSync, writeFileSync} from 'node:fs';
 import {LogContext} from '@rocicorp/logger';
 import {afterEach, expect, test} from 'vitest';
 import {TestLogSink} from '../../../../shared/src/logging-test-utils.ts';
@@ -77,10 +77,10 @@ function transaction(writer: SQLiteChangeLogWriter, watermark: string) {
   write(['commit', messages.commit(), {watermark}]);
 }
 
+// POSIX unlinks an open file and Windows refuses, so these assert the order of
+// the callbacks and the delete rather than an outcome only Windows shows.
+
 test('the disable callback runs before the change log is deleted', () => {
-  // The callback closes the catchup reader, which holds its own handle on the
-  // file, and Windows refuses to unlink an open file. POSIX allows it, so this
-  // asserts the order rather than the outcome, which only Windows would show.
   let existedWhenDisabled: boolean | undefined;
   using fixture = writerFailingNextWrite('change-log-disable-order', () => {
     existedWhenDisabled = existsSync(fixture.changeLogFile);
@@ -100,7 +100,34 @@ test('a throwing disable callback still leaves the change log deleted', () => {
   expect(() => transaction(fixture.writer, '04')).not.toThrow();
   expect(existsSync(fixture.changeLogFile)).toBe(false);
   expect(fixture.errors().join('\n')).toContain('error disabling catchup');
-  // Replication continues, which is the point of failing soft.
   expect(fixture.writer.enabled).toBe(false);
   expect(() => transaction(fixture.writer, '06')).not.toThrow();
+});
+
+test('the rebuild callback runs before a corrupt log is replaced at first open', () => {
+  const corruptLog = 'not a SQLite database\n'.repeat(64);
+  const file = new DbFile('change-log-rebuild-order');
+  files.push(file);
+  const changeLogFile = changeLogFileName(file.path);
+  writeFileSync(changeLogFile, corruptLog);
+  let contentWhenRebuilt: string | undefined;
+  const writer = new SQLiteChangeLogWriter(
+    new LogContext('debug', undefined, new TestLogSink()),
+    {
+      replicaFile: file.path,
+      identity: IDENTITY,
+      onRebuilt: () => {
+        contentWhenRebuilt = readFileSync(changeLogFile, 'utf8');
+      },
+      now: () => 1_700_000_000_000,
+    },
+  );
+  try {
+    writer.reconcile({resumeWatermark: '02', cookies: EMPTY_COOKIE_SET});
+    expect(writer.enabled).toBe(true);
+  } finally {
+    writer.close();
+  }
+
+  expect(contentWhenRebuilt).toBe(corruptLog);
 });
