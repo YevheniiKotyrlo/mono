@@ -5467,11 +5467,7 @@ test('We should send a deleteClient when a Zero instance is closed', async () =>
   vi.useRealTimers();
 
   await vi.waitFor(() => {
-    // `vi.waitFor` re-runs this body at one source location, and inline
-    // snapshots are keyed by location: once an attempt records `[]`, a later
-    // attempt carrying a message is rejected as a duplicate-location snapshot
-    // rather than reported as the message it found. `toEqual` has no location
-    // identity.
+    // An inline snapshot rejects vi.waitFor's retried attempt as a duplicate.
     expect(mockSocket1.messages).toEqual([]);
     expect(mockSocket2.messages.map(s => JSON.parse(s))).toEqual([
       ['deleteClients', {clientIDs: [z1.clientID]}],

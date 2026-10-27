@@ -49,7 +49,18 @@ const chaiPropertyAssertions = new Set([
   'sealed',
   'frozen',
   'finite',
+  'callable',
+  'exists',
+  'iterable',
+  'numeric',
+  // vitest's own chai plugin.
+  'called',
+  'calledOnce',
+  'calledTwice',
+  'calledThrice',
 ]);
+
+const qualifiedExpects = new Set(['poll', 'soft']);
 
 const plugin = {
   meta: {
@@ -288,10 +299,17 @@ function opensShell(argument) {
 }
 
 function isExpectCall(node) {
+  if (node?.type !== 'CallExpression') {
+    return false;
+  }
+  const {callee} = node;
   return (
-    node?.type === 'CallExpression' &&
-    node.callee?.type === 'Identifier' &&
-    node.callee.name === 'expect'
+    (callee?.type === 'Identifier' && callee.name === 'expect') ||
+    (callee?.type === 'MemberExpression' &&
+      !callee.computed &&
+      callee.object?.type === 'Identifier' &&
+      callee.object.name === 'expect' &&
+      qualifiedExpects.has(callee.property?.name))
   );
 }
 

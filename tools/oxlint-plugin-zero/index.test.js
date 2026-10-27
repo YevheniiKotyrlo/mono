@@ -420,8 +420,24 @@ describe('unassertedExpect', () => {
     ).toEqual({messageId: 'uncalledMatcher', data: {name: 'string'}});
   });
 
-  test.each(['true', 'false', 'null', 'undefined', 'ok', 'empty', 'frozen'])(
-    "allows chai's %s property assertion, which asserts when read",
+  test.each([
+    'true',
+    'false',
+    'null',
+    'undefined',
+    'ok',
+    'empty',
+    'frozen',
+    'callable',
+    'exists',
+    'iterable',
+    'numeric',
+    'called',
+    'calledOnce',
+    'calledTwice',
+    'calledThrice',
+  ])(
+    "allows chai's and vitest's %s property assertion, which asserts when read",
     name => {
       expect(
         unassertedExpect(statement(chain(expectOf(value), 'to', 'be', name))),
@@ -440,11 +456,36 @@ describe('unassertedExpect', () => {
     ).toBeUndefined();
   });
 
-  test('leaves an expect() that is returned or assigned to its caller', () => {
+  test('leaves an expect() that is assigned to its caller', () => {
     expect(
-      unassertedExpect({type: 'ReturnStatement', argument: expectOf(value)}),
+      unassertedExpect(
+        statement({
+          type: 'AssignmentExpression',
+          operator: '=',
+          left: identifier('assertion'),
+          right: expectOf(value),
+        }),
+      ),
     ).toBeUndefined();
   });
+
+  test.each(['poll', 'soft'])(
+    'reports expect.%s() with no matcher, and an uncalled one',
+    name => {
+      const qualified = {
+        type: 'CallExpression',
+        callee: member(identifier('expect'), name),
+        arguments: [value],
+      };
+      expect(unassertedExpect(statement(qualified))).toEqual({
+        messageId: 'noMatcher',
+      });
+      expect(unassertedExpect(statement(chain(qualified, 'toBe')))).toEqual({
+        messageId: 'uncalledMatcher',
+        data: {name: 'toBe'},
+      });
+    },
+  );
 
   test('ignores a call that is not expect()', () => {
     expect(
