@@ -185,8 +185,6 @@ export function logSQLiteChangeLogStartup(
 export async function sqliteFileBytes(
   lc: LogContext,
   file: string,
-  // A test reaches the warning below only by injecting the failure: Windows
-  // reports ENOENT for the malformed paths that give ENOTDIR on POSIX.
   statFile: (path: string) => Promise<{size: number}> = stat,
 ): Promise<number> {
   const sizes = await Promise.all(
