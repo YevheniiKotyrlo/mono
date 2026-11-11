@@ -1842,6 +1842,11 @@ test('online', async () => {
 
   const consoleDebugStub = vi.spyOn(console, 'debug');
 
+  const loggedPushThrew = () =>
+    consoleDebugStub.mock.calls.some(args =>
+      args.join(' ').includes('Push threw'),
+    );
+
   fetchMocker.post(pushURL, async () => {
     await sleep(10);
     return {throws: new Error('Simulate fetch error in push')};
@@ -1855,25 +1860,20 @@ test('online', async () => {
   await tickAFewTimes(vi);
 
   expect(rep.online).toBe(false);
-  expect(
-    consoleDebugStub.mock.calls.some(args =>
-      args.join('\n').includes('Push threw'),
-    ),
-  );
+  expect(loggedPushThrew()).toBe(true);
   expect(log).toEqual([false]);
-
-  consoleDebugStub.mockClear();
 
   fetchMocker.post(pushURL, 'ok');
   await rep.mutate.addData({a: 1});
 
+  // A push sent under the failing handler can still be in flight, and it throws
+  // when it lands; what has to hold is that none throws once the client is back
+  // online.
+  await tickUntil(vi, () => rep.online);
+  consoleDebugStub.mockClear();
   await tickAFewTimes(vi, 20);
 
-  expect(
-    !consoleDebugStub.mock.calls.some(args =>
-      args.join('\n').includes('Push threw'),
-    ),
-  );
+  expect(loggedPushThrew()).toBe(false);
   expect(rep.online).toBe(true);
   expect(log).toEqual([false, true]);
 });

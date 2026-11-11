@@ -5,6 +5,7 @@ import {
   shouldCheck,
   stripCommentOnlyLines,
   toPosixPath,
+  unassertedExpect,
 } from './index.js';
 
 // These tests are deliberately platform-independent: they feed Windows-shaped
@@ -363,4 +364,141 @@ test('select-star matching is about the projection, not the word', () => {
   ]) {
     expect(hasSelectStar(no), no).toBe(false);
   }
+});
+
+const identifier = name => ({type: 'Identifier', name});
+const expectOf = argument => ({
+  type: 'CallExpression',
+  callee: identifier('expect'),
+  arguments: [argument],
+});
+const member = (object, name) => ({
+  type: 'MemberExpression',
+  computed: false,
+  object,
+  property: identifier(name),
+});
+const chain = (receiver, ...names) =>
+  names.reduce((object, name) => member(object, name), receiver);
+const called = callee => ({type: 'CallExpression', callee, arguments: []});
+const statement = expression => ({type: 'ExpressionStatement', expression});
+const value = identifier('value');
+
+describe('unassertedExpect', () => {
+  test('reports an expect() with no matcher', () => {
+    expect(unassertedExpect(statement(expectOf(value)))).toEqual({
+      messageId: 'noMatcher',
+    });
+  });
+
+  test('reports a comparison handed to expect() instead of asserted', () => {
+    const comparison = {
+      type: 'BinaryExpression',
+      operator: '>',
+      left: identifier('a'),
+      right: identifier('b'),
+    };
+    expect(unassertedExpect(statement(expectOf(comparison)))).toEqual({
+      messageId: 'noMatcher',
+    });
+  });
+
+  test('reports an awaited expect() with no matcher', () => {
+    const awaited = {type: 'AwaitExpression', argument: expectOf(value)};
+    expect(unassertedExpect(statement(awaited))).toEqual({
+      messageId: 'noMatcher',
+    });
+  });
+
+  test('reports a matcher read but never called, by name', () => {
+    expect(
+      unassertedExpect(statement(chain(expectOf(value), 'toBeDefined'))),
+    ).toEqual({messageId: 'uncalledMatcher', data: {name: 'toBeDefined'}});
+    // `.string` is a chai method, not a property assertion.
+    expect(
+      unassertedExpect(statement(chain(expectOf(value), 'is', 'string'))),
+    ).toEqual({messageId: 'uncalledMatcher', data: {name: 'string'}});
+  });
+
+  test.each([
+    'true',
+    'false',
+    'null',
+    'undefined',
+    'ok',
+    'empty',
+    'frozen',
+    'callable',
+    'exists',
+    'iterable',
+    'numeric',
+    'called',
+    'calledOnce',
+    'calledTwice',
+    'calledThrice',
+  ])(
+    "allows chai's and vitest's %s property assertion, which asserts when read",
+    name => {
+      expect(
+        unassertedExpect(statement(chain(expectOf(value), 'to', 'be', name))),
+      ).toBeUndefined();
+    },
+  );
+
+  test('allows a called matcher', () => {
+    expect(
+      unassertedExpect(statement(called(chain(expectOf(value), 'toBe')))),
+    ).toBeUndefined();
+    expect(
+      unassertedExpect(
+        statement(called(chain(expectOf(value), 'to', 'deep', 'equal'))),
+      ),
+    ).toBeUndefined();
+  });
+
+  test('leaves an expect() that is assigned to its caller', () => {
+    expect(
+      unassertedExpect(
+        statement({
+          type: 'AssignmentExpression',
+          operator: '=',
+          left: identifier('assertion'),
+          right: expectOf(value),
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  test.each(['poll', 'soft'])(
+    'reports expect.%s() with no matcher, and an uncalled one',
+    name => {
+      const qualified = {
+        type: 'CallExpression',
+        callee: member(identifier('expect'), name),
+        arguments: [value],
+      };
+      expect(unassertedExpect(statement(qualified))).toEqual({
+        messageId: 'noMatcher',
+      });
+      expect(unassertedExpect(statement(chain(qualified, 'toBe')))).toEqual({
+        messageId: 'uncalledMatcher',
+        data: {name: 'toBe'},
+      });
+    },
+  );
+
+  test('ignores a call that is not expect()', () => {
+    expect(
+      unassertedExpect(
+        statement({
+          type: 'CallExpression',
+          callee: identifier('assert'),
+          arguments: [value],
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      unassertedExpect(statement(chain(identifier('result'), 'done'))),
+    ).toBeUndefined();
+  });
 });
