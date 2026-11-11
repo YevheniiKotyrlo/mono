@@ -116,6 +116,91 @@ export type ReplicaOptions = {
 export type ServerContext = JSONObject;
 
 /**
+ * The share of upstream's `max_connections` that giving each table its own copy
+ * worker may spend: `cvr-db` and `change-db` fall back to `upstream-db`, so
+ * zero-cache's own connections already claim part of the same server.
+ */
+const PER_TABLE_WORKER_SHARE = 0.25;
+
+/** The most connections the raise opens on its own, whatever the server allows. */
+const PER_TABLE_WORKER_CEILING = 50;
+
+export function perTableWorkerCeiling(maxConnections: number): number {
+  return Math.max(
+    1,
+    Math.min(
+      PER_TABLE_WORKER_CEILING,
+      Math.floor(maxConnections * PER_TABLE_WORKER_SHARE),
+    ),
+  );
+}
+
+/**
+ * How many workers copy the tables. Idle workers do nothing, so the requested
+ * count is capped at the table count. Where each table needs a connection of its
+ * own, the count is raised toward the table count, but only as far as
+ * {@link perTableWorkerCeiling} allows: a requested count above the ceiling is
+ * still honoured, since the ceiling bounds only what the raise adds on its own.
+ */
+export function copyWorkerCount({
+  requested,
+  numTables,
+  workerPerTable,
+  maxConnections,
+}: {
+  requested: number;
+  numTables: number;
+  workerPerTable: boolean;
+  maxConnections: number;
+}): number {
+  if (workerPerTable) {
+    return Math.min(
+      numTables,
+      Math.max(perTableWorkerCeiling(maxConnections), requested),
+    );
+  }
+  return Math.min(requested, numTables);
+}
+
+/**
+ * What initial sync reports about its copy workers: a raise past the requested
+ * count, and tables left sharing a worker where each needs its own.
+ */
+export function copyWorkerWarnings({
+  requested,
+  numTables,
+  workerPerTable,
+  maxConnections,
+  numWorkers,
+}: {
+  requested: number;
+  numTables: number;
+  workerPerTable: boolean;
+  maxConnections: number;
+  numWorkers: number;
+}): string[] {
+  const warnings: string[] = [];
+  if (numWorkers > requested) {
+    warnings.push(
+      `Increasing the number of copy workers from ${requested} to ` +
+        `${numWorkers} to work around a postgres.js connection bug ` +
+        `(https://github.com/porsager/postgres/issues/499)`,
+    );
+  }
+  if (workerPerTable && numTables > numWorkers) {
+    warnings.push(
+      `${numTables} tables share ${numWorkers} copy workers, so a worker runs ` +
+        `several COPY streams and can hang on the same bug. Run zero-cache ` +
+        `with Zero's patched postgres.js, as the rocicorp/zero Docker image ` +
+        `does, or give every table a worker with --table-copy-workers ` +
+        `${numTables}, under a max_connections (now ${maxConnections}) that ` +
+        `leaves room for them.`,
+    );
+  }
+  return warnings;
+}
+
+/**
  * @returns The {@link ReplicaState} of the initialized replica, or `undefined`
  *          for a shadow sync.
  */
@@ -164,7 +249,7 @@ export async function initialSync(
   try {
     const copyProfiler = profileCopy ? await CpuProfiler.connect() : null;
     sql = await connectPgClient(lc, upstreamURI, 'initial-sync');
-    await checkUpstreamConfig(sql);
+    const {maxConnections} = await checkUpstreamConfig(sql);
 
     // In shadow mode we assume the shard is already initialized and just
     // read back the existing publications. `ensurePublishedTables` would
@@ -212,16 +297,21 @@ export async function initialSync(
       // where the unpatched hang was seen most often, give each table its own
       // connection so that no COPY runs after another one, as in 1.10.
       const workerPerTable = !pgPatched && platform() === 'win32';
-      if (workerPerTable && tableCopyWorkers < numTables) {
-        lc.warn?.(
-          `Increasing the number of copy workers from ${tableCopyWorkers} to ` +
-            `${numTables} to work around a postgres.js connection bug ` +
-            `(https://github.com/porsager/postgres/issues/499)`,
-        );
+      const numWorkers = copyWorkerCount({
+        requested: tableCopyWorkers,
+        numTables,
+        workerPerTable,
+        maxConnections,
+      });
+      for (const warning of copyWorkerWarnings({
+        requested: tableCopyWorkers,
+        numTables,
+        workerPerTable,
+        maxConnections,
+        numWorkers,
+      })) {
+        lc.warn?.(warning);
       }
-      const numWorkers = workerPerTable
-        ? numTables
-        : Math.min(tableCopyWorkers, numTables);
 
       const copyPool = await connectPgClient(
         lc,
@@ -519,11 +609,14 @@ export async function shadowInitialSync(
   }
 }
 
-async function checkUpstreamConfig(sql: PostgresDB) {
-  const {walLevel, version} = (
-    await sql<{walLevel: string; version: number}[]>`
-      SELECT current_setting('wal_level') as "walLevel", 
-             current_setting('server_version_num') as "version";
+async function checkUpstreamConfig(
+  sql: PostgresDB,
+): Promise<{maxConnections: number}> {
+  const {walLevel, version, maxConnections} = (
+    await sql<{walLevel: string; version: number; maxConnections: number}[]>`
+      SELECT current_setting('wal_level') as "walLevel",
+             current_setting('server_version_num')::int as "version",
+             current_setting('max_connections')::int as "maxConnections";
   `
   )[0];
 
@@ -537,6 +630,7 @@ async function checkUpstreamConfig(sql: PostgresDB) {
       `Must be running Postgres 15 or higher (currently: "${version}")`,
     );
   }
+  return {maxConnections};
 }
 
 async function ensurePublishedTables(
