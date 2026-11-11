@@ -12,6 +12,7 @@ import {
 import {consoleSink} from '../../../shared/src/logging.ts';
 import {must} from '../../../shared/src/must.ts';
 import {sleep} from '../../../shared/src/sleep.ts';
+import {postgresServerSettings} from '../../test/pg-container-setup.ts';
 import {
   type PostgresDB,
   postgresTypeConfig,
@@ -245,10 +246,9 @@ export const pgContainerTest = baseTest.extend<{pgConnectionString: string}>({
       const container = await new PostgreSqlContainer(mustInject('pgImage'))
         .withCommand([
           'postgres',
-          '-c',
-          'wal_level=logical',
-          '-c',
-          `timezone=${mustInject('pgTimezone')}`,
+          ...postgresServerSettings(mustInject('pgTimezone')).flatMap(
+            setting => ['-c', setting],
+          ),
         ])
         .start();
       const pgConnectionString = container.getConnectionUri();
