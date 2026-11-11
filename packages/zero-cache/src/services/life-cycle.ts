@@ -12,6 +12,8 @@ import {
 } from '../observability/metrics.ts';
 import {ConfigurationError} from '../types/configuration-error.ts';
 import {
+  raiseSignal,
+  sendSignal,
   singleProcessMode,
   type Subprocess,
   type Worker,
@@ -187,9 +189,9 @@ export class ProcessManager {
     this.#lc.info?.(`initiating drain (${signal})`);
     this.#drainStart = Date.now();
     if (this.#userFacing.size) {
-      this.#kill(this.#userFacing, signal);
+      this.#signal(this.#userFacing, signal);
     } else {
-      this.#kill(this.#all, signal);
+      this.#signal(this.#all, signal);
     }
   }
 
@@ -333,6 +335,16 @@ export class ProcessManager {
     return undefined;
   }
 
+  #signal(workers: Iterable<Subprocess>, signal: NodeJS.Signals) {
+    for (const worker of workers) {
+      try {
+        sendSignal(worker, signal);
+      } catch (e) {
+        this.#lc.error?.(e);
+      }
+    }
+  }
+
   #kill(workers: Iterable<Subprocess>, signal: NodeJS.Signals) {
     for (const worker of workers) {
       try {
@@ -376,12 +388,13 @@ export class SupportingProcesses implements SingletonService {
     this.#done.promise.catch(() => {});
 
     parent.on('exit', code =>
-      this.#kill(
+      this.#signal(
         code === 0
           ? 'SIGTERM'
           : code === INTENTIONAL_SHUTDOWN_ERROR_CODE
             ? 'SIGQUIT'
             : 'SIGABRT',
+        (proc, signal) => proc.kill(signal),
       ),
     );
   }
@@ -408,14 +421,14 @@ export class SupportingProcesses implements SingletonService {
     // received during worker initialization, which would otherwise terminate
     // the worker (or be handled by the initialization logic).
     for (const signal of FORCEFUL_SHUTDOWN) {
-      this.#parent.on(signal, () => this.#kill(signal));
+      this.#parent.on(signal, () => this.#signal(signal, sendSignal));
     }
     return this.#done.promise;
   }
 
   async stop(): Promise<void> {
     if (!this.#signaled) {
-      this.#kill('SIGTERM');
+      this.#signal('SIGTERM', sendSignal);
     }
     if (this.#procs.size === 0) {
       this.#done.resolve();
@@ -447,11 +460,14 @@ export class SupportingProcesses implements SingletonService {
     }
   }
 
-  #kill(signal: NodeJS.Signals) {
+  #signal(
+    signal: NodeJS.Signals,
+    send: (proc: Subprocess, signal: NodeJS.Signals) => void,
+  ) {
     this.#signaled = signal;
     for (const proc of this.#procs.keys()) {
       try {
-        proc.kill(signal);
+        send(proc, signal);
       } catch (e) {
         this.#lc.error?.(e);
       }
@@ -830,7 +846,7 @@ export class HeartbeatMonitor {
             timeSinceLastHeartbeat / 1000
           } seconds ago. draining.`,
         );
-        process.kill(process.pid, GRACEFUL_SHUTDOWN[0]);
+        raiseSignal(GRACEFUL_SHUTDOWN[0]);
       }
     });
   };

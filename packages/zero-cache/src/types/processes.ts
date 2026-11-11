@@ -31,6 +31,7 @@ export const MESSAGE_TYPES = {
   stop: 'stop',
   start: 'start',
   init: 'init',
+  signal: 'signal',
 } as const;
 
 export type ClientGroupStatus = {
@@ -65,6 +66,9 @@ export type ProfileResponseMessage = ['profileResponse', ProfileResponse];
  * `SelfDrain`.
  */
 export type DrainRequestedMessage = ['drainRequested', object];
+
+/** A signal sent over IPC, for a child that `kill()` would terminate instead. */
+export type SignalMessage = ['signal', NodeJS.Signals];
 
 export type Message<Payload> = [keyof typeof MESSAGE_TYPES, Payload];
 
@@ -138,6 +142,8 @@ export interface Sender {
 
 export interface Subprocess extends Sender, EventEmitter {
   pid?: number | undefined;
+  /** Whether an IPC channel to the subprocess is open. */
+  connected?: boolean | undefined;
 }
 
 export interface Receiver extends EventEmitter {
@@ -196,12 +202,70 @@ function wrap<P extends EventEmitter>(proc: P): P & Receiver {
 
 type Proc = Pick<ChildProcess, 'send' | 'kill' | 'pid'> & EventEmitter;
 
+type SignalTarget = Pick<
+  NodeJS.Process,
+  'pid' | 'kill' | 'emit' | 'listenerCount'
+>;
+
+/**
+ * Raises `signal` in `target` as the operating system delivers one: to its
+ * listeners, or with the signal's default action, termination, when it has none.
+ */
+export function deliverSignal(
+  target: SignalTarget,
+  signal: NodeJS.Signals,
+): void {
+  if (target.listenerCount(signal) > 0) {
+    target.emit(signal, signal);
+  } else {
+    target.kill(target.pid, signal);
+  }
+}
+
+/**
+ * Sends `signal` to `proc`. On Windows `kill()` terminates a process whatever
+ * the signal, so a subprocess with an IPC channel is sent the signal as a
+ * message instead, which a forked worker raises with {@link deliverSignal}.
+ */
+export function sendSignal(
+  proc: Subprocess,
+  signal: NodeJS.Signals,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === 'win32' && proc.connected === true) {
+    proc.send(['signal', signal] satisfies SignalMessage);
+  } else {
+    proc.kill(signal);
+  }
+}
+
+/** Raises `signal` in this process, as {@link sendSignal} delivers one. */
+export function raiseSignal(
+  signal: NodeJS.Signals,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === 'win32') {
+    deliverSignal(process, signal);
+  } else {
+    process.kill(process.pid, signal);
+  }
+}
+
+function forkedWorker(proc: Proc): Worker {
+  if (process.platform === 'win32') {
+    onMessageType<SignalMessage>(proc, 'signal', signal =>
+      deliverSignal(process, signal),
+    );
+  }
+  return wrap(proc);
+}
+
 /**
  * The parentWorker for forked processes, or `null` if the process was not forked.
  * (Analogous to the `parentPort: MessagePort | null` of the `"workers"` library).
  */
 export const parentWorker: Worker | null = process.send
-  ? wrap(process as Proc)
+  ? forkedWorker(process as Proc)
   : null;
 
 const SINGLE_PROCESS = 'SINGLE_PROCESS';
