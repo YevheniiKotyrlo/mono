@@ -290,7 +290,7 @@ importers:
         version: 0.31.10
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@18.2.5(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/node@22.19.19)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@7.0.2))(typescript@7.0.2))(@types/pg@8.20.0)(expo-sqlite@58.0.13(expo@58.0.14)(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(kysely@0.28.17)(mysql2@3.24.6(@types/node@22.19.19))(pg@8.20.0)(postgres@3.4.7(patch_hash=469b163593f126b1eaf77566039a56a4f2b5a6c1fdfa9a3d9ddb80f47babd1f6))(prisma@7.8.0(@types/node@22.19.19)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@7.0.2))
+        version: 0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@18.2.5(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/node@22.19.19)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@7.0.2))(typescript@7.0.2))(@types/pg@8.20.0)(expo-sqlite@58.0.13(expo@58.0.14)(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(kysely@0.29.7)(mysql2@3.24.6(@types/node@22.19.19))(pg@8.20.0)(postgres@3.4.7(patch_hash=469b163593f126b1eaf77566039a56a4f2b5a6c1fdfa9a3d9ddb80f47babd1f6))(prisma@7.8.0(@types/node@22.19.19)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@7.0.2))
       oxfmt:
         specifier: ^0.74.0
         version: 0.74.0
@@ -1496,10 +1496,10 @@ importers:
         version: 8.20.0
       drizzle-orm:
         specifier: ^0.45.2
-        version: 0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@18.2.5(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/node@22.20.5)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.20.0)(expo-sqlite@58.0.13(expo@58.0.14)(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(kysely@0.28.17)(mysql2@3.24.6(@types/node@22.20.5))(pg@8.20.0)(postgres@3.4.7(patch_hash=469b163593f126b1eaf77566039a56a4f2b5a6c1fdfa9a3d9ddb80f47babd1f6))(prisma@7.8.0(@types/node@22.20.5)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))
+        version: 0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@18.2.5(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/node@22.20.5)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.20.0)(expo-sqlite@58.0.13(expo@58.0.14)(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(kysely@0.29.7)(mysql2@3.24.6(@types/node@22.20.5))(pg@8.20.0)(postgres@3.4.7(patch_hash=469b163593f126b1eaf77566039a56a4f2b5a6c1fdfa9a3d9ddb80f47babd1f6))(prisma@7.8.0(@types/node@22.20.5)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))
       kysely:
-        specifier: ^0.28.17
-        version: 0.28.17
+        specifier: ^0.29.7
+        version: 0.29.7
       oxfmt:
         specifier: ^0.74.0
         version: 0.74.0
@@ -9764,9 +9764,9 @@ packages:
     engines: {node: ^20.19.0 || >=22.12.0}
     hasBin: true
 
-  kysely@0.28.17:
-    resolution: {integrity: sha512-nbD8lB9EB3wNdMhOCdx5Li8DxnLbvKByylRLcJ1h+4SkrowVeECAyZlyiKMThF7xFdRz0jSQ2MoJr+wXux2y0Q==}
-    engines: {node: '>=20.0.0'}
+  kysely@0.29.7:
+    resolution: {integrity: sha512-fmIq+7kv4WbFm2tcfznRzikqB4cuNpgZ40PSU2fAJ2/OO5XhojqnTPrmgrCjYSRJVwBln03XcRXJGnw9H099IQ==}
+    engines: {node: '>=22.0.0'}
 
   lan-network@0.2.1:
     resolution: {integrity: sha512-ONPnazC96VKDntab9j9JKwIWhZ4ZUceB4A9Epu4Ssg0hYFmtHZSeQ+n15nIwTFmcBUKtExOer8WTJ4GF9MO64A==}
@@ -21345,7 +21345,7 @@ snapshots:
       esbuild: 0.28.2
       tsx: 4.22.0
 
-  drizzle-orm@0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@18.2.5(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/node@22.19.19)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@7.0.2))(typescript@7.0.2))(@types/pg@8.20.0)(expo-sqlite@58.0.13(expo@58.0.14)(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(kysely@0.28.17)(mysql2@3.24.6(@types/node@22.19.19))(pg@8.20.0)(postgres@3.4.7(patch_hash=469b163593f126b1eaf77566039a56a4f2b5a6c1fdfa9a3d9ddb80f47babd1f6))(prisma@7.8.0(@types/node@22.19.19)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@7.0.2)):
+  drizzle-orm@0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@18.2.5(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/node@22.19.19)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@7.0.2))(typescript@7.0.2))(@types/pg@8.20.0)(expo-sqlite@58.0.13(expo@58.0.14)(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(kysely@0.29.7)(mysql2@3.24.6(@types/node@22.19.19))(pg@8.20.0)(postgres@3.4.7(patch_hash=469b163593f126b1eaf77566039a56a4f2b5a6c1fdfa9a3d9ddb80f47babd1f6))(prisma@7.8.0(@types/node@22.19.19)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@7.0.2)):
     optionalDependencies:
       '@electric-sql/pglite': 0.4.1
       '@op-engineering/op-sqlite': 18.2.5(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1)
@@ -21353,13 +21353,13 @@ snapshots:
       '@prisma/client': 7.8.0(prisma@7.8.0(@types/node@22.19.19)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@7.0.2))(typescript@7.0.2)
       '@types/pg': 8.20.0
       expo-sqlite: 58.0.13(expo@58.0.14)(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1)
-      kysely: 0.28.17
+      kysely: 0.29.7
       mysql2: 3.24.6(@types/node@22.19.19)
       pg: 8.20.0
       postgres: 3.4.7(patch_hash=469b163593f126b1eaf77566039a56a4f2b5a6c1fdfa9a3d9ddb80f47babd1f6)
       prisma: 7.8.0(@types/node@22.19.19)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@7.0.2)
 
-  drizzle-orm@0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@18.2.5(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/node@22.20.5)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.20.0)(expo-sqlite@58.0.13(expo@58.0.14)(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(kysely@0.28.17)(mysql2@3.24.6(@types/node@22.20.5))(pg@8.20.0)(postgres@3.4.7(patch_hash=469b163593f126b1eaf77566039a56a4f2b5a6c1fdfa9a3d9ddb80f47babd1f6))(prisma@7.8.0(@types/node@22.20.5)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3)):
+  drizzle-orm@0.45.2(@electric-sql/pglite@0.4.1)(@op-engineering/op-sqlite@18.2.5(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(@opentelemetry/api@1.9.1)(@prisma/client@7.8.0(prisma@7.8.0(@types/node@22.20.5)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3))(@types/pg@8.20.0)(expo-sqlite@58.0.13(expo@58.0.14)(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1))(kysely@0.29.7)(mysql2@3.24.6(@types/node@22.20.5))(pg@8.20.0)(postgres@3.4.7(patch_hash=469b163593f126b1eaf77566039a56a4f2b5a6c1fdfa9a3d9ddb80f47babd1f6))(prisma@7.8.0(@types/node@22.20.5)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3)):
     optionalDependencies:
       '@electric-sql/pglite': 0.4.1
       '@op-engineering/op-sqlite': 18.2.5(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1)
@@ -21367,7 +21367,7 @@ snapshots:
       '@prisma/client': 7.8.0(prisma@7.8.0(@types/node@22.20.5)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(magicast@0.5.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(typescript@6.0.3))(typescript@6.0.3)
       '@types/pg': 8.20.0
       expo-sqlite: 58.0.13(expo@58.0.14)(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.3.0)(react@19.3.1))(react@19.3.1)
-      kysely: 0.28.17
+      kysely: 0.29.7
       mysql2: 3.24.6(@types/node@22.20.5)
       pg: 8.20.0
       postgres: 3.4.7(patch_hash=469b163593f126b1eaf77566039a56a4f2b5a6c1fdfa9a3d9ddb80f47babd1f6)
@@ -22875,7 +22875,7 @@ snapshots:
       yaml: 2.9.1
       zod: 4.6.7
 
-  kysely@0.28.17: {}
+  kysely@0.29.7: {}
 
   lan-network@0.2.1: {}
 

@@ -28,7 +28,7 @@
     "@standard-schema/spec": "^1.1.0",
     "@types/pg": "^8.20.0",
     "drizzle-orm": "^0.45.2",
-    "kysely": "^0.28.17",
+    "kysely": "^0.29.7",
     "oxfmt": "^0.74.0",
     "pg": "^8.20.0",
     "postgres": "3.4.7",
