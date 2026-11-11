@@ -13,13 +13,13 @@ import {fileURLToPath} from 'node:url';
 import {afterEach, expect, test} from 'vitest';
 
 /**
- * Smoke test for no-select-star as the linter runs it, not for its predicates.
+ * Smoke tests for the rules as the linter runs them, not for their predicates.
  *
  * The unit tests next door cover the predicates directly. They cannot catch the
  * failure that actually happened: no-select-star's include prefixes never
  * matched, so the rule quietly did not run and the only symptom was an
  * "unused disable directive" elsewhere. A rule that cannot report is
- * indistinguishable from a clean codebase, so the rule is exercised end to end
+ * indistinguishable from a clean codebase, so each rule is exercised end to end
  * against known-bad input.
  */
 
@@ -64,11 +64,11 @@ afterEach(() => {
 });
 
 /**
- * Lints `files` (path relative to the fixture root -> source) with only
- * no-select-star enabled. Returns the exit status and the files the rule
+ * Lints `files` (path relative to the fixture root -> source) with only `rule`
+ * enabled, as `ruleConfig`. Returns the exit status and the files the rule
  * reported, as POSIX paths.
  */
-function lintFixture(files) {
+function lintFixture(rule, ruleConfig, files) {
   const root = mkdtempSync(join(tmpdir(), 'zero-plugin-smoke-'));
   fixtureRoots.push(root);
   for (const [relativePath, source] of Object.entries(files)) {
@@ -92,10 +92,7 @@ function lintFixture(files) {
         perf: 'off',
       },
       rules: {
-        'zero/no-select-star': [
-          'error',
-          {include: ['packages/zero-cache/src/']},
-        ],
+        [rule]: ruleConfig,
       },
     }),
   );
@@ -114,8 +111,9 @@ function lintFixture(files) {
       {cause},
     );
   }
+  const code = `zero(${rule.slice('zero/'.length)})`;
   const reported = (report.diagnostics ?? [])
-    .filter(diagnostic => diagnostic.code === 'zero(no-select-star)')
+    .filter(diagnostic => diagnostic.code === code)
     .map(diagnostic => diagnostic.filename.replaceAll('\\', '/'));
   return {status: result.status, reported};
 }
@@ -123,10 +121,14 @@ function lintFixture(files) {
 const selectStar = 'const sql = `SELECT * FROM issues`;\nexport default sql;\n';
 
 test('no-select-star reports SELECT * inside the included paths, and only there', () => {
-  const {status, reported} = lintFixture({
-    'packages/zero-cache/src/query.ts': selectStar,
-    'packages/other/src/query.ts': selectStar,
-  });
+  const {status, reported} = lintFixture(
+    'zero/no-select-star',
+    ['error', {include: ['packages/zero-cache/src/']}],
+    {
+      'packages/zero-cache/src/query.ts': selectStar,
+      'packages/other/src/query.ts': selectStar,
+    },
+  );
 
   // The in-scope file is the canary for the out-of-scope one: its report proves
   // the plugin loaded and ran in this same run, so the other file's silence
@@ -134,5 +136,21 @@ test('no-select-star reports SELECT * inside the included paths, and only there'
   // Windows the in-scope half is also the regression test: the prefix did not
   // match backslash paths, so the rule reported nothing anywhere.
   expect(reported).toEqual(['packages/zero-cache/src/query.ts']);
+  expect(status).not.toBe(0);
+});
+
+const spawnVersion = command =>
+  `import {spawnSync} from 'node:child_process';\n` +
+  `export const result = spawnSync('${command}', ['--version']);\n`;
+
+test('no-bare-shim-spawn reports a shim spawned by bare name, and not an executable', () => {
+  const {status, reported} = lintFixture('zero/no-bare-shim-spawn', 'error', {
+    'npm.ts': spawnVersion('npm'),
+    'git.ts': spawnVersion('git'),
+  });
+
+  // As above, the reported file proves the rule loaded and ran in this run, so
+  // the other file's silence comes from the rule and not from a missing plugin.
+  expect(reported).toEqual(['npm.ts']);
   expect(status).not.toBe(0);
 });

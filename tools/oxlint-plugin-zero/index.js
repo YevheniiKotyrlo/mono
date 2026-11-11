@@ -1,5 +1,36 @@
 const selectStar = /\bselect\b[\s\S]*?\*(?=\s*(?:,|\bfrom\b))[\s\S]*?\bfrom\b/i;
 
+// Commands that are a `.CMD` shim on Windows, which `CreateProcess` does not
+// resolve: it appends only `.exe`. Limited to what this repository runs.
+const shimCommands = new Set([
+  'npm',
+  'npx',
+  'pnpm',
+  'tsc',
+  'tsx',
+  'vite',
+  'vitest',
+  'oxlint',
+  'oxfmt',
+  'turbo',
+  'prisma',
+  'drizzle-kit',
+  'playwright',
+  'sst',
+]);
+
+// `exec` and `execSync` always go through a shell, which resolves the shim.
+const spawnFunctions = new Set([
+  'spawn',
+  'spawnSync',
+  'execFile',
+  'execFileSync',
+]);
+
+const whitespace = /\s+/;
+const scriptFile = /\.(?:cmd|bat)$/i;
+const childProcessModules = new Set(['node:child_process', 'child_process']);
+
 const plugin = {
   meta: {
     name: 'zero',
@@ -56,6 +87,49 @@ const plugin = {
         };
       },
     },
+
+    'no-bare-shim-spawn': {
+      meta: {
+        type: 'problem',
+        docs: {
+          description:
+            'Disallow spawning a command that is a .CMD shim on Windows by bare name; resolve its JS entrypoint and spawn it with process.execPath.',
+        },
+        schema: [],
+        messages: {
+          resolveEntrypoint:
+            "Spawning '{{command}}' without a shell fails on Windows: it is a .cmd shim, which CreateProcess does not run. `shell: true` concatenates arguments instead of escaping them (Node DEP0190): spawn its JS entrypoint with process.execPath.",
+        },
+      },
+      create(context) {
+        const aliases = new Map();
+        return {
+          ImportDeclaration(node) {
+            if (!childProcessModules.has(node.source.value)) {
+              return;
+            }
+            for (const specifier of node.specifiers) {
+              if (specifier.type === 'ImportSpecifier') {
+                aliases.set(
+                  specifier.local.name,
+                  specifier.imported.name ?? specifier.imported.value,
+                );
+              }
+            }
+          },
+          CallExpression(node) {
+            const command = bareShimSpawnCommand(node, aliases);
+            if (command !== undefined) {
+              context.report({
+                node,
+                messageId: 'resolveEntrypoint',
+                data: {command},
+              });
+            }
+          },
+        };
+      },
+    },
   },
 };
 
@@ -96,5 +170,81 @@ function shouldCheck(filename, include) {
   );
 }
 
+function isStaticallyFalsy(node) {
+  if (node?.type === 'Literal') {
+    return !node.value;
+  }
+  if (node?.type === 'Identifier') {
+    return node.name === 'undefined';
+  }
+  return node?.type === 'UnaryExpression' && node.operator === 'void';
+}
+
+/**
+ * The shim command `node` spawns without a shell, or undefined. `aliases` maps
+ * the local names `child_process` functions were imported under.
+ */
+function bareShimSpawnCommand(node, aliases = new Map()) {
+  const callee = node.callee;
+  const calleeName =
+    callee?.type === 'Identifier'
+      ? (aliases.get(callee.name) ?? callee.name)
+      : callee?.type === 'MemberExpression' && !callee.computed
+        ? callee.property?.name
+        : undefined;
+  if (calleeName === undefined || !spawnFunctions.has(calleeName)) {
+    return undefined;
+  }
+  const [commandArgument, ...rest] = node.arguments ?? [];
+  const text = staticString(commandArgument);
+  if (text === undefined) {
+    return undefined;
+  }
+  const command = text.trim().split(whitespace)[0];
+  if (!shimCommands.has(command) && !scriptFile.test(command)) {
+    return undefined;
+  }
+  return rest.some(opensShell) ? undefined : command;
+}
+
+function staticString(node) {
+  if (node?.type === 'Literal') {
+    return typeof node.value === 'string' ? node.value : undefined;
+  }
+  if (node?.type === 'TemplateLiteral' && node.expressions.length === 0) {
+    return node.quasis[0]?.value.cooked ?? undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Whether an options object opens a shell: its last `shell` key decides, as it
+ * does at runtime, and a spread after it might hold one, so it counts as one.
+ * A statically falsy value — `false`, `undefined`, `void 0` — opens none.
+ */
+function opensShell(argument) {
+  if (argument?.type !== 'ObjectExpression') {
+    return false;
+  }
+  let opens = false;
+  for (const property of argument.properties) {
+    if (property.type === 'SpreadElement') {
+      opens = true;
+    } else if (
+      property.type === 'Property' &&
+      (property.key?.name === 'shell' || property.key?.value === 'shell')
+    ) {
+      opens = !isStaticallyFalsy(property.value);
+    }
+  }
+  return opens;
+}
+
 export default plugin;
-export {hasSelectStar, shouldCheck, stripCommentOnlyLines, toPosixPath};
+export {
+  bareShimSpawnCommand,
+  hasSelectStar,
+  shouldCheck,
+  stripCommentOnlyLines,
+  toPosixPath,
+};

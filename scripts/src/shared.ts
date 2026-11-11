@@ -1,5 +1,6 @@
 import {execFileSync} from 'node:child_process';
-import {appendFileSync, readFileSync, writeFileSync} from 'node:fs';
+import {appendFileSync, existsSync, readFileSync, writeFileSync} from 'node:fs';
+import {resolveNodeShimCommand} from './node-shim-command.ts';
 
 export const zeroPackageName = '@rocicorp/zero';
 export const zeroPackageJsonPath = 'packages/zero/package.json';
@@ -17,7 +18,10 @@ export type Exec = (
   args: readonly string[],
   options?: ExecOptions,
 ) => string;
-export type ExecError = Error & {status?: number | undefined; stderr?: Buffer};
+export type ExecError = Error & {
+  status?: number | undefined;
+  stderr?: string | Buffer;
+};
 
 export type StableZeroVersion = `${number}.${number}.${number}`;
 export type CanaryZeroVersion = `${StableZeroVersion}-canary.${number}`;
@@ -30,13 +34,40 @@ export type ZeroTag<V extends ZeroVersion = ZeroVersion> = `zero/v${V}`;
 export type MaintenanceZeroBranch = `maint/zero/${string}`;
 export type ReleaseBranch = 'main' | MaintenanceZeroBranch;
 
-export const defaultExec: Exec = (command, args, options) =>
-  String(
-    execFileSync(command, [...args], {
-      encoding: 'utf8',
-      ...options,
-    }) ?? '',
-  );
+/**
+ * Runs a command the way {@link resolveNodeShimCommand} says to. The platform,
+ * the entrypoint probe, the Node path and the spawn function are parameters, so
+ * a test asserts the same strings on every host.
+ */
+export function createExec({
+  execFile = execFileSync,
+  platform = process.platform,
+  fileExists = existsSync,
+  nodePath = process.execPath,
+}: {
+  execFile?: typeof execFileSync;
+  platform?: NodeJS.Platform;
+  fileExists?: (path: string) => boolean;
+  nodePath?: string;
+} = {}): Exec {
+  return (command, args, options) => {
+    const resolved = resolveNodeShimCommand(
+      command,
+      args,
+      platform,
+      fileExists,
+      nodePath,
+    );
+    return String(
+      execFile(resolved.command, resolved.args, {
+        encoding: 'utf8',
+        ...options,
+      }) ?? '',
+    );
+  };
+}
+
+export const defaultExec: Exec = createExec();
 
 const stableZeroVersionPattern = /^\d+\.\d+\.\d+$/;
 export const headVersionShaLength = 8;
@@ -188,8 +219,12 @@ export function npmZeroVersionExists(version: ZeroVersion, exec = defaultExec) {
     ) {
       return false;
     }
+    // A failure that never reached npm, such as a spawn error, has no stderr.
+    const reason =
+      stderr.trim() || (error instanceof Error ? error.message : '');
     throw new Error(
-      `Could not check npm for ${zeroPackageName}@${version}: ${stderr}`,
+      `Could not check npm for ${zeroPackageName}@${version}: ${reason}`,
+      {cause: error},
     );
   }
 }
