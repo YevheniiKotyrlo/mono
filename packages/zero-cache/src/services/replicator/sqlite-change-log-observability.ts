@@ -185,11 +185,12 @@ export function logSQLiteChangeLogStartup(
 export async function sqliteFileBytes(
   lc: LogContext,
   file: string,
+  statFile: (path: string) => Promise<{size: number}> = stat,
 ): Promise<number> {
   const sizes = await Promise.all(
     [file, `${file}-wal`, `${file}-wal2`].map(async path => {
       try {
-        return (await stat(path)).size;
+        return (await statFile(path)).size;
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
           lc.warn?.(`unable to stat ${path} for size metrics`, e);
