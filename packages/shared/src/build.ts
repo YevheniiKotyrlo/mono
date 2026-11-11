@@ -1,6 +1,49 @@
 // oxlint-disable e18e/prefer-static-regex
 import {readFileSync} from 'node:fs';
 
+// A path in either platform's shape: a leading separator or a drive prefix,
+// which no package name has. `path.isAbsolute` follows the host's rules instead.
+const FILE_PATH = /^(?:[/\\]|[A-Za-z]:)/;
+
+const TYPESCRIPT_FILE = /\.[cm]?tsx?$/;
+
+/**
+ * Whether a module id names a file rather than a package: a relative path, an
+ * absolute path on either platform, or a bundler-virtual (`\0`) id.
+ */
+export function isFileModuleId(id: string): boolean {
+  return id.startsWith('.') || FILE_PATH.test(id) || id.startsWith('\0');
+}
+
+/** The package a bare module id belongs to, scope included. */
+export function packageName(id: string): string {
+  const parts = id.split('/');
+  return id.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+}
+
+/**
+ * Whether the bundler leaves a module id as an import: every file is bundled,
+ * and a package only when it is on the inline list.
+ */
+export function isExternalModuleId(
+  id: string,
+  inlinedPackages: ReadonlySet<string>,
+): boolean {
+  return !isFileModuleId(id) && !inlinedPackages.has(packageName(id));
+}
+
+/**
+ * Whether a file specifier in build output loads from a consumer's install: a
+ * relative path to a module that is not TypeScript source.
+ */
+export function isResolvableFileSpecifier(id: string): boolean {
+  const [path] = id.split(/[?#]/, 1);
+  return (
+    (path.startsWith('./') || path.startsWith('../')) &&
+    !TYPESCRIPT_FILE.test(path)
+  );
+}
+
 const external = [
   'node:*',
   '@badrap/valita',

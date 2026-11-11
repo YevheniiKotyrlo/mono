@@ -8,7 +8,13 @@ import {fileURLToPath} from 'node:url';
 import {parse} from 'oxc-parser';
 import {type InlineConfig, build as viteBuild} from 'vite';
 import {assert} from '../../shared/src/asserts.ts';
-import {makeDefine} from '../../shared/src/build.ts';
+import {
+  isExternalModuleId,
+  isFileModuleId,
+  isResolvableFileSpecifier,
+  makeDefine,
+  packageName,
+} from '../../shared/src/build.ts';
 import * as workerUrls from '../../zero-cache/src/server/worker-urls.ts';
 
 const forBundleSizeDashboard = process.argv.includes('--bundle-sizes');
@@ -49,19 +55,7 @@ const allowedUndeclaredImports = new Set([
   'solid-js',
 ]);
 
-// '@scope/pkg/subpath' -> '@scope/pkg', 'pkg/subpath' -> 'pkg'.
-function packageName(id: string): string {
-  const parts = id.split('/');
-  return id.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
-}
-
-function external(id: string): boolean {
-  // Relative/absolute ids and bundler-virtual ids (\0-prefixed) get bundled.
-  if (id.startsWith('.') || id.startsWith('/') || id.startsWith('\0')) {
-    return false;
-  }
-  return !inlinedModules.has(packageName(id));
-}
+const external = (id: string) => isExternalModuleId(id, inlinedModules);
 
 const define = {
   ...makeDefine('unknown'),
@@ -281,7 +275,13 @@ async function assertBareImportsAreDeclared() {
   await Promise.all(
     files.map(async path => {
       for (const id of await collectImportSpecifiers(path)) {
-        if (id.startsWith('.') || id.startsWith('/') || id.startsWith('\0')) {
+        if (isFileModuleId(id)) {
+          if (!isResolvableFileSpecifier(id)) {
+            violations.set(id, [
+              ...(violations.get(id) ?? []),
+              path.slice(outDir.length + 1),
+            ]);
+          }
           continue;
         }
         const name = id.startsWith('node:')
@@ -302,9 +302,11 @@ async function assertBareImportsAreDeclared() {
       .map(([id, files]) => `  '${id}' in ${files.join(', ')}`)
       .join('\n');
     throw new Error(
-      `Build output imports undeclared modules:\n${details}\n` +
-        `Add them to dependencies in package.json, or to allowedUndeclaredImports ` +
-        `in build.ts if consumers provide them.`,
+      `Build output imports modules a consumer cannot resolve:\n${details}\n` +
+        `Add a bare specifier to dependencies in package.json, or to ` +
+        `allowedUndeclaredImports in build.ts if consumers provide it. A file ` +
+        `specifier means the module was left as an import rather than bundled: ` +
+        `check isExternalModuleId in shared/src/build.ts.`,
     );
   }
 }
