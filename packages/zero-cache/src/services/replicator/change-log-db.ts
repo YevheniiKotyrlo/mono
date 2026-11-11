@@ -375,18 +375,30 @@ function readAutoVacuum(db: Database): number {
  */
 export type AnchorResolver = (db: Database) => ChangeLogAnchor;
 
+/**
+ * @param beforeReplace called before a rebuild deletes the existing file, so a
+ *     caller can close the handles it caches on it first.
+ */
 export function openChangeLogDBForWriting(
   lc: LogContext,
   replicaFile: string,
   anchor: AnchorResolver,
+  beforeReplace: () => void,
 ): {db: Database; result: ReconcileResult; replacedFile: boolean} {
   const existed = existsSync(changeLogFileName(replicaFile));
-  const opened = openOrRebuildCorrupt(lc, replicaFile, anchor, existed);
+  const opened = openOrRebuildCorrupt(
+    lc,
+    replicaFile,
+    anchor,
+    existed,
+    beforeReplace,
+  );
   const {db, result, replacedFile} = ensureIncrementalAutoVacuum(
     lc,
     replicaFile,
     anchor,
     opened,
+    beforeReplace,
   );
   return {db, result, replacedFile};
 }
@@ -396,12 +408,13 @@ function openOrRebuildCorrupt(
   replicaFile: string,
   anchor: AnchorResolver,
   boundReconciliation: boolean,
+  beforeReplace: () => void,
 ): OpenedChangeLog {
   try {
     return openAndReconcile(lc, replicaFile, anchor, boundReconciliation);
   } catch (e) {
     if (e instanceof ChangeLogRebuildRequired) {
-      return rebuildChangeLog(lc, replicaFile, anchor, e);
+      return rebuildChangeLog(lc, replicaFile, anchor, beforeReplace, e);
     }
     if (!isSQLiteCorruption(e)) {
       throw e;
@@ -411,7 +424,7 @@ function openOrRebuildCorrupt(
     lc.error?.('rebuilding the corrupt SQLite change log', {
       sqliteChangeLog: {file},
     });
-    return rebuildChangeLog(lc, replicaFile, anchor);
+    return rebuildChangeLog(lc, replicaFile, anchor, beforeReplace);
   }
 }
 
@@ -440,6 +453,7 @@ function ensureIncrementalAutoVacuum(
   replicaFile: string,
   anchor: AnchorResolver,
   opened: OpenedChangeLog,
+  beforeReplace: () => void,
 ): OpenedChangeLog {
   if (opened.autoVacuum === AUTO_VACUUM_INCREMENTAL) {
     return opened;
@@ -449,7 +463,7 @@ function ensureIncrementalAutoVacuum(
     sqliteChangeLog: {file, autoVacuum: opened.autoVacuum},
   });
   opened.db.close();
-  const rebuilt = rebuildChangeLog(lc, replicaFile, anchor);
+  const rebuilt = rebuildChangeLog(lc, replicaFile, anchor, beforeReplace);
   if (rebuilt.autoVacuum !== AUTO_VACUUM_INCREMENTAL) {
     lc.error?.(
       'SQLite change log does not support incremental vacuum; ' +
@@ -465,6 +479,7 @@ function rebuildChangeLog(
   lc: LogContext,
   replicaFile: string,
   anchor: AnchorResolver,
+  beforeReplace: () => void,
   required?: ChangeLogRebuildRequired | undefined,
 ): OpenedChangeLog {
   if (required) {
@@ -479,6 +494,7 @@ function rebuildChangeLog(
       },
     );
   }
+  beforeReplace();
   deleteChangeLogDB(replicaFile);
   // The file is absent, so the reseed only drops empty/nonexistent tables. A
   // second failure is the environment's, not the old file's.
@@ -507,6 +523,7 @@ export function rebuildChangeLogDBForWriting(
     lc,
     replicaFile,
     () => anchor,
+    () => {},
     required,
   );
   return {db, result, replacedFile: true};
