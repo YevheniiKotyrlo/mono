@@ -3,6 +3,7 @@ import {readdir, readFile, writeFile} from 'node:fs/promises';
 import {dirname, join, relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parse} from 'oxc-parser';
+import {PACKAGE_ROOTS, packageOfRelativePath} from './package-of-path.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_ROOT = join(__dirname, '../../..');
@@ -59,16 +60,7 @@ async function findTypeScriptFiles(dir: string): Promise<string[]> {
 }
 
 function getPackageName(filePath: string): string | undefined {
-  // Convert to relative path from workspace root
-  const relativePath = relative(WORKSPACE_ROOT, filePath);
-  const parts = relativePath.split('/');
-  if (
-    parts.length >= 2 &&
-    (parts[0] === 'packages' || parts[0] === 'apps' || parts[0] === 'tools')
-  ) {
-    return `${parts[0]}/${parts[1]}`;
-  }
-  return undefined;
+  return packageOfRelativePath(relative(WORKSPACE_ROOT, filePath));
 }
 
 async function extractImports(
@@ -158,23 +150,22 @@ type AnalyzeResult = {
 async function analyzePackageDependencies(): Promise<AnalyzeResult> {
   console.log('Finding TypeScript files...');
 
-  const [packagesFiles, appsFiles, toolsFiles] = await Promise.all([
-    findTypeScriptFiles(join(WORKSPACE_ROOT, 'packages')),
-    findTypeScriptFiles(join(WORKSPACE_ROOT, 'apps')),
-    findTypeScriptFiles(join(WORKSPACE_ROOT, 'tools')),
-  ]);
-  const allFiles = [...packagesFiles, ...appsFiles, ...toolsFiles];
+  const perRoot = await Promise.all(
+    PACKAGE_ROOTS.map(dir => findTypeScriptFiles(join(WORKSPACE_ROOT, dir))),
+  );
+  const allFiles = perRoot.flat();
 
   console.log(`Found ${allFiles.length} TypeScript files to analyze`);
 
   // Build a map from package name to package path
   const packageNameToPath = new Map<string, string>();
-  for (const dir of ['packages', 'apps', 'tools']) {
+  for (const dir of PACKAGE_ROOTS) {
     const fullDir = join(WORKSPACE_ROOT, dir);
     const entries = await readdir(fullDir, {withFileTypes: true});
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        const pkgPath = join(dir, entry.name);
+        // The key `packageOfRelativePath` produces: forward-slashed on every host.
+        const pkgPath = `${dir}/${entry.name}`;
         const pkgJson = await getPackageJson(join(WORKSPACE_ROOT, pkgPath));
         if (pkgJson?.name) {
           packageNameToPath.set(pkgJson.name, pkgPath);
