@@ -1,6 +1,6 @@
 import {EventEmitter} from 'node:events';
-import {resolver} from '@rocicorp/resolver';
 import {expect, test, vi} from 'vitest';
+import {resolver} from '../../../shared/src/resolver.ts';
 import {
   deliverSignal,
   forkChildWorker,
